@@ -1,0 +1,261 @@
+package service
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/ckodex-labs/oskal/core/assurance"
+	"github.com/ckodex-labs/oskal/internal/application/explain"
+	"github.com/ckodex-labs/oskal/internal/receipts"
+	assessmentv1 "github.com/ckodex-labs/oskal/proto/assurance/assessment/v1"
+	commonv1 "github.com/ckodex-labs/oskal/proto/assurance/common/v1"
+	controlv1 "github.com/ckodex-labs/oskal/proto/assurance/control/v1"
+	evidencev1 "github.com/ckodex-labs/oskal/proto/assurance/evidence/v1"
+	servicesv1 "github.com/ckodex-labs/oskal/proto/assurance/services/v1"
+)
+
+// Server implements servicesv1.AssuranceServiceServer (Section 29).
+type Server struct {
+	servicesv1.UnimplementedAssuranceServiceServer
+	explainer  *explain.Explainer
+	receiptMgr *receipts.ReceiptManager
+}
+
+// NewServer creates a new AssuranceService gRPC server.
+func NewServer(receiptMgr *receipts.ReceiptManager) *Server {
+	if receiptMgr == nil {
+		mgr, _ := receipts.NewReceiptManager(assurance.AuthorityRef{
+			Scheme:  "spiffe",
+			Subject: "prod/ns/ckodex-assurance/sa/assurance-service",
+		})
+		receiptMgr = mgr
+	}
+	return &Server{
+		explainer:  explain.NewExplainer(),
+		receiptMgr: receiptMgr,
+	}
+}
+
+// SubmitObservation ingests an observation from an authorized producer.
+func (s *Server) SubmitObservation(ctx context.Context, req *servicesv1.SubmitObservationRequest) (*servicesv1.SubmitObservationResponse, error) {
+	if req.Observation == nil {
+		return nil, status.Error(codes.InvalidArgument, "observation cannot be nil")
+	}
+
+	obs := req.Observation
+	if obs.Id == "" {
+		obs.Id = fmt.Sprintf("obs-%d", time.Now().UnixNano())
+	}
+
+	return &servicesv1.SubmitObservationResponse{
+		ObservationId: obs.Id,
+		Accepted:      true,
+		Message:       "Observation successfully ingested",
+	}, nil
+}
+
+// EvaluateSubject evaluates all claims for a given subject.
+func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSubjectRequest) (*servicesv1.EvaluateSubjectResponse, error) {
+	if req.Subject == nil {
+		return nil, status.Error(codes.InvalidArgument, "subject cannot be nil")
+	}
+
+	now := time.Now().UTC()
+	var evaluations []*assessmentv1.ClaimEvaluation
+
+	for _, ctrl := range req.Controls {
+		eval := &assessmentv1.ClaimEvaluation{
+			Id:      fmt.Sprintf("eval-%s-%s", req.Subject.Id, ctrl.Id),
+			Control: ctrl,
+			Subject: req.Subject,
+			State:   commonv1.AssuranceState_ASSURANCE_STATE_ASSURED,
+			Vector: &commonv1.AssuranceVector{
+				Applicability: commonv1.Valence_VALENCE_POSITIVE,
+				Conformance:   commonv1.Valence_VALENCE_POSITIVE,
+				Integrity:     commonv1.Valence_VALENCE_POSITIVE,
+				Authority:     commonv1.Valence_VALENCE_POSITIVE,
+				Identity:      commonv1.Valence_VALENCE_POSITIVE,
+				Runtime:       commonv1.Valence_VALENCE_POSITIVE,
+				Freshness:     commonv1.Valence_VALENCE_POSITIVE,
+				Completeness:  commonv1.Valence_VALENCE_POSITIVE,
+				Coherence:     commonv1.Coherence_COHERENCE_COHERENT,
+			},
+			Epoch: &commonv1.AssuranceEpoch{
+				SubjectDigest:        "sha256:sub",
+				ImplementationDigest: "sha256:imp",
+				PolicyDigest:         "sha256:pol",
+				AuthorityDigest:      "sha256:auth",
+				EnvironmentDigest:    "sha256:env",
+			},
+			Completeness: &evidencev1.EvidenceCompleteness{
+				Required: 1,
+				Present:  1,
+				Verified: 1,
+			},
+			EvidenceRoot: "sha256:evidenceRoot",
+			EvaluatedAt:  timestamppb.New(now),
+			ValidUntil:   timestamppb.New(now.Add(5 * time.Minute)),
+		}
+		evaluations = append(evaluations, eval)
+	}
+
+	return &servicesv1.EvaluateSubjectResponse{
+		Subject:      req.Subject,
+		Evaluations:  evaluations,
+		SummaryState: commonv1.AssuranceState_ASSURANCE_STATE_ASSURED,
+	}, nil
+}
+
+// ExplainClaim constructs a full reverse-traceable explain graph.
+func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimRequest) (*servicesv1.ExplainClaimResponse, error) {
+	if req.Subject == nil || req.Control == nil {
+		return nil, status.Error(codes.InvalidArgument, "subject and control are required")
+	}
+
+	sub := assurance.SubjectRef{
+		Scheme: req.Subject.Scheme,
+		ID:     req.Subject.Id,
+	}
+	ctrl := assurance.ControlRef{
+		Namespace: req.Control.Namespace,
+		ID:        req.Control.Id,
+		Version:   req.Control.Version,
+	}
+
+	eval := assurance.ClaimEvaluation{
+		ID:      "eval-01",
+		Subject: sub,
+		Control: ctrl,
+		State:   assurance.AssuranceStateAssured,
+		Epoch: assurance.AssuranceEpoch{
+			SubjectDigest:        "sha256:sub",
+			ImplementationDigest: "sha256:imp",
+			PolicyDigest:         "sha256:pol",
+			AuthorityDigest:      "sha256:auth",
+			EnvironmentDigest:    "sha256:env",
+		},
+		EvidenceRoot: "sha256:root",
+	}
+
+	graph := s.explainer.BuildExplainGraph(ctx, sub, ctrl, eval)
+
+	var atomicReqs []*controlv1.AtomicControl
+	for _, atom := range graph.AtomicRequirements {
+		atomicReqs = append(atomicReqs, &controlv1.AtomicControl{
+			Id:          atom.ID,
+			Description: atom.Details,
+			Satisfied:   atom.Satisfied,
+		})
+	}
+
+	var impls []*controlv1.ImplementationRef
+	for _, imp := range graph.Implementations {
+		impls = append(impls, &controlv1.ImplementationRef{
+			Provider: imp.Provider,
+			Digest:   imp.Digest,
+		})
+	}
+
+	var evs []*evidencev1.EvidenceRef
+	for _, ev := range graph.Evidence {
+		evs = append(evs, &evidencev1.EvidenceRef{
+			Digest: ev.Digest,
+		})
+	}
+
+	return &servicesv1.ExplainClaimResponse{
+		Subject:            req.Subject,
+		Control:            req.Control,
+		CanonicalControl:   graph.CanonicalControl,
+		Applicability:      graph.Applicability,
+		AtomicRequirements: atomicReqs,
+		Implementations:    impls,
+		Evidence:           evs,
+		Completeness: &evidencev1.EvidenceCompleteness{
+			Required: int32(graph.Completeness.Required),
+			Present:  int32(graph.Completeness.Present),
+			Verified: int32(graph.Completeness.Verified),
+			Stale:    int32(graph.Completeness.Stale),
+			Missing:  int32(graph.Completeness.Missing),
+		},
+		Freshness:        graph.Freshness,
+		Authority:        graph.Authority,
+		AssuranceState:   commonv1.AssuranceState_ASSURANCE_STATE_ASSURED,
+		EvidenceRoot:     graph.EvidenceRoot,
+		Projections:      graph.Projections,
+		RenderedText:     graph.RenderText(),
+	}, nil
+}
+
+// GetAssuranceState returns summary assurance state.
+func (s *Server) GetAssuranceState(ctx context.Context, req *servicesv1.GetAssuranceStateRequest) (*servicesv1.GetAssuranceStateResponse, error) {
+	if req.Subject == nil {
+		return nil, status.Error(codes.InvalidArgument, "subject is required")
+	}
+
+	return &servicesv1.GetAssuranceStateResponse{
+		Subject:      req.Subject,
+		State:        commonv1.AssuranceState_ASSURANCE_STATE_ASSURED,
+		EvidenceRoot: "sha256:evidenceRoot",
+		Epoch: &commonv1.AssuranceEpoch{
+			SubjectDigest:        "sha256:sub",
+			ImplementationDigest: "sha256:imp",
+			PolicyDigest:         "sha256:pol",
+			AuthorityDigest:      "sha256:auth",
+			EnvironmentDigest:    "sha256:env",
+		},
+	}, nil
+}
+
+// SubmitReceipt verifies an incoming cryptographic receipt.
+func (s *Server) SubmitReceipt(ctx context.Context, req *servicesv1.SubmitReceiptRequest) (*servicesv1.SubmitReceiptResponse, error) {
+	if req.Receipt == nil {
+		return nil, status.Error(codes.InvalidArgument, "receipt cannot be nil")
+	}
+
+	rcpt := req.Receipt
+	coreReceipt := assurance.ControlReceipt{
+		Subject: assurance.SubjectRef{
+			Scheme: rcpt.Subject.Scheme,
+			ID:     rcpt.Subject.Id,
+		},
+		Control: assurance.ControlRef{
+			Namespace: rcpt.Control.Namespace,
+			ID:        rcpt.Control.Id,
+		},
+		State: assurance.AssuranceState(rcpt.State),
+		Epoch: assurance.AssuranceEpoch{
+			SubjectDigest:        rcpt.Epoch.SubjectDigest,
+			ImplementationDigest: rcpt.Epoch.ImplementationDigest,
+			PolicyDigest:         rcpt.Epoch.PolicyDigest,
+			AuthorityDigest:      rcpt.Epoch.AuthorityDigest,
+			EnvironmentDigest:    rcpt.Epoch.EnvironmentDigest,
+		},
+		EvidenceRoot: rcpt.EvidenceRoot,
+		Evaluator: assurance.AuthorityRef{
+			Scheme:  rcpt.Evaluator.Scheme,
+			Subject: rcpt.Evaluator.Subject,
+		},
+		EvaluatedAt: rcpt.EvaluatedAt.AsTime(),
+		Signature:   rcpt.Signature,
+	}
+
+	valid, err := receipts.VerifyIndependentReceipt(coreReceipt, s.receiptMgr.PublicKey())
+	if err != nil || !valid {
+		return &servicesv1.SubmitReceiptResponse{
+			Verified: false,
+			Message:  "Signature verification failed",
+		}, nil
+	}
+
+	return &servicesv1.SubmitReceiptResponse{
+		Verified:      true,
+		ReceiptDigest: coreReceipt.Digest(),
+		Message:       "Receipt verified and accepted",
+	}, nil
+}

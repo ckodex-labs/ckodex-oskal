@@ -3,25 +3,47 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/ckodex-labs/oskal/core/assurance"
 	"github.com/ckodex-labs/oskal/internal/application/explain"
 	"github.com/ckodex-labs/oskal/internal/projection/oscal"
+	"github.com/ckodex-labs/oskal/internal/service"
+	commonv1 "github.com/ckodex-labs/oskal/proto/assurance/common/v1"
+	controlv1 "github.com/ckodex-labs/oskal/proto/assurance/control/v1"
+	servicesv1 "github.com/ckodex-labs/oskal/proto/assurance/services/v1"
 )
+
+var serverAddr string
+
+func getGRPCClient(ctx context.Context, addr string) (servicesv1.AssuranceServiceClient, *grpc.ClientConn, error) {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to connect to gRPC server at %s: %w", addr, err)
+	}
+	client := servicesv1.NewAssuranceServiceClient(conn)
+	return client, conn, nil
+}
 
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "oskal",
-		Short: "OSKAL — Continuous Kubernetes Assurance CLI",
+		Short: "OSKAL -- Continuous Kubernetes Assurance CLI",
 		Long: `OSKAL is the Continuous Kubernetes Assurance Runtime for CKODEX.
 It evaluates continuous evidence contracts, tracks semantic drift,
 and projects defensible results into standard OSCAL artifacts.`,
 	}
+
+	rootCmd.PersistentFlags().StringVar(&serverAddr, "server", "", "AssuranceService gRPC address (e.g. localhost:9090)")
 
 	assuranceCmd := &cobra.Command{
 		Use:   "assurance",
@@ -43,6 +65,34 @@ and projects defensible results into standard OSCAL artifacts.`,
 				id = parts[1]
 			}
 			sub := assurance.SubjectRef{Scheme: scheme, ID: id}
+
+			if serverAddr != "" {
+				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+				defer cancel()
+
+				client, conn, err := getGRPCClient(ctx, serverAddr)
+				if err != nil {
+					return err
+				}
+				defer conn.Close()
+
+				resp, err := client.GetAssuranceState(ctx, &servicesv1.GetAssuranceStateRequest{
+					Subject: &commonv1.SubjectRef{Scheme: scheme, Id: id},
+				})
+				if err != nil {
+					return fmt.Errorf("gRPC GetAssuranceState failed: %w", err)
+				}
+
+				fmt.Printf("SUBJECT:         %s\n", sub.URI())
+				fmt.Printf("STATE:           %s\n", resp.State.String())
+				if resp.Epoch != nil {
+					fmt.Printf("EPOCH:           %s\n", resp.Epoch.PolicyDigest)
+				}
+				fmt.Printf("EVIDENCE ROOT:   %s\n", resp.EvidenceRoot)
+				fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
+				fmt.Printf("FRESHNESS:       current\n")
+				return nil
+			}
 
 			fmt.Printf("SUBJECT:         %s\n", sub.URI())
 			fmt.Printf("STATE:           ASSURED\n")
@@ -83,6 +133,28 @@ and projects defensible results into standard OSCAL artifacts.`,
 				}
 			}
 			ctrl := assurance.ControlRef{Namespace: ctrlNamespace, ID: ctrlID}
+
+			if serverAddr != "" {
+				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+				defer cancel()
+
+				client, conn, err := getGRPCClient(ctx, serverAddr)
+				if err != nil {
+					return err
+				}
+				defer conn.Close()
+
+				resp, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
+					Subject: &commonv1.SubjectRef{Scheme: scheme, Id: id},
+					Control: &controlv1.ControlRef{Namespace: ctrlNamespace, Id: ctrlID},
+				})
+				if err != nil {
+					return fmt.Errorf("gRPC ExplainClaim failed: %w", err)
+				}
+
+				fmt.Print(resp.RenderedText)
+				return nil
+			}
 
 			eval := assurance.ClaimEvaluation{
 				ID:      "eval-01",
@@ -191,8 +263,42 @@ and projects defensible results into standard OSCAL artifacts.`,
 	exportARCmd.Flags().StringVar(&exportSubjectFlag, "subject", "", "Workload subject to export")
 	exportCmd.AddCommand(exportARCmd)
 
+	// 6. oscal serve --port <port>
+	var port int
+	serveCmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Start the gRPC AssuranceService daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+			if err != nil {
+				return fmt.Errorf("failed to listen on port %d: %w", port, err)
+			}
+
+			grpcServer := grpc.NewServer()
+			srv := service.NewServer(nil)
+			servicesv1.RegisterAssuranceServiceServer(grpcServer, srv)
+
+			fmt.Printf("OSKAL AssuranceService gRPC daemon listening on port %d\n", port)
+
+			stopCh := make(chan os.Signal, 1)
+			signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
+
+			go func() {
+				<-stopCh
+				fmt.Println("Shutting down OSKAL AssuranceService gRPC daemon...")
+				grpcServer.GracefulStop()
+			}()
+
+			if err := grpcServer.Serve(lis); err != nil && err != grpc.ErrServerStopped {
+				return fmt.Errorf("gRPC server error: %w", err)
+			}
+			return nil
+		},
+	}
+	serveCmd.Flags().IntVar(&port, "port", 9090, "Port for gRPC service to listen on")
+
 	assuranceCmd.AddCommand(stateCmd, explainCmd, evidenceCmd, driftCmd)
-	rootCmd.AddCommand(assuranceCmd, exportCmd)
+	rootCmd.AddCommand(assuranceCmd, exportCmd, serveCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

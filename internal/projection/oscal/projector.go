@@ -137,6 +137,44 @@ type SSPWrapper struct {
 	} `json:"system-security-plan"`
 }
 
+// 4. Assessment Plan Document
+type OscalAssessmentSubject struct {
+	Type        string `json:"type"`
+	Description string `json:"description"`
+}
+
+type OscalAssessmentActivity struct {
+	UUID        string `json:"uuid"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+type AssessmentPlanWrapper struct {
+	AssessmentPlan struct {
+		UUID               string                    `json:"uuid"`
+		Metadata           OscalMetadata             `json:"metadata"`
+		AssessmentSubjects []OscalAssessmentSubject   `json:"assessment-subjects"`
+		Tasks              []OscalAssessmentActivity `json:"tasks"`
+		ReviewedControls   []string                  `json:"reviewed-controls"`
+	} `json:"assessment-plan"`
+}
+
+// 5. Plan of Action and Milestones Document
+type OscalPOAMItem struct {
+	UUID        string     `json:"uuid"`
+	Title       string     `json:"title"`
+	Description string     `json:"description"`
+	Properties  []Property `json:"properties,omitempty"`
+}
+
+type POAMWrapper struct {
+	PlanOfActionAndMilestones struct {
+		UUID      string          `json:"uuid"`
+		Metadata  OscalMetadata   `json:"metadata"`
+		POAMItems []OscalPOAMItem `json:"poam-items"`
+	} `json:"plan-of-action-and-milestones"`
+}
+
 // Projector converts continuous assurance evaluations into OSCAL v1.2.3 artifacts.
 type Projector struct{}
 
@@ -327,6 +365,82 @@ func (p *Projector) ProjectSSP(
 				},
 			},
 		)
+	}
+
+	return json.MarshalIndent(wrapper, "", "  ")
+}
+
+// ProjectAssessmentPlan builds an OSCAL v1.2.3 Assessment Plan projection (Section 45).
+func (p *Projector) ProjectAssessmentPlan(
+	ctx context.Context,
+	subject assurance.SubjectRef,
+	contract assurance.EvidenceContract,
+	controls []assurance.ControlRef,
+) ([]byte, error) {
+	now := time.Now().UTC()
+
+	wrapper := AssessmentPlanWrapper{}
+	ap := &wrapper.AssessmentPlan
+	ap.UUID = uuid.NewString()
+	ap.Metadata = OscalMetadata{
+		Title:        fmt.Sprintf("Continuous Assessment Plan for %s", subject.URI()),
+		Published:    now,
+		LastModified: now,
+		Version:      "1.0.0",
+		OscalVersion: "1.2.3",
+	}
+
+	ap.AssessmentSubjects = append(ap.AssessmentSubjects, OscalAssessmentSubject{
+		Type:        "kubernetes-workload",
+		Description: subject.URI(),
+	})
+
+	for _, req := range contract.Requirements {
+		ap.Tasks = append(ap.Tasks, OscalAssessmentActivity{
+			UUID:        uuid.NewString(),
+			Title:       fmt.Sprintf("Evidence Verification: %s", req.EvidenceType),
+			Description: fmt.Sprintf("Evaluated against accepted producers with max age %s", req.MaxAge),
+		})
+	}
+
+	for _, c := range controls {
+		ap.ReviewedControls = append(ap.ReviewedControls, c.Canonical())
+	}
+
+	return json.MarshalIndent(wrapper, "", "  ")
+}
+
+// ProjectPOAM builds an OSCAL v1.2.3 Plan of Action and Milestones projection (Section 47).
+func (p *Projector) ProjectPOAM(
+	ctx context.Context,
+	subject assurance.SubjectRef,
+	findings []assurance.Finding,
+) ([]byte, error) {
+	now := time.Now().UTC()
+
+	wrapper := POAMWrapper{}
+	poam := &wrapper.PlanOfActionAndMilestones
+	poam.UUID = uuid.NewString()
+	poam.Metadata = OscalMetadata{
+		Title:        fmt.Sprintf("Plan of Action and Milestones for %s", subject.URI()),
+		Published:    now,
+		LastModified: now,
+		Version:      "1.0.0",
+		OscalVersion: "1.2.3",
+	}
+
+	for _, f := range findings {
+		item := OscalPOAMItem{
+			UUID:        uuid.NewString(),
+			Title:       f.Title,
+			Description: f.Description,
+			Properties: []Property{
+				{Name: "control-id", Value: f.Control.Canonical()},
+				{Name: "severity", Value: f.Severity},
+				{Name: "discovered-at", Value: f.DiscoveredAt.Format(time.RFC3339)},
+			},
+		}
+		poam.POAMItems = append(poam.POAMItems, item)
 	}
 
 	return json.MarshalIndent(wrapper, "", "  ")

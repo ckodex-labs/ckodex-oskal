@@ -149,3 +149,46 @@ func TestProjectComponentDefinitionAndSSP(t *testing.T) {
 		t.Fatalf("unexpected SSP output: %s", string(sspBytes))
 	}
 }
+
+func TestProjectAssessmentPlanAndPOAM(t *testing.T) {
+	projector := NewProjector()
+	sub := assurance.SubjectRef{Scheme: "k8s", ID: "payments/payments-api"}
+	contract := assurance.EvidenceContract{
+		ID: "contract-01",
+		Requirements: []assurance.EvidenceRequirement{
+			{ID: "req-1", EvidenceType: "admission", MaxAge: 5 * time.Minute},
+		},
+	}
+	controls := []assurance.ControlRef{
+		{Namespace: "nist-sp-800-53", ID: "AC-6"},
+	}
+
+	// 1. Assessment Plan
+	apBytes, err := projector.ProjectAssessmentPlan(context.Background(), sub, contract, controls)
+	if err != nil {
+		t.Fatalf("failed to project assessment plan: %v", err)
+	}
+	if !strings.Contains(string(apBytes), "assessment-plan") || !strings.Contains(string(apBytes), "nist-sp-800-53:AC-6") {
+		t.Fatalf("unexpected assessment plan output: %s", string(apBytes))
+	}
+
+	// 2. POA&M
+	findings := []assurance.Finding{
+		{
+			ID:           "find-01",
+			Subject:      sub,
+			Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
+			Severity:     "HIGH",
+			Title:        "Remediation required for privileged container",
+			Description:  "Pod security admission denied root execution",
+			DiscoveredAt: time.Now().UTC(),
+		},
+	}
+	poamBytes, err := projector.ProjectPOAM(context.Background(), sub, findings)
+	if err != nil {
+		t.Fatalf("failed to project poam: %v", err)
+	}
+	if !strings.Contains(string(poamBytes), "plan-of-action-and-milestones") || !strings.Contains(string(poamBytes), "Remediation required") {
+		t.Fatalf("unexpected poam output: %s", string(poamBytes))
+	}
+}
