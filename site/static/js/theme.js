@@ -41,6 +41,28 @@
       });
     });
 
+    // Mobile Navigation Toggle
+    const navToggle = document.getElementById('nav-toggle');
+    const siteNav = document.getElementById('site-nav');
+    if (navToggle && siteNav) {
+      navToggle.addEventListener('click', () => {
+        const isOpen = siteNav.classList.toggle('ck-nav-open');
+        navToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+        navToggle.innerHTML = isOpen ? '<span aria-hidden="true">[CLOSE]</span>' : '<span aria-hidden="true">[MENU]</span>';
+      });
+
+      // Close nav when clicking a link on mobile
+      siteNav.querySelectorAll('a').forEach(link => {
+        link.addEventListener('click', () => {
+          if (window.innerWidth <= 900) {
+            siteNav.classList.remove('ck-nav-open');
+            navToggle.setAttribute('aria-expanded', 'false');
+            navToggle.innerHTML = '<span aria-hidden="true">[MENU]</span>';
+          }
+        });
+      });
+    }
+
     // Evidence margin collapse / expand
     const marginToggle = document.getElementById('margin-toggle');
     const marginAside = document.querySelector('.ck-shell__margin');

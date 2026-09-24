@@ -1,84 +1,92 @@
-<nav class="ck-shell__nav" role="navigation" aria-label="Documentation Navigation" style="padding: var(--ck-sp-4) var(--ck-sp-3);">
-  <div style="margin-bottom: var(--ck-sp-4); padding-bottom: var(--ck-sp-2); border-bottom: 1px solid var(--ck-hairline);">
-    <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-fg-mute); margin-bottom: var(--ck-sp-2); letter-spacing: 0.08em;">
-      DIATAXIS FRAMEWORK
-    </div>
-    
-    <div style="margin-bottom: var(--ck-sp-3);">
-      <a href="/tutorials/" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 3px 6px;">
-        1. TUTORIALS
-      </a>
-      <ul style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
-        <li><a href="/tutorials/first-continuous-assurance-loop/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">First Assurance Loop</a></li>
-        <li><a href="/tutorials/inprocess-sdk-integration/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">In-Process SDK Setup</a></li>
-      </ul>
+<nav id="site-nav" class="ck-shell__nav" role="navigation" aria-label="Documentation Navigation">
+  <div class="ck-nav-scroll-wrap" style="padding: var(--ck-sp-4) var(--ck-sp-3); width: 100%;">
+    <!-- Diataxis Sections -->
+    <div style="margin-bottom: var(--ck-sp-4); padding-bottom: var(--ck-sp-2); border-bottom: 1px solid var(--ck-hairline);">
+      <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-fg-mute); margin-bottom: var(--ck-sp-2); letter-spacing: 0.08em;">
+        DIATAXIS FRAMEWORK
+      </div>
+      
+      <!-- 1. Tutorials -->
+      <div style="margin-bottom: var(--ck-sp-3);">
+        <a href="/tutorials/" class="ck-nav-heading" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 4px 6px;">
+          1. TUTORIALS
+        </a>
+        <ul class="ck-nav-sublist" style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
+          <li><a href="/tutorials/first-continuous-assurance-loop/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">First Assurance Loop</a></li>
+          <li><a href="/tutorials/inprocess-sdk-integration/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">In-Process SDK Setup</a></li>
+        </ul>
+      </div>
+
+      <!-- 2. How-To -->
+      <div style="margin-bottom: var(--ck-sp-3);">
+        <a href="/how-to/" class="ck-nav-heading" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 4px 6px;">
+          2. HOW-TO GUIDES
+        </a>
+        <ul class="ck-nav-sublist" style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
+          <li><a href="/how-to/bind-controls-to-cel/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Bind Controls to CEL</a></li>
+          <li><a href="/how-to/configure-spiffe-authority/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">SPIFFE/SPIRE Authority</a></li>
+          <li><a href="/how-to/verify-sigstore-provenance/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Sigstore &amp; AI-BOMs</a></li>
+          <li><a href="/how-to/export-oscal-artifacts/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Export NIST OSCAL 1.2.3</a></li>
+          <li><a href="/how-to/drift-detection-epoch-recovery/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Epoch Drift Recovery</a></li>
+          <li><a href="/how-to/run-dagger-ssdlc-pipeline/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Dagger SSDLC Pipeline</a></li>
+        </ul>
+      </div>
+
+      <!-- 3. Reference -->
+      <div style="margin-bottom: var(--ck-sp-3);">
+        <a href="/reference/" class="ck-nav-heading" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 4px 6px;">
+          3. REFERENCE
+        </a>
+        <ul class="ck-nav-sublist" style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
+          <li><a href="/reference/cli/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">OSKAL CLI Suite</a></li>
+          <li><a href="/reference/crds/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Kubernetes CRDs (5)</a></li>
+          <li><a href="/reference/go-sdk/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Go SDK (`pkg/oskal`)</a></li>
+          <li><a href="/reference/receipt-merkle-spec/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Receipts &amp; Merkle Root</a></li>
+          <li><a href="/reference/protobuf-services/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">gRPC AssuranceService</a></li>
+        </ul>
+      </div>
+
+      <!-- 4. Explanation -->
+      <div style="margin-bottom: var(--ck-sp-3);">
+        <a href="/explanation/" class="ck-nav-heading" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 4px 6px;">
+          4. EXPLANATION
+        </a>
+        <ul class="ck-nav-sublist" style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
+          <li><a href="/explanation/canonical-triad/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">The Canonical Triad</a></li>
+          <li><a href="/explanation/vector-state-vs-booleans/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Vector State S(e,t)</a></li>
+          <li><a href="/explanation/constitutional-invariants/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Invariants I-01 to I-10</a></li>
+          <li><a href="/explanation/airgap-and-defense-in-depth/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Air-Gap Architecture</a></li>
+        </ul>
+      </div>
     </div>
 
-    <div style="margin-bottom: var(--ck-sp-3);">
-      <a href="/how-to/" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 3px 6px;">
-        2. HOW-TO GUIDES
-      </a>
-      <ul style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
-        <li><a href="/how-to/bind-controls-to-cel/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">Bind Controls to CEL</a></li>
-        <li><a href="/how-to/configure-spiffe-authority/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">SPIFFE/SPIRE Authority</a></li>
-        <li><a href="/how-to/verify-sigstore-provenance/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">Sigstore &amp; AI-BOMs</a></li>
-        <li><a href="/how-to/export-oscal-artifacts/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">Export NIST OSCAL 1.2.3</a></li>
-        <li><a href="/how-to/drift-detection-epoch-recovery/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">Epoch Drift Recovery</a></li>
-        <li><a href="/how-to/run-dagger-ssdlc-pipeline/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">Dagger SSDLC Pipeline</a></li>
+    <!-- Personas -->
+    <div>
+      <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-fg-mute); margin-bottom: var(--ck-sp-2); letter-spacing: 0.08em;">
+        PERSONA JOURNEYS
+      </div>
+      <ul style="list-style: none; padding-left: var(--ck-sp-2); margin: 0;">
+        <li style="margin-bottom: 4px;">
+          <a href="/personas/security-officer-auditor/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 4px 6px;">
+            Auditor &amp; CISO
+          </a>
+        </li>
+        <li style="margin-bottom: 4px;">
+          <a href="/personas/platform-sre/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 4px 6px;">
+            Platform SRE
+          </a>
+        </li>
+        <li style="margin-bottom: 4px;">
+          <a href="/personas/workload-ai-developer/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 4px 6px;">
+            Workload &amp; AI Dev
+          </a>
+        </li>
+        <li style="margin-bottom: 4px;">
+          <a href="/personas/secops-risk-analyst/" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 4px 6px;">
+            SecOps &amp; Risk Analyst
+          </a>
+        </li>
       </ul>
     </div>
-
-    <div style="margin-bottom: var(--ck-sp-3);">
-      <a href="/reference/" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 3px 6px;">
-        3. REFERENCE
-      </a>
-      <ul style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
-        <li><a href="/reference/cli/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">OSKAL CLI Suite</a></li>
-        <li><a href="/reference/crds/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">Kubernetes CRDs (5)</a></li>
-        <li><a href="/reference/go-sdk/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">Go SDK (`pkg/oskal`)</a></li>
-        <li><a href="/reference/receipt-merkle-spec/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">Receipts &amp; Merkle Root</a></li>
-        <li><a href="/reference/protobuf-services/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">gRPC AssuranceService</a></li>
-      </ul>
-    </div>
-
-    <div style="margin-bottom: var(--ck-sp-3);">
-      <a href="/explanation/" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 3px 6px;">
-        4. EXPLANATION
-      </a>
-      <ul style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
-        <li><a href="/explanation/canonical-triad/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">The Canonical Triad</a></li>
-        <li><a href="/explanation/vector-state-vs-booleans/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">Vector State S(e,t)</a></li>
-        <li><a href="/explanation/constitutional-invariants/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">Invariants I-01 to I-10</a></li>
-        <li><a href="/explanation/airgap-and-defense-in-depth/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 2px 0;">Air-Gap Architecture</a></li>
-      </ul>
-    </div>
-  </div>
-
-  <div>
-    <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-fg-mute); margin-bottom: var(--ck-sp-2); letter-spacing: 0.08em;">
-      PERSONA JOURNEYS
-    </div>
-    <ul style="list-style: none; padding-left: var(--ck-sp-2); margin: 0;">
-      <li style="margin-bottom: 4px;">
-        <a href="/personas/security-officer-auditor/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 2px 4px;">
-          Auditor &amp; CISO
-        </a>
-      </li>
-      <li style="margin-bottom: 4px;">
-        <a href="/personas/platform-sre/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 2px 4px;">
-          Platform SRE
-        </a>
-      </li>
-      <li style="margin-bottom: 4px;">
-        <a href="/personas/workload-ai-developer/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 2px 4px;">
-          Workload &amp; AI Dev
-        </a>
-      </li>
-      <li style="margin-bottom: 4px;">
-        <a href="/personas/secops-risk-analyst/" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 2px 4px;">
-          SecOps &amp; Risk Analyst
-        </a>
-      </li>
-    </ul>
   </div>
 </nav>

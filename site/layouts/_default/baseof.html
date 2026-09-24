@@ -7,7 +7,11 @@
   <link rel="stylesheet" href="/css/styles.css">
   <link rel="icon" type="image/svg+xml" href="/assets/logos/mark-a2-favicon.svg">
   <style>
-    /* Custom documentation helpers respecting CKODEX-DS-3 semantic budget */
+    /* ==========================================================================
+       RESPONSIVE & TOUCH DESIGN OVERHAUL (CKODEX-DS-3 & CORTAIX-DS-1 Section 10)
+       ========================================================================== */
+
+    /* Fluid typography and measures */
     .ck-doc-header {
       margin-bottom: var(--ck-sp-6);
       padding-bottom: var(--ck-sp-4);
@@ -18,22 +22,24 @@
       font-size: 11px;
       color: var(--ck-fg-mute);
       display: flex;
-      gap: var(--ck-sp-3);
+      flex-wrap: wrap;
+      gap: var(--ck-sp-2) var(--ck-sp-3);
       align-items: center;
       margin-bottom: var(--ck-sp-2);
       text-transform: uppercase;
     }
     .ck-doc-title {
       font-family: var(--ck-ff-serif);
-      font-size: 32px;
+      font-size: clamp(26px, 4vw, 36px);
       font-weight: 400;
       color: var(--ck-fg-0);
       margin: 0 0 var(--ck-sp-2) 0;
       line-height: 1.2;
+      word-break: break-word;
     }
     .ck-doc-desc {
       font-family: var(--ck-ff-sans);
-      font-size: 15px;
+      font-size: clamp(14px, 2vw, 16px);
       color: var(--ck-fg-mute);
       margin: 0;
       line-height: 1.5;
@@ -44,10 +50,11 @@
       line-height: 1.65;
       color: var(--ck-fg-0);
       max-width: var(--ck-measure);
+      min-width: 0;
     }
     .ck-article-body h2 {
       font-family: var(--ck-ff-sans);
-      font-size: 20px;
+      font-size: clamp(18px, 3vw, 22px);
       font-weight: 600;
       margin: var(--ck-sp-8) 0 var(--ck-sp-3) 0;
       padding-bottom: var(--ck-sp-1);
@@ -56,7 +63,7 @@
     }
     .ck-article-body h3 {
       font-family: var(--ck-ff-sans);
-      font-size: 16px;
+      font-size: clamp(15px, 2.5vw, 17px);
       font-weight: 600;
       margin: var(--ck-sp-6) 0 var(--ck-sp-2) 0;
       color: var(--ck-fg-0);
@@ -68,17 +75,22 @@
       background: var(--ck-bg-1);
       border: 1px solid var(--ck-hairline);
       border-radius: 0;
+      word-break: break-word;
     }
     .ck-article-body pre {
       background: var(--ck-bg-1);
       border: 1px solid var(--ck-hairline);
       padding: var(--ck-sp-4);
       overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
       font-family: var(--ck-ff-mono);
       font-size: 12px;
       line-height: 1.5;
       margin: var(--ck-sp-4) 0;
+      max-width: 100%;
     }
+    
+    /* Responsive Table Wrapper */
     .ck-article-body table {
       width: 100%;
       border-collapse: collapse;
@@ -97,13 +109,8 @@
       text-transform: uppercase;
       letter-spacing: 0.05em;
     }
-    .ck-article-body blockquote {
-      border-left: 2px solid var(--ck-accent-rust);
-      margin: var(--ck-sp-4) 0;
-      padding-left: var(--ck-sp-4);
-      color: var(--ck-fg-mute);
-      font-style: normal;
-    }
+
+    /* Responsive Bento Grid */
     .ck-bento-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -119,9 +126,101 @@
       justify-content: space-between;
       text-decoration: none;
       color: inherit;
+      transition: border-color var(--ck-t-state) var(--ck-ease);
+      min-height: 140px;
     }
     .ck-bento-card:hover {
       border-color: var(--ck-accent-rust);
+    }
+
+    /* Non-colliding, bulletproof receipt layout */
+    .ck-receipt {
+      display: grid !important;
+      grid-template-columns: 2px 1fr !important;
+      gap: 0 10px !important;
+      align-items: stretch !important;
+      min-width: 0 !important;
+      width: 100% !important;
+    }
+    .ck-receipt__rule {
+      width: 2px !important;
+      background: var(--ck-hairline) !important;
+      min-height: 100% !important;
+    }
+    .ck-receipt--proof > .ck-receipt__rule {
+      background: var(--ck-proof-violet) !important;
+    }
+    .ck-receipt > div:not(.ck-receipt__rule) {
+      min-width: 0 !important;
+      overflow: hidden !important;
+    }
+
+    /* Breakpoint: <= 900px (Tablet & Mobile Stacking) */
+    @media (max-width: 900px) {
+      .ck-mobile-nav-toggle {
+        display: inline-flex !important;
+        align-items: center;
+        justify-content: center;
+      }
+      .ck-header-status {
+        display: none !important;
+      }
+      .ck-shell__nav {
+        display: none;
+        border-right: none !important;
+        border-bottom: 1px solid var(--ck-hairline) !important;
+        background: var(--ck-bg-1) !important;
+      }
+      .ck-shell__nav.ck-nav-open {
+        display: block !important;
+        position: static;
+        width: 100% !important;
+        max-height: 70vh;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+      .ck-shell__main {
+        padding: var(--ck-sp-5) var(--ck-sp-4) var(--ck-sp-8) !important;
+      }
+      .ck-shell__margin {
+        border-left: none !important;
+        border-top: 1px solid var(--ck-hairline) !important;
+        padding: var(--ck-sp-5) var(--ck-sp-4) var(--ck-sp-8) !important;
+        width: 100% !important;
+      }
+      .ck-nav-link {
+        padding: 8px 12px !important;
+        font-size: 13px !important;
+        min-height: 44px;
+        display: flex !important;
+        align-items: center;
+      }
+      .ck-bento-grid {
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)) !important;
+        gap: var(--ck-sp-3) !important;
+      }
+    }
+
+    /* Breakpoint: <= 560px (Small Mobile Phones) */
+    @media (max-width: 560px) {
+      .ck-header-badge, .ck-header-github {
+        display: none !important;
+      }
+      .ck-bento-grid {
+        grid-template-columns: 1fr !important;
+      }
+      .ck-shell__header {
+        padding: 0 var(--ck-sp-3) !important;
+      }
+      .ck-shell__main {
+        padding: var(--ck-sp-4) var(--ck-sp-3) var(--ck-sp-6) !important;
+      }
+      .ck-shell__margin {
+        padding: var(--ck-sp-4) var(--ck-sp-3) var(--ck-sp-6) !important;
+      }
+      .ck-shell__footer {
+        padding: var(--ck-sp-3) var(--ck-sp-3) !important;
+      }
     }
   </style>
 </head>

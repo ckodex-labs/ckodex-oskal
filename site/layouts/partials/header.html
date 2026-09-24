@@ -1,18 +1,23 @@
-<header class="ck-shell__header" role="banner">
-  <div style="display: flex; align-items: center; gap: var(--ck-sp-4);">
-    <a href="/" style="display: inline-flex; align-items: center; gap: var(--ck-sp-3); text-decoration: none; color: inherit;">
-      <img src="/assets/logos/mark-a-sealed-diamond.svg" alt="CKODEX Diamond" width="28" height="28" style="display: block;" />
-      <span style="font-family: var(--ck-ff-sans); font-weight: 600; font-size: var(--ck-fs-sm); letter-spacing: 0.05em; text-transform: uppercase;">
+<header class="ck-shell__header" role="banner" style="position: sticky; top: 0; z-index: 100;">
+  <div style="display: flex; align-items: center; gap: var(--ck-sp-3); min-width: 0;">
+    <!-- Mobile Navigation Toggle Button -->
+    <button id="nav-toggle" class="ck-btn ck-mobile-nav-toggle" type="button" aria-expanded="false" aria-label="Toggle Navigation Menu" style="display: none; padding: 6px 10px; font-family: var(--ck-ff-mono); font-size: 13px; min-height: 44px; min-width: 44px;">
+      <span aria-hidden="true">[MENU]</span>
+    </button>
+
+    <a href="/" style="display: inline-flex; align-items: center; gap: var(--ck-sp-2); text-decoration: none; color: inherit; min-width: 0;">
+      <img src="/assets/logos/mark-a-sealed-diamond.svg" alt="CKODEX Diamond" width="24" height="24" style="display: block; flex-shrink: 0;" />
+      <span style="font-family: var(--ck-ff-sans); font-weight: 600; font-size: var(--ck-fs-sm); letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap;">
         CKODEX <span style="color: var(--ck-accent-rust);">&middot;</span> OSKAL
       </span>
     </a>
-    <span class="ck-badge" style="font-family: var(--ck-ff-mono); font-size: 11px; padding: 2px 6px; border: 1px solid var(--ck-hairline); border-radius: 0; text-transform: uppercase;">
+    <span class="ck-badge ck-header-badge" style="font-family: var(--ck-ff-mono); font-size: 10px; padding: 1px 5px; border: 1px solid var(--ck-hairline); border-radius: 0; text-transform: uppercase;">
       {{ .Site.Params.spec }}
     </span>
   </div>
 
-  <div style="display: flex; align-items: center; gap: var(--ck-sp-4);">
-    <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-mute); display: flex; align-items: center; gap: var(--ck-sp-2);">
+  <div style="display: flex; align-items: center; gap: var(--ck-sp-3); flex-shrink: 0;">
+    <div class="ck-header-status" style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-mute); display: flex; align-items: center; gap: var(--ck-sp-2);">
       <span>[MODE: NORMAL]</span>
       <span style="color: var(--ck-hairline);">&vert;</span>
       <span>[TIER: {{ .Site.Params.evidence_tier }}]</span>
@@ -20,12 +25,12 @@
 
     <!-- Theme Switcher -->
     <div style="display: inline-flex; border: 1px solid var(--ck-hairline); padding: 1px;" role="group" aria-label="Theme Selector">
-      <button type="button" class="ck-btn ck-theme-btn" data-set-theme="ledger" style="padding: 2px 8px; font-size: 11px; border: none; font-family: var(--ck-ff-mono);">LEDGER</button>
-      <button type="button" class="ck-btn ck-theme-btn" data-set-theme="vault" style="padding: 2px 8px; font-size: 11px; border: none; font-family: var(--ck-ff-mono);">VAULT</button>
-      <button type="button" class="ck-btn ck-theme-btn" data-set-theme="hc" style="padding: 2px 8px; font-size: 11px; border: none; font-family: var(--ck-ff-mono);">HC</button>
+      <button type="button" class="ck-btn ck-theme-btn" data-set-theme="ledger" style="padding: 2px 7px; font-size: 11px; border: none; font-family: var(--ck-ff-mono); min-height: 32px;">LEDGER</button>
+      <button type="button" class="ck-btn ck-theme-btn" data-set-theme="vault" style="padding: 2px 7px; font-size: 11px; border: none; font-family: var(--ck-ff-mono); min-height: 32px;">VAULT</button>
+      <button type="button" class="ck-btn ck-theme-btn" data-set-theme="hc" style="padding: 2px 7px; font-size: 11px; border: none; font-family: var(--ck-ff-mono); min-height: 32px;">HC</button>
     </div>
 
-    <a href="{{ .Site.Params.repository }}" class="ck-btn" style="text-decoration: none; font-family: var(--ck-ff-mono); font-size: 11px; padding: 4px 10px; border: 1px solid var(--ck-hairline);" target="_blank" rel="noopener">
+    <a href="{{ .Site.Params.repository }}" class="ck-btn ck-header-github" style="text-decoration: none; font-family: var(--ck-ff-mono); font-size: 11px; padding: 4px 8px; border: 1px solid var(--ck-hairline); min-height: 32px; display: inline-flex; align-items: center;" target="_blank" rel="noopener">
       GITHUB &nearr;
     </a>
   </div>
