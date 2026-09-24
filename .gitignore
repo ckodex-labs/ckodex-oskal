@@ -17,3 +17,5 @@ coverage.html
 # Hugo
 site/public/
 site/resources/
+*.hugo_build.lock
+.hugo_build.lock
