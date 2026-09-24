@@ -261,7 +261,97 @@ and projects defensible results into standard OSCAL artifacts.`,
 		},
 	}
 	exportARCmd.Flags().StringVar(&exportSubjectFlag, "subject", "", "Workload subject to export")
-	exportCmd.AddCommand(exportARCmd)
+
+	exportCompDefCmd := &cobra.Command{
+		Use:   "component-definition",
+		Short: "Export to NIST OSCAL v1.2.3 Component Definition JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			compName := exportSubjectFlag
+			if compName == "" {
+				compName = "payments-api"
+			}
+			eval := assurance.ClaimEvaluation{
+				ID:      "eval-01",
+				Subject: assurance.SubjectRef{Scheme: "k8s", ID: "payments/payments-api"},
+				Control: assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
+				State:   assurance.AssuranceStateAssured,
+				Epoch: assurance.AssuranceEpoch{
+					SubjectDigest: "sha256:sub",
+				},
+				EvidenceRoot: "sha256:root123",
+			}
+			projector := oscal.NewProjector()
+			data, err := projector.ProjectComponentDefinition(context.Background(), compName, []assurance.ClaimEvaluation{eval})
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(data))
+			return nil
+		},
+	}
+	exportCompDefCmd.Flags().StringVar(&exportSubjectFlag, "component", "", "Component name to export")
+
+	exportAPCmd := &cobra.Command{
+		Use:   "assessment-plan",
+		Short: "Export to NIST OSCAL v1.2.3 Assessment Plan JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			subURI := exportSubjectFlag
+			if subURI == "" {
+				subURI = "k8s://prod/payments/Deployment/payments-api"
+			}
+			sub := assurance.SubjectRef{Scheme: "k8s", ID: subURI}
+			contract := assurance.EvidenceContract{
+				ID: "contract-01",
+				Requirements: []assurance.EvidenceRequirement{
+					{ID: "req-1", EvidenceType: "admission", MaxAge: 5 * time.Minute},
+				},
+			}
+			controls := []assurance.ControlRef{
+				{Namespace: "nist-sp-800-53", ID: "AC-6"},
+			}
+			projector := oscal.NewProjector()
+			data, err := projector.ProjectAssessmentPlan(context.Background(), sub, contract, controls)
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(data))
+			return nil
+		},
+	}
+	exportAPCmd.Flags().StringVar(&exportSubjectFlag, "subject", "", "Workload subject to export")
+
+	exportPOAMCmd := &cobra.Command{
+		Use:   "poam",
+		Short: "Export to NIST OSCAL v1.2.3 Plan of Action and Milestones JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			subURI := exportSubjectFlag
+			if subURI == "" {
+				subURI = "k8s://prod/payments/Deployment/payments-api"
+			}
+			sub := assurance.SubjectRef{Scheme: "k8s", ID: subURI}
+			findings := []assurance.Finding{
+				{
+					ID:           "find-01",
+					Subject:      sub,
+					Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
+					Severity:     "HIGH",
+					Title:        "Remediation required for privileged container",
+					Description:  "Pod security admission denied root execution",
+					DiscoveredAt: time.Now().UTC(),
+				},
+			}
+			projector := oscal.NewProjector()
+			data, err := projector.ProjectPOAM(context.Background(), sub, findings)
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(data))
+			return nil
+		},
+	}
+	exportPOAMCmd.Flags().StringVar(&exportSubjectFlag, "subject", "", "Workload subject to export")
+
+	exportCmd.AddCommand(exportARCmd, exportCompDefCmd, exportAPCmd, exportPOAMCmd)
 
 	// 6. oscal serve --port <port>
 	var port int
