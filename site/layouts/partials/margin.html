@@ -1,0 +1,105 @@
+<aside class="ck-shell__margin" aria-label="Evidence Margin">
+  <div class="ck-margin__head">
+    <div style="display: flex; align-items: center; gap: var(--ck-sp-2);">
+      <span style="font-family: var(--ck-ff-mono); font-weight: 600; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ck-fg-0);">
+        EVIDENCE MARGIN
+      </span>
+      <span class="ck-badge" style="font-size: 10px; font-family: var(--ck-ff-mono); padding: 1px 4px; border: 1px solid var(--ck-hairline); border-radius: 0;">LIVE</span>
+    </div>
+    <button id="margin-toggle" class="ck-margin__toggle" type="button" aria-expanded="true" aria-label="Toggle Evidence Margin" title="Collapse Evidence Margin to 48px rail">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M4 2h2v12H4zm6 0h2v12h-2z"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- State Summary Card (Quiet Square Card) -->
+  <div class="ck-quiet" style="padding: var(--ck-sp-3); border: 1px solid var(--ck-hairline); background: var(--ck-bg-1);">
+    <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-fg-mute); margin-bottom: 4px;">
+      GOVERNED VECTOR STATE
+    </div>
+    <div style="display: flex; align-items: baseline; justify-content: space-between;">
+      <span style="font-family: var(--ck-ff-mono); font-size: 13px; font-weight: 700; color: var(--ck-fg-0);">
+        [STATE: VERIFIED]
+      </span>
+      <span style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-mute);">
+        EPOCH: 0192a
+      </span>
+    </div>
+    <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-mute); margin-top: 6px; line-height: 1.4;">
+      S(e,t) = &lang;P=PRESENT, V=POS, A=0, C=COHERENT, E=VERIFIED, L=NORMAL&rang;
+    </div>
+  </div>
+
+  <!-- Evidence Root (Sealed Chamfered Box) -->
+  <div class="ck-sealed" style="padding: var(--ck-sp-3); border: 2px solid var(--ck-proof-violet); background: var(--ck-bg-1); position: relative;">
+    <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-proof-violet); font-weight: 600; margin-bottom: 4px;">
+      MERKLE EVIDENCE ROOT
+    </div>
+    <div class="ck-hash" data-copy="sha256:7b29a10f88e421cd93e4811a01c3f9104b2a8c199201f3089ef04358bbd7821c" title="Click to copy full root digest" style="font-family: var(--ck-ff-mono); font-size: 11px; cursor: pointer; color: var(--ck-fg-0);">
+      sha256:7b29&hellip;821c
+    </div>
+    <div style="font-family: var(--ck-ff-mono); font-size: 10px; color: var(--ck-fg-mute); margin-top: 4px;">
+      12 Atomic Leaf Envelopes &middot; Ed25519 Signed
+    </div>
+  </div>
+
+  <!-- Receipt Ledger Feed -->
+  <div style="display: flex; flex-direction: column; gap: var(--ck-sp-2);">
+    <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-fg-mute); letter-spacing: 0.08em;">
+      RECENT RECEIPTS (AUDIT TRAIL)
+    </div>
+
+    <!-- Receipt Item 1 (Proof Violet) -->
+    <div class="ck-receipt" style="border-left: 2px solid var(--ck-proof-violet); padding: 4px 8px; background: var(--ck-bg-0);">
+      <div style="display: flex; justify-content: space-between; font-family: var(--ck-ff-mono); font-size: 10px; color: var(--ck-fg-mute);">
+        <span>rcpt:0192a-cel</span>
+        <span>2026-09-24T11:20Z</span>
+      </div>
+      <div style="font-family: var(--ck-ff-mono); font-size: 11px; font-weight: 600; margin-top: 2px;">
+        [ADMITTED] AC-6 Least Privilege
+      </div>
+      <div class="ck-hash" data-copy="sha256:a18c4e09f582b13c77" style="font-family: var(--ck-ff-mono); font-size: 10px; color: var(--ck-fg-mute); cursor: pointer;">
+        sha256:a18c&hellip;b13c
+      </div>
+    </div>
+
+    <!-- Receipt Item 2 (Routine Tone) -->
+    <div class="ck-receipt" style="border-left: 2px solid var(--ck-hairline); padding: 4px 8px; background: var(--ck-bg-0);">
+      <div style="display: flex; justify-content: space-between; font-family: var(--ck-ff-mono); font-size: 10px; color: var(--ck-fg-mute);">
+        <span>rcpt:0192a-spire</span>
+        <span>2026-09-24T11:19Z</span>
+      </div>
+      <div style="font-family: var(--ck-ff-mono); font-size: 11px; font-weight: 600; margin-top: 2px;">
+        [AUTHENTICATED] SPIFFE SVID
+      </div>
+      <div class="ck-hash" data-copy="sha256:c43b92ef11082" style="font-family: var(--ck-ff-mono); font-size: 10px; color: var(--ck-fg-mute); cursor: pointer;">
+        sha256:c43b&hellip;f110
+      </div>
+    </div>
+
+    <!-- Receipt Item 3 (Routine Tone) -->
+    <div class="ck-receipt" style="border-left: 2px solid var(--ck-hairline); padding: 4px 8px; background: var(--ck-bg-0);">
+      <div style="display: flex; justify-content: space-between; font-family: var(--ck-ff-mono); font-size: 10px; color: var(--ck-fg-mute);">
+        <span>rcpt:0192a-tetra</span>
+        <span>2026-09-24T11:18Z</span>
+      </div>
+      <div style="font-family: var(--ck-ff-mono); font-size: 11px; font-weight: 600; margin-top: 2px;">
+        [OBSERVED] Runtime Drop Caps
+      </div>
+      <div class="ck-hash" data-copy="sha256:39d91f280a82b" style="font-family: var(--ck-ff-mono); font-size: 10px; color: var(--ck-fg-mute); cursor: pointer;">
+        sha256:39d9&hellip;0a82
+      </div>
+    </div>
+  </div>
+
+  <!-- Invariant Callout -->
+  <div style="margin-top: auto; padding-top: var(--ck-sp-4); border-top: 1px solid var(--ck-hairline);">
+    <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-fg-mute); margin-bottom: 4px;">
+      CONSTITUTIONAL INVARIANT
+    </div>
+    <div class="ck-invariant" style="font-family: var(--ck-ff-mono); font-size: 11px; font-weight: 600; color: var(--ck-fg-0); line-height: 1.4;">
+      mode changes deployment, not governance semantics
+    </div>
+  </div>
+</aside>

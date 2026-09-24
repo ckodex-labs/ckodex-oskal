@@ -1,0 +1,34 @@
+<footer class="ck-shell__footer" role="contentinfo" style="padding: var(--ck-sp-3) var(--ck-sp-5); border-top: 1px solid var(--ck-hairline); background: var(--ck-bg-0);">
+  <div style="display: flex; align-items: center; gap: var(--ck-sp-4); flex-wrap: wrap;">
+    <div style="display: flex; align-items: center; gap: var(--ck-sp-2);">
+      <span style="display: inline-block; width: 8px; height: 8px; background: var(--ck-proof-violet);"></span>
+      <span style="font-family: var(--ck-ff-mono); font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--ck-fg-0);">
+        HANDLING: {{ .Site.Params.handling | upper }}
+      </span>
+    </div>
+
+    <span style="color: var(--ck-hairline);">&vert;</span>
+
+    <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-mute);">
+      AUTHORITY: <span style="color: var(--ck-fg-0); font-weight: 600;">{{ .Site.Params.authority }}</span>
+    </div>
+
+    <span style="color: var(--ck-hairline);">&vert;</span>
+
+    <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-mute);">
+      TIER: <span style="color: var(--ck-fg-0); font-weight: 600;">E5 &middot; PROVED</span>
+    </div>
+
+    <span style="color: var(--ck-hairline);">&vert;</span>
+
+    <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-mute);">
+      DOC DIGEST: <span class="ck-hash" data-copy="sha256:9f3c8120bba801a2" style="color: var(--ck-fg-0); cursor: pointer;">sha256:9f3c&hellip;a1a2</span>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: var(--ck-sp-3);">
+    <span class="ck-invariant" style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-mute);">
+      {{ .Site.Params.invariant }}
+    </span>
+  </div>
+</footer>

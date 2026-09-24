@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="CKODEX">
+  <title>CKODEX · Sealed Diamond · v1.1 with signature tension</title>
+  <desc>CKODEX logo mark · v1.1 · variant A · sealed diamond with two ownable moves. (1) Fixed 1.764:1 ratio between outer and inner diamond — a mathematically-locked proof relationship (outer radius 52 · inner radius 29.48, rounded to 29) that only CKODEX owns; any other diamond-in-diamond logo is visibly different. (2) One sanctioned asymmetry: the NW cardinal tick is half-length (3 px vs 6 px for the other three). The NW (upper-left) direction is the input vector; the shortened tick reads as &#39;input is always inspected&#39; — a tacit trust anchor. The remaining three ticks at full length encode approval · execution · attestation.</desc>
+
+  <polygon points="60,8 112,60 60,112 8,60" fill="none" stroke="#38a3a5" stroke-width="2.5"></polygon>
+
+  <polygon points="60,31 89,60 60,89 31,60" fill="#fcca46"></polygon>
+  <circle cx="60" cy="60" r="6" fill="#00152b"></circle>
+
+  <line x1="60" y1="0" x2="60" y2="6" stroke="#38a3a5" stroke-width="1.25"></line>
+
+  <line x1="114" y1="60" x2="120" y2="60" stroke="#38a3a5" stroke-width="1.25"></line>
+
+  <line x1="60" y1="114" x2="60" y2="120" stroke="#38a3a5" stroke-width="1.25"></line>
+
+  <line x1="3" y1="60" x2="6" y2="60" stroke="#38a3a5" stroke-width="1.25"></line>
+</svg>

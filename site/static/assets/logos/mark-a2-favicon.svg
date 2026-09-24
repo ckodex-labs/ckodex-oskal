@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="CKODEX">
+  <title>CKODEX · Favicon</title>
+  <desc>CKODEX logo mark · v1.0 · variant A2 · favicon simplified. Use at 16-32 px. Heavier stroke, no crosshair ticks. Colours: teal stroke #38a3a5, yellow fill #fcca46, deep blue centre #00152b.</desc>
+  <polygon points="60,10 110,60 60,110 10,60" fill="none" stroke="#38a3a5" stroke-width="8"></polygon>
+  <polygon points="60,32 88,60 60,88 32,60" fill="#fcca46"></polygon>
+  <circle cx="60" cy="60" r="8" fill="#00152b"></circle>
+</svg>

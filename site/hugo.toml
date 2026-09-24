@@ -1,0 +1,49 @@
+baseURL = "/"
+locale = "en-US"
+title = "CKODEX-OSKAL - Continuous Assurance Runtime"
+
+[params]
+  version = "v0.1.0-alpha.1"
+  spec = "CKX-OSKAL-001"
+  repository = "https://github.com/ckodex-labs/ckodex-oskal"
+  authority = "ckodex-labs"
+  handling = "sealed"
+  classification = "public"
+  evidence_tier = "E5"
+  invariant = "mode changes deployment, not governance semantics"
+
+[markup]
+  [markup.goldmark]
+    [markup.goldmark.renderer]
+      unsafe = true
+  [markup.highlight]
+    style = "monokailight"
+    lineNos = false
+    guessSyntax = true
+
+[menu]
+  [[menu.main]]
+    identifier = "tutorials"
+    name = "Tutorials"
+    url = "/tutorials/"
+    weight = 10
+  [[menu.main]]
+    identifier = "how-to"
+    name = "How-To Guides"
+    url = "/how-to/"
+    weight = 20
+  [[menu.main]]
+    identifier = "reference"
+    name = "Reference"
+    url = "/reference/"
+    weight = 30
+  [[menu.main]]
+    identifier = "explanation"
+    name = "Explanation"
+    url = "/explanation/"
+    weight = 40
+  [[menu.main]]
+    identifier = "personas"
+    name = "Personas"
+    url = "/personas/"
+    weight = 50

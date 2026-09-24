@@ -1,0 +1,41 @@
+{{ define "main" }}
+<div class="ck-measure">
+  <header class="ck-doc-header">
+    <div class="ck-doc-meta">
+      <span>SECTION INDEX</span>
+      <span style="color: var(--ck-hairline);">&vert;</span>
+      <span>{{ len .Pages }} TOPICS</span>
+    </div>
+    <h1 class="ck-doc-title">{{ .Title }}</h1>
+    {{ if .Params.description }}
+    <p class="ck-doc-desc">{{ .Params.description }}</p>
+    {{ end }}
+  </header>
+
+  <div class="ck-article-body">
+    {{ .Content }}
+
+    <div class="ck-bento-grid">
+      {{ range .Pages }}
+      <a href="{{ .RelPermalink }}" class="ck-bento-card">
+        <div>
+          <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-accent-rust); margin-bottom: 4px;">
+            {{ .Params.quadrant | default .Section | upper }}
+          </div>
+          <div style="font-family: var(--ck-ff-sans); font-size: 16px; font-weight: 600; color: var(--ck-fg-0); margin-bottom: 6px;">
+            {{ .Title }}
+          </div>
+          <div style="font-size: 13px; color: var(--ck-fg-mute); line-height: 1.4;">
+            {{ .Params.description }}
+          </div>
+        </div>
+        <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-mute); margin-top: var(--ck-sp-4); display: flex; justify-content: space-between;">
+          <span>READ GUIDE &rarr;</span>
+          <span>{{ .ReadingTime }} MIN</span>
+        </div>
+      </a>
+      {{ end }}
+    </div>
+  </div>
+</div>
+{{ end }}

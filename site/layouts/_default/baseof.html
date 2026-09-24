@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="ledger">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ if .Title }}{{ .Title }} &middot; {{ end }}{{ .Site.Title }}</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="icon" type="image/svg+xml" href="/assets/logos/mark-a2-favicon.svg">
+  <style>
+    /* Custom documentation helpers respecting CKODEX-DS-3 semantic budget */
+    .ck-doc-header {
+      margin-bottom: var(--ck-sp-6);
+      padding-bottom: var(--ck-sp-4);
+      border-bottom: 1px solid var(--ck-hairline);
+    }
+    .ck-doc-meta {
+      font-family: var(--ck-ff-mono);
+      font-size: 11px;
+      color: var(--ck-fg-mute);
+      display: flex;
+      gap: var(--ck-sp-3);
+      align-items: center;
+      margin-bottom: var(--ck-sp-2);
+      text-transform: uppercase;
+    }
+    .ck-doc-title {
+      font-family: var(--ck-ff-serif);
+      font-size: 32px;
+      font-weight: 400;
+      color: var(--ck-fg-0);
+      margin: 0 0 var(--ck-sp-2) 0;
+      line-height: 1.2;
+    }
+    .ck-doc-desc {
+      font-family: var(--ck-ff-sans);
+      font-size: 15px;
+      color: var(--ck-fg-mute);
+      margin: 0;
+      line-height: 1.5;
+    }
+    .ck-article-body {
+      font-family: var(--ck-ff-sans);
+      font-size: 14.5px;
+      line-height: 1.65;
+      color: var(--ck-fg-0);
+      max-width: var(--ck-measure);
+    }
+    .ck-article-body h2 {
+      font-family: var(--ck-ff-sans);
+      font-size: 20px;
+      font-weight: 600;
+      margin: var(--ck-sp-8) 0 var(--ck-sp-3) 0;
+      padding-bottom: var(--ck-sp-1);
+      border-bottom: 1px solid var(--ck-hairline);
+      color: var(--ck-fg-0);
+    }
+    .ck-article-body h3 {
+      font-family: var(--ck-ff-sans);
+      font-size: 16px;
+      font-weight: 600;
+      margin: var(--ck-sp-6) 0 var(--ck-sp-2) 0;
+      color: var(--ck-fg-0);
+    }
+    .ck-article-body code:not(pre code) {
+      font-family: var(--ck-ff-mono);
+      font-size: 12.5px;
+      padding: 1px 4px;
+      background: var(--ck-bg-1);
+      border: 1px solid var(--ck-hairline);
+      border-radius: 0;
+    }
+    .ck-article-body pre {
+      background: var(--ck-bg-1);
+      border: 1px solid var(--ck-hairline);
+      padding: var(--ck-sp-4);
+      overflow-x: auto;
+      font-family: var(--ck-ff-mono);
+      font-size: 12px;
+      line-height: 1.5;
+      margin: var(--ck-sp-4) 0;
+    }
+    .ck-article-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: var(--ck-sp-6) 0;
+      font-size: 13px;
+    }
+    .ck-article-body th, .ck-article-body td {
+      border: 1px solid var(--ck-hairline);
+      padding: var(--ck-sp-2) var(--ck-sp-3);
+      text-align: left;
+    }
+    .ck-article-body th {
+      background: var(--ck-bg-1);
+      font-family: var(--ck-ff-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .ck-article-body blockquote {
+      border-left: 2px solid var(--ck-accent-rust);
+      margin: var(--ck-sp-4) 0;
+      padding-left: var(--ck-sp-4);
+      color: var(--ck-fg-mute);
+      font-style: normal;
+    }
+    .ck-bento-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: var(--ck-sp-4);
+      margin: var(--ck-sp-6) 0;
+    }
+    .ck-bento-card {
+      border: 1px solid var(--ck-hairline);
+      background: var(--ck-bg-1);
+      padding: var(--ck-sp-4);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      text-decoration: none;
+      color: inherit;
+    }
+    .ck-bento-card:hover {
+      border-color: var(--ck-accent-rust);
+    }
+  </style>
+</head>
+<body>
+  <a class="ck-sr" href="#main">Skip to main content</a>
+  <div class="ck-shell ck-shell--console">
+    {{ partial "header.html" . }}
+    {{ partial "nav.html" . }}
+    <main class="ck-shell__main" id="main" role="main">
+      {{ block "main" . }}{{ end }}
+    </main>
+    {{ partial "margin.html" . }}
+    {{ partial "footer.html" . }}
+  </div>
+  <script src="/js/theme.js"></script>
+</body>
+</html>

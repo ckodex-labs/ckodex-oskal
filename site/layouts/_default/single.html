@@ -1,0 +1,25 @@
+{{ define "main" }}
+<article class="ck-measure">
+  <header class="ck-doc-header">
+    <div class="ck-doc-meta">
+      <span>{{ if .Section }}{{ .Section | upper }}{{ else }}DOCUMENT{{ end }}</span>
+      <span style="color: var(--ck-hairline);">&vert;</span>
+      <span>TIER: {{ .Params.tier | default "E5" }}</span>
+      <span style="color: var(--ck-hairline);">&vert;</span>
+      <span>{{ .ReadingTime }} MIN READ</span>
+      {{ if .Params.invariant }}
+      <span style="color: var(--ck-hairline);">&vert;</span>
+      <span style="color: var(--ck-accent-rust);">{{ .Params.invariant }}</span>
+      {{ end }}
+    </div>
+    <h1 class="ck-doc-title">{{ .Title }}</h1>
+    {{ if .Params.description }}
+    <p class="ck-doc-desc">{{ .Params.description }}</p>
+    {{ end }}
+  </header>
+
+  <div class="ck-article-body">
+    {{ .Content }}
+  </div>
+</article>
+{{ end }}

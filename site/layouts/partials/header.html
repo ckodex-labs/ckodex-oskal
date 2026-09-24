@@ -1,0 +1,32 @@
+<header class="ck-shell__header" role="banner">
+  <div style="display: flex; align-items: center; gap: var(--ck-sp-4);">
+    <a href="/" style="display: inline-flex; align-items: center; gap: var(--ck-sp-3); text-decoration: none; color: inherit;">
+      <img src="/assets/logos/mark-a-sealed-diamond.svg" alt="CKODEX Diamond" width="28" height="28" style="display: block;" />
+      <span style="font-family: var(--ck-ff-sans); font-weight: 600; font-size: var(--ck-fs-sm); letter-spacing: 0.05em; text-transform: uppercase;">
+        CKODEX <span style="color: var(--ck-accent-rust);">&middot;</span> OSKAL
+      </span>
+    </a>
+    <span class="ck-badge" style="font-family: var(--ck-ff-mono); font-size: 11px; padding: 2px 6px; border: 1px solid var(--ck-hairline); border-radius: 0; text-transform: uppercase;">
+      {{ .Site.Params.spec }}
+    </span>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: var(--ck-sp-4);">
+    <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-mute); display: flex; align-items: center; gap: var(--ck-sp-2);">
+      <span>[MODE: NORMAL]</span>
+      <span style="color: var(--ck-hairline);">&vert;</span>
+      <span>[TIER: {{ .Site.Params.evidence_tier }}]</span>
+    </div>
+
+    <!-- Theme Switcher -->
+    <div style="display: inline-flex; border: 1px solid var(--ck-hairline); padding: 1px;" role="group" aria-label="Theme Selector">
+      <button type="button" class="ck-btn ck-theme-btn" data-set-theme="ledger" style="padding: 2px 8px; font-size: 11px; border: none; font-family: var(--ck-ff-mono);">LEDGER</button>
+      <button type="button" class="ck-btn ck-theme-btn" data-set-theme="vault" style="padding: 2px 8px; font-size: 11px; border: none; font-family: var(--ck-ff-mono);">VAULT</button>
+      <button type="button" class="ck-btn ck-theme-btn" data-set-theme="hc" style="padding: 2px 8px; font-size: 11px; border: none; font-family: var(--ck-ff-mono);">HC</button>
+    </div>
+
+    <a href="{{ .Site.Params.repository }}" class="ck-btn" style="text-decoration: none; font-family: var(--ck-ff-mono); font-size: 11px; padding: 4px 10px; border: 1px solid var(--ck-hairline);" target="_blank" rel="noopener">
+      GITHUB &nearr;
+    </a>
+  </div>
+</header>

@@ -13,3 +13,7 @@ coverage.html
 
 # OS
 .DS_Store
+
+# Hugo
+site/public/
+site/resources/
