@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/ckodex-labs/ckodex-oskal/internal/service"
@@ -34,7 +35,7 @@ func TestInProcessClientLifecycle(t *testing.T) {
 	}
 
 	client := NewInProcessClient(WithReceiptManager(mgr))
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	subject := SubjectRef{Scheme: "k8s", ID: "payments/checkout-service"}
 	ctrl := ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
@@ -152,8 +153,7 @@ func TestInProcessClientLifecycle(t *testing.T) {
 	}
 
 	// 7. Submit tampered receipt -> verify rejection
-	tamperedProto := &receiptv1.ControlReceipt{}
-	*tamperedProto = *protoRcpt
+	tamperedProto := proto.Clone(protoRcpt).(*receiptv1.ControlReceipt)
 	tamperedProto.EvidenceRoot = "sha256:tampered"
 
 	tamperedVerified, _, err := client.SubmitReceipt(ctx, tamperedProto)
@@ -208,7 +208,7 @@ func TestGRPCClientLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create gRPC client: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	subject := SubjectRef{Scheme: "k8s", ID: "payments/checkout-service"}
 	ctrl := ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}

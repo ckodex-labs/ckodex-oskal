@@ -151,8 +151,8 @@ type ComponentDefinitionWrapper struct {
 // 3. System Security Plan Document
 type SSPWrapper struct {
 	SystemSecurityPlan struct {
-		UUID     string        `json:"uuid"`
-		Metadata OscalMetadata `json:"metadata"`
+		UUID                  string        `json:"uuid"`
+		Metadata              OscalMetadata `json:"metadata"`
 		SystemCharacteristics struct {
 			SystemName      string `json:"system-name"`
 			DeploymentModel string `json:"deployment-model"`
@@ -188,7 +188,7 @@ type AssessmentPlanWrapper struct {
 		Metadata           OscalMetadata             `json:"metadata"`
 		ImportSSP          ImportSSP                 `json:"import-ssp"`
 		ReviewedControls   OscalReviewedControls     `json:"reviewed-controls"`
-		AssessmentSubjects []OscalAssessmentSubject   `json:"assessment-subjects,omitempty"`
+		AssessmentSubjects []OscalAssessmentSubject  `json:"assessment-subjects,omitempty"`
 		Tasks              []OscalAssessmentActivity `json:"tasks,omitempty"`
 	} `json:"assessment-plan"`
 }

@@ -145,7 +145,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 				if err != nil {
 					return err
 				}
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 
 				resp, err := client.GetAssuranceState(ctx, &servicesv1.GetAssuranceStateRequest{
 					Subject: &commonv1.SubjectRef{Scheme: scheme, Id: id},
@@ -253,7 +253,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 				if err != nil {
 					return err
 				}
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 
 				resp, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
 					Subject: &commonv1.SubjectRef{Scheme: scheme, Id: id},

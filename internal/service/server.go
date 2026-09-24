@@ -252,12 +252,12 @@ func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimR
 			Stale:    int32(graph.Completeness.Stale),
 			Missing:  int32(graph.Completeness.Missing),
 		},
-		Freshness:        graph.Freshness,
-		Authority:        graph.Authority,
-		AssuranceState:   respState,
-		EvidenceRoot:     graph.EvidenceRoot,
-		Projections:      graph.Projections,
-		RenderedText:     graph.RenderText(),
+		Freshness:      graph.Freshness,
+		Authority:      graph.Authority,
+		AssuranceState: respState,
+		EvidenceRoot:   graph.EvidenceRoot,
+		Projections:    graph.Projections,
+		RenderedText:   graph.RenderText(),
 	}, nil
 }
 

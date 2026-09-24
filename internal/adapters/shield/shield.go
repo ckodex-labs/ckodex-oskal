@@ -11,11 +11,11 @@ import (
 
 // ModelForensics captures weight integrity and tamper checks (Section 59).
 type ModelForensics struct {
-	ModelURI      string `json:"modelUri"`
-	WeightsDigest string `json:"weightsDigest"`
-	Format        string `json:"format"` // e.g. "safetensors", "gguf"
-	TamperProof   bool   `json:"tamperProof"`
-	AIBOMDigest   string `json:"aibomDigest"`
+	ModelURI      string  `json:"modelUri"`
+	WeightsDigest string  `json:"weightsDigest"`
+	Format        string  `json:"format"` // e.g. "safetensors", "gguf"
+	TamperProof   bool    `json:"tamperProof"`
+	AIBOMDigest   string  `json:"aibomDigest"`
 	SafetyScore   float64 `json:"safetyScore"` // 0.0 - 1.0
 }
 

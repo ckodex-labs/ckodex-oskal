@@ -35,7 +35,7 @@ func ComputePolicyDigest(policy *admissionregistrationv1.ValidatingAdmissionPoli
 	var sb strings.Builder
 	sb.WriteString(policy.Name)
 	sb.WriteString("|")
-	sb.WriteString(fmt.Sprintf("%d", policy.Generation))
+	fmt.Fprintf(&sb, "%d", policy.Generation)
 	sb.WriteString("|")
 
 	for _, v := range policy.Spec.Validations {

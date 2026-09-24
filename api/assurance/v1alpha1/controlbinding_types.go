@@ -21,21 +21,21 @@ type FrameworkMapping struct {
 // ControlBindingItem represents a single control and its framework mappings.
 type ControlBindingItem struct {
 	Canonical CanonicalControlRef `json:"canonical"`
-	Mappings []FrameworkMapping  `json:"mappings,omitempty"`
+	Mappings  []FrameworkMapping  `json:"mappings,omitempty"`
 }
 
 // SubjectSelector targets Kubernetes workload resources.
 type SubjectSelector struct {
-	APIGroups         []string               `json:"apiGroups,omitempty"`
-	Kinds             []string               `json:"kinds"`
-	NamespaceSelector *metav1.LabelSelector  `json:"namespaceSelector,omitempty"`
-	LabelSelector     *metav1.LabelSelector  `json:"labelSelector,omitempty"`
+	APIGroups         []string              `json:"apiGroups,omitempty"`
+	Kinds             []string              `json:"kinds"`
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+	LabelSelector     *metav1.LabelSelector `json:"labelSelector,omitempty"`
 }
 
 // ImplementationBindingRef identifies an implementation provider.
 type ImplementationBindingRef struct {
-	Purpose  string             `json:"purpose"` // preventive, detective, corrective, compensating
-	Provider string             `json:"provider"` // kubernetes-validating-admission, tetragon, cilium, sigstore
+	Purpose  string                  `json:"purpose"`  // preventive, detective, corrective, compensating
+	Provider string                  `json:"provider"` // kubernetes-validating-admission, tetragon, cilium, sigstore
 	Ref      ImplementationTargetRef `json:"ref"`
 }
 

@@ -91,15 +91,16 @@ var (
 
 // Transition computes the next state given the current state and stimulus.
 // Canonical FSM:
-//   UNKNOWN  + EVIDENCE_INGESTED   -> OBSERVED
-//   OBSERVED + EVIDENCE_VERIFIED   -> VERIFIED
-//   VERIFIED + POLICY_ASSURED      -> ASSURED
-//   ASSURED  + EPOCH_CHANGED       -> STALE
-//   ASSURED  + EVIDENCE_EXPIRED    -> STALE
-//   STALE    + REEVALUATED         -> OBSERVED
-//   ANY      + VIOLATION_CONFIRMED -> FAILED
-//   ANY      + EVIDENCE_INVALID    -> UNKNOWN
-//   ANY      + RESET               -> UNKNOWN
+//
+//	UNKNOWN  + EVIDENCE_INGESTED   -> OBSERVED
+//	OBSERVED + EVIDENCE_VERIFIED   -> VERIFIED
+//	VERIFIED + POLICY_ASSURED      -> ASSURED
+//	ASSURED  + EPOCH_CHANGED       -> STALE
+//	ASSURED  + EVIDENCE_EXPIRED    -> STALE
+//	STALE    + REEVALUATED         -> OBSERVED
+//	ANY      + VIOLATION_CONFIRMED -> FAILED
+//	ANY      + EVIDENCE_INVALID    -> UNKNOWN
+//	ANY      + RESET               -> UNKNOWN
 func Transition(current AssuranceState, event TransitionEvent) (AssuranceState, error) {
 	switch event {
 	case EventViolationConfirmed:

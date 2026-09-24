@@ -46,12 +46,12 @@ type AssuranceStateSpec struct {
 
 // AssuranceStateStatus defines the observed summary projection (ADR-002, ADR-004).
 type AssuranceStateStatus struct {
-	State        string            `json:"state"` // "Assured", "Stale", "Failed", "Unknown"
-	Epoch        StateEpoch        `json:"epoch,omitempty"`
-	EvidenceRoot string            `json:"evidenceRoot,omitempty"`
-	Controls     []ControlStatus   `json:"controls,omitempty"`
-	EvaluatedAt  *metav1.Time      `json:"evaluatedAt,omitempty"`
-	ValidUntil   *metav1.Time      `json:"validUntil,omitempty"`
+	State        string             `json:"state"` // "Assured", "Stale", "Failed", "Unknown"
+	Epoch        StateEpoch         `json:"epoch,omitempty"`
+	EvidenceRoot string             `json:"evidenceRoot,omitempty"`
+	Controls     []ControlStatus    `json:"controls,omitempty"`
+	EvaluatedAt  *metav1.Time       `json:"evaluatedAt,omitempty"`
+	ValidUntil   *metav1.Time       `json:"validUntil,omitempty"`
 	Conditions   []metav1.Condition `json:"conditions,omitempty"`
 }
 

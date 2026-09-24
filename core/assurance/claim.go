@@ -79,12 +79,12 @@ func (e ControlException) AppliesTo(sub SubjectRef, ctrl ControlRef) bool {
 
 // AssurancePolicy specifies higher-level evaluation rules.
 type AssurancePolicy struct {
-	Name                     string        `json:"name"`
+	Name                     string         `json:"name"`
 	RequiredState            AssuranceState `json:"requiredState"`
-	RequireFresh             bool          `json:"requireFresh"`
-	FailOnConfirmedViolation bool          `json:"failOnConfirmedViolation"`
-	UnknownIsViolation       bool          `json:"unknownIsViolation"`
-	MaxEvaluationAge         time.Duration `json:"maxEvaluationAge"`
+	RequireFresh             bool           `json:"requireFresh"`
+	FailOnConfirmedViolation bool           `json:"failOnConfirmedViolation"`
+	UnknownIsViolation       bool           `json:"unknownIsViolation"`
+	MaxEvaluationAge         time.Duration  `json:"maxEvaluationAge"`
 }
 
 // ControlReceipt is a cryptographically verifiable record of an evaluation (Section 41).
@@ -136,11 +136,11 @@ type ExplainImplementation struct {
 
 // ExplainEvidenceItem models a verified piece of evidence in the graph.
 type ExplainEvidenceItem struct {
-	Type      string    `json:"type"`
+	Type       string    `json:"type"`
 	CapturedAt time.Time `json:"capturedAt"`
-	Producer  string    `json:"producer"`
-	Digest    string    `json:"digest"`
-	Verified  bool      `json:"verified"`
+	Producer   string    `json:"producer"`
+	Digest     string    `json:"digest"`
+	Verified   bool      `json:"verified"`
 }
 
 // ExplainGraph models the full reverse-traceable graph for Explain(subject, control) (Section 49 & 51).
@@ -187,13 +187,13 @@ func (g ExplainGraph) RenderText() string {
 		if !atom.Satisfied {
 			icon = "[FAIL]"
 		}
-		sb.WriteString(fmt.Sprintf("%s %s\n", icon, atom.ID))
+		fmt.Fprintf(&sb, "%s %s\n", icon, atom.ID)
 	}
 	sb.WriteString("\n")
 
 	sb.WriteString("IMPLEMENTATIONS\n\n")
 	for _, imp := range g.Implementations {
-		sb.WriteString(fmt.Sprintf("%s\n  %s\n  digest %s\n\n", imp.Requirement, imp.Provider, imp.Digest))
+		fmt.Fprintf(&sb, "%s\n  %s\n  digest %s\n\n", imp.Requirement, imp.Provider, imp.Digest)
 	}
 
 	sb.WriteString("EVIDENCE\n\n")
@@ -202,12 +202,12 @@ func (g ExplainGraph) RenderText() string {
 		if !ev.Verified {
 			icon = "[FAIL]"
 		}
-		sb.WriteString(fmt.Sprintf("%s %s\n", icon, ev.Type))
+		fmt.Fprintf(&sb, "%s %s\n", icon, ev.Type)
 	}
 	sb.WriteString("\n")
 
 	sb.WriteString("COMPLETENESS\n")
-	sb.WriteString(fmt.Sprintf("%d / %d required\n\n", g.Completeness.Verified, g.Completeness.Required))
+	fmt.Fprintf(&sb, "%d / %d required\n\n", g.Completeness.Verified, g.Completeness.Required)
 
 	sb.WriteString("FRESHNESS\n")
 	sb.WriteString(g.Freshness + "\n\n")
@@ -224,7 +224,7 @@ func (g ExplainGraph) RenderText() string {
 	if len(g.Projections) > 0 {
 		sb.WriteString("OSCAL PROJECTIONS\n\n")
 		for k, v := range g.Projections {
-			sb.WriteString(fmt.Sprintf("%s\n  %s\n\n", k, v))
+			fmt.Fprintf(&sb, "%s\n  %s\n\n", k, v)
 		}
 	}
 

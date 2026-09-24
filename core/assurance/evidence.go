@@ -207,12 +207,12 @@ func (c EvidenceCompleteness) IsComplete() bool {
 
 // ContractEvaluationResult records the result of evaluating an EvidenceContract.
 type ContractEvaluationResult struct {
-	ContractID          string             `json:"contractId"`
-	Completeness        EvidenceCompleteness `json:"completeness"`
-	VerifiedEvidences   []EvidenceEnvelope `json:"verifiedEvidences"`
-	StaleEvidences      []EvidenceEnvelope `json:"staleEvidences"`
+	ContractID          string                `json:"contractId"`
+	Completeness        EvidenceCompleteness  `json:"completeness"`
+	VerifiedEvidences   []EvidenceEnvelope    `json:"verifiedEvidences"`
+	StaleEvidences      []EvidenceEnvelope    `json:"staleEvidences"`
 	MissingRequirements []EvidenceRequirement `json:"missingRequirements"`
-	State               AssuranceState     `json:"state"`
+	State               AssuranceState        `json:"state"`
 }
 
 // EvidenceContract defines the mandatory proof requirements for a control binding.

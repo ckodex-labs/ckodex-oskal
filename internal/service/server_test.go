@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
@@ -376,8 +377,7 @@ func TestSubmitReceipt(t *testing.T) {
 	}
 
 	// 2. Submit tampered receipt
-	tamperedReceipt := &receiptv1.ControlReceipt{}
-	*tamperedReceipt = *protoReceipt
+	tamperedReceipt := proto.Clone(protoReceipt).(*receiptv1.ControlReceipt)
 	tamperedReceipt.EvidenceRoot = "sha256:tampered"
 
 	respTampered, err := client.SubmitReceipt(ctx, &servicesv1.SubmitReceiptRequest{

@@ -20,13 +20,13 @@ import (
 // ControlBindingReconciler reconciles ControlBinding objects and updates AssuranceState projections.
 type ControlBindingReconciler struct {
 	client.Client
-	Scheme            *runtime.Scheme
-	Log               logr.Logger
-	ControlResolver   ports.ControlResolver
-	SubjectResolver   ports.SubjectResolver
-	ClaimEvaluator    ports.ClaimEvaluator
-	EvidenceRepo      ports.EvidenceRepository
-	ReceiptSigner     ports.ReceiptSigner
+	Scheme          *runtime.Scheme
+	Log             logr.Logger
+	ControlResolver ports.ControlResolver
+	SubjectResolver ports.SubjectResolver
+	ClaimEvaluator  ports.ClaimEvaluator
+	EvidenceRepo    ports.EvidenceRepository
+	ReceiptSigner   ports.ReceiptSigner
 }
 
 // +kubebuilder:rbac:groups=assurance.ckodex.io,resources=controlbindings,verbs=get;list;watch;create;update;patch;delete

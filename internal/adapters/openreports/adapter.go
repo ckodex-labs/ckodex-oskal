@@ -14,13 +14,13 @@ import (
 
 // OpenReportFinding represents a finding from an external scanner or policy engine (Section 24).
 type OpenReportFinding struct {
-	Rule        string            `json:"rule"`
-	Source      string            `json:"source"` // "kyverno", "trivy", "kube-bench", "gatekeeper"
-	Result      string            `json:"result"` // "pass", "fail", "warn", "error", "skip"
-	Severity    string            `json:"severity"` // "critical", "high", "medium", "low", "info"
-	Message     string            `json:"message"`
-	Timestamp   time.Time         `json:"timestamp"`
-	Properties  map[string]string `json:"properties,omitempty"`
+	Rule       string            `json:"rule"`
+	Source     string            `json:"source"`   // "kyverno", "trivy", "kube-bench", "gatekeeper"
+	Result     string            `json:"result"`   // "pass", "fail", "warn", "error", "skip"
+	Severity   string            `json:"severity"` // "critical", "high", "medium", "low", "info"
+	Message    string            `json:"message"`
+	Timestamp  time.Time         `json:"timestamp"`
+	Properties map[string]string `json:"properties,omitempty"`
 }
 
 // OpenReportSubject identifies the target resource evaluated in the report.
@@ -137,8 +137,8 @@ func (a *Adapter) IngestReport(
 		observations = append(observations, obs)
 
 		// Map to finding if result indicates non-compliance / violation
-		resultNormalized := strings.ToLower(f.Result)
-		if resultNormalized == "fail" || resultNormalized == "error" {
+		switch strings.ToLower(f.Result) {
+		case "fail", "error":
 			findingID := fmt.Sprintf("find-openrep-%s-%d", report.Name, i)
 			finding := assurance.Finding{
 				ID:           findingID,
@@ -151,7 +151,7 @@ func (a *Adapter) IngestReport(
 				EvidenceRefs: []assurance.EvidenceRef{evRef},
 			}
 			findings = append(findings, finding)
-		} else if resultNormalized == "pass" {
+		case "pass":
 			// Generate positive evidence envelope
 			env := assurance.EvidenceEnvelope{
 				Schema:          "assurance.ckodex.io/evidence/v1alpha1",
@@ -184,7 +184,7 @@ func ComputeReportDigest(report OpenReport) string {
 	sb.WriteString(report.Spec.Subject.Name)
 	sb.WriteString("|")
 	for _, f := range report.Spec.Findings {
-		sb.WriteString(fmt.Sprintf("%s:%s:%s;", f.Source, f.Rule, f.Result))
+		fmt.Fprintf(&sb, "%s:%s:%s;", f.Source, f.Rule, f.Result)
 	}
 	h := sha256.Sum256([]byte(sb.String()))
 	return "sha256:" + hex.EncodeToString(h[:])

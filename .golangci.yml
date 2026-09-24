@@ -1,0 +1,44 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - errcheck
+    - revive
+    - misspell
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+  exclusions:
+    rules:
+      - path: ".*\\.pb\\.go"
+        linters:
+          - errcheck
+          - revive
+          - staticcheck
+          - unused
+          - ineffassign
+          - govet
+      - path: "proto/.*"
+        linters:
+          - errcheck
+          - revive
+          - staticcheck
+          - unused
+          - ineffassign
+          - govet
+
+formatters:
+  enable:
+    - gofmt
+
+run:
+  timeout: 5m

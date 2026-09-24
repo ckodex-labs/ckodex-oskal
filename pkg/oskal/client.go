@@ -125,9 +125,10 @@ func (c *grpcClient) GetAssuranceState(ctx context.Context, subject SubjectRef) 
 
 	state := mapProtoState(resp.State)
 	freshness := "current"
-	if state == StateUnknown {
+	switch state {
+	case StateUnknown:
 		freshness = "unknown"
-	} else if state == StateStale {
+	case StateStale:
 		freshness = "stale"
 	}
 

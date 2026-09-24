@@ -20,7 +20,7 @@ type MissingEvidencePolicy struct {
 
 // EvidenceContractSpec defines the desired state of EvidenceContract.
 type EvidenceContractSpec struct {
-	Requirements             []ContractRequirement `json:"requirements"`
+	Requirements              []ContractRequirement `json:"requirements"`
 	OnMissingRequiredEvidence MissingEvidencePolicy `json:"onMissingRequiredEvidence,omitempty"`
 }
 
