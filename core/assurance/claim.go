@@ -176,16 +176,16 @@ func (g ExplainGraph) RenderText() string {
 
 	sb.WriteString("APPLICABILITY\n")
 	if g.Applicability == "applicable" {
-		sb.WriteString("✓ applicable\n\n")
+		sb.WriteString("[PASS] applicable\n\n")
 	} else {
-		sb.WriteString("✗ " + g.Applicability + "\n\n")
+		sb.WriteString("[FAIL] " + g.Applicability + "\n\n")
 	}
 
 	sb.WriteString("ATOMIC REQUIREMENTS\n\n")
 	for _, atom := range g.AtomicRequirements {
-		icon := "✓"
+		icon := "[PASS]"
 		if !atom.Satisfied {
-			icon = "✗"
+			icon = "[FAIL]"
 		}
 		sb.WriteString(fmt.Sprintf("%s %s\n", icon, atom.ID))
 	}
@@ -198,9 +198,9 @@ func (g ExplainGraph) RenderText() string {
 
 	sb.WriteString("EVIDENCE\n\n")
 	for _, ev := range g.Evidence {
-		icon := "✓"
+		icon := "[PASS]"
 		if !ev.Verified {
-			icon = "✗"
+			icon = "[FAIL]"
 		}
 		sb.WriteString(fmt.Sprintf("%s %s\n", icon, ev.Type))
 	}
