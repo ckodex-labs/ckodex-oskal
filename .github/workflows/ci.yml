@@ -10,38 +10,17 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    name: golangci-lint
+  ssdlc:
+    name: Dagger SSDLC Pipeline
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-          cache: true
-      - name: Install golangci-lint
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.13.2
-      - name: Run golangci-lint
-        run: $(go env GOPATH)/bin/golangci-lint run ./...
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  test:
-    name: Test with Race Detector
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Setup Dagger
+        uses: dagger/dagger-for-github@v7
         with:
-          go-version: '1.24'
-      - name: Run Tests
-        run: go test -v -race -coverprofile=coverage.out ./...
+          version: "v0.21.9"
 
-  buf:
-    name: Protobuf Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: bufbuild/buf-action@v1
-        with:
-          lint: true
-          push: false
+      - name: Dagger SSDLC All (Lint, ProtoCheck, Test, Scan, Build)
+        run: dagger call all --source=.
