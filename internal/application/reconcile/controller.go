@@ -12,9 +12,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	assurancev1alpha1 "github.com/ckodex-labs/oskal/api/assurance/v1alpha1"
-	"github.com/ckodex-labs/oskal/core/assurance"
-	"github.com/ckodex-labs/oskal/internal/ports"
+	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 )
 
 // ControlBindingReconciler reconciles ControlBinding objects and updates AssuranceState projections.

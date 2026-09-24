@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package ckodex.assurance.assessment.v1;
 
-option go_package = "github.com/ckodex-labs/oskal/proto/assurance/assessment/v1;assessmentv1";
+option go_package = "github.com/ckodex-labs/ckodex-oskal/proto/assurance/assessment/v1;assessmentv1";
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/duration.proto";

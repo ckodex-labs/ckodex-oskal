@@ -7,8 +7,8 @@
 package receiptv1
 
 import (
-	v1 "github.com/ckodex-labs/oskal/proto/assurance/common/v1"
-	v11 "github.com/ckodex-labs/oskal/proto/assurance/control/v1"
+	v1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
+	v11 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -147,7 +147,7 @@ const file_assurance_receipt_v1_receipt_proto_rawDesc = "" +
 	"\tevaluator\x18\x06 \x01(\v2(.ckodex.assurance.common.v1.AuthorityRefR\tevaluator\x12=\n" +
 	"\fevaluated_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\vevaluatedAt\x12\x1c\n" +
 	"\tsignature\x18\b \x01(\tR\tsignature\x12\x16\n" +
-	"\x06format\x18\t \x01(\tR\x06formatBCZAgithub.com/ckodex-labs/oskal/proto/assurance/receipt/v1;receiptv1b\x06proto3"
+	"\x06format\x18\t \x01(\tR\x06formatBJZHgithub.com/ckodex-labs/ckodex-oskal/proto/assurance/receipt/v1;receiptv1b\x06proto3"
 
 var (
 	file_assurance_receipt_v1_receipt_proto_rawDescOnce sync.Once

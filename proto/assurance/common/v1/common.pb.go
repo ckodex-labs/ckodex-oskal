@@ -573,7 +573,7 @@ const file_assurance_common_v1_common_proto_rawDesc = "" +
 	"\x12COHERENCE_COHERENT\x10\x01\x12 \n" +
 	"\x1cCOHERENCE_PARTIALLY_COHERENT\x10\x02\x12\x18\n" +
 	"\x14COHERENCE_DECOHERENT\x10\x03\x12\x19\n" +
-	"\x15COHERENCE_RECONCILING\x10\x04BAZ?github.com/ckodex-labs/oskal/proto/assurance/common/v1;commonv1b\x06proto3"
+	"\x15COHERENCE_RECONCILING\x10\x04BHZFgithub.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1;commonv1b\x06proto3"
 
 var (
 	file_assurance_common_v1_common_proto_rawDescOnce sync.Once

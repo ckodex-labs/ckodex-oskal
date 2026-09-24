@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package ckodex.assurance.common.v1;
 
-option go_package = "github.com/ckodex-labs/oskal/proto/assurance/common/v1;commonv1";
+option go_package = "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1;commonv1";
 
 // SubjectRef uniquely and stably addresses an evaluated entity.
 message SubjectRef {

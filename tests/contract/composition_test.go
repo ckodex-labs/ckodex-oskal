@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
-	"github.com/ckodex-labs/oskal/internal/adapters/cel"
-	"github.com/ckodex-labs/oskal/internal/adapters/cilium"
-	"github.com/ckodex-labs/oskal/internal/adapters/tetragon"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/cel"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/cilium"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/tetragon"
 )
 
 func TestDeclarativeAndRuntimeEvidenceComposeIntoOneClaim(t *testing.T) {

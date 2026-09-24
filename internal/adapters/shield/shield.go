@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
 // ModelForensics captures weight integrity and tamper checks (Section 59).

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
 // NetworkFlowEvent models a Cilium eBPF network flow observation.

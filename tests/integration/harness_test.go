@@ -12,9 +12,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	assurancev1alpha1 "github.com/ckodex-labs/oskal/api/assurance/v1alpha1"
-	"github.com/ckodex-labs/oskal/core/assurance"
-	"github.com/ckodex-labs/oskal/internal/application/reconcile"
+	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/reconcile"
 )
 
 func TestControllerReconciliationHarness(t *testing.T) {

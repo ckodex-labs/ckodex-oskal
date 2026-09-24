@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
 func TestCLIHonestStateReporting(t *testing.T) {

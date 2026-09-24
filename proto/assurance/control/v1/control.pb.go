@@ -7,7 +7,7 @@
 package controlv1
 
 import (
-	v1 "github.com/ckodex-labs/oskal/proto/assurance/common/v1"
+	v1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -380,7 +380,7 @@ const file_assurance_control_v1_control_proto_rawDesc = "" +
 	" IMPLEMENTATION_PURPOSE_DETECTIVE\x10\x02\x12%\n" +
 	"!IMPLEMENTATION_PURPOSE_CORRECTIVE\x10\x03\x12'\n" +
 	"#IMPLEMENTATION_PURPOSE_COMPENSATING\x10\x04\x12(\n" +
-	"$IMPLEMENTATION_PURPOSE_INFORMATIONAL\x10\x05BCZAgithub.com/ckodex-labs/oskal/proto/assurance/control/v1;controlv1b\x06proto3"
+	"$IMPLEMENTATION_PURPOSE_INFORMATIONAL\x10\x05BJZHgithub.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1;controlv1b\x06proto3"
 
 var (
 	file_assurance_control_v1_control_proto_rawDescOnce sync.Once

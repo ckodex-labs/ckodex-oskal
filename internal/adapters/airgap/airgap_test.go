@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
-	"github.com/ckodex-labs/oskal/internal/adapters/cel"
-	"github.com/ckodex-labs/oskal/internal/projection/oscal"
-	"github.com/ckodex-labs/oskal/internal/receipts"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/cel"
+	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
+	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 )
 
 // Section 92 Acceptance Test: Air Gap

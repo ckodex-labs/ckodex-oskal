@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
 // ControlResolver determines which controls apply to a subject (Section 30).

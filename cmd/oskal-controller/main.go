@@ -12,8 +12,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	assurancev1alpha1 "github.com/ckodex-labs/oskal/api/assurance/v1alpha1"
-	"github.com/ckodex-labs/oskal/internal/application/reconcile"
+	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/reconcile"
 )
 
 var (

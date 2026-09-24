@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
 // ProcessEvent models an eBPF-captured process execution fact from Tetragon.

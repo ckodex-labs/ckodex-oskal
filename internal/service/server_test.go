@@ -11,13 +11,13 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
-	"github.com/ckodex-labs/oskal/internal/receipts"
-	commonv1 "github.com/ckodex-labs/oskal/proto/assurance/common/v1"
-	controlv1 "github.com/ckodex-labs/oskal/proto/assurance/control/v1"
-	evidencev1 "github.com/ckodex-labs/oskal/proto/assurance/evidence/v1"
-	receiptv1 "github.com/ckodex-labs/oskal/proto/assurance/receipt/v1"
-	servicesv1 "github.com/ckodex-labs/oskal/proto/assurance/services/v1"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
+	commonv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
+	controlv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1"
+	evidencev1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/evidence/v1"
+	receiptv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/receipt/v1"
+	servicesv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/services/v1"
 )
 
 const bufSize = 1024 * 1024

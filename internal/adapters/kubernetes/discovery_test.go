@@ -7,8 +7,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	assurancev1alpha1 "github.com/ckodex-labs/oskal/api/assurance/v1alpha1"
-	"github.com/ckodex-labs/oskal/core/assurance"
+	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
 func TestDeploymentDiscoveryAndDigest(t *testing.T) {

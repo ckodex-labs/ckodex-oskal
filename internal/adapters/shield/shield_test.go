@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
-	"github.com/ckodex-labs/oskal/internal/projection/oscal"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 )
 
 func TestShieldAIModelAssuranceEvaluation(t *testing.T) {

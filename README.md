@@ -1,6 +1,6 @@
-# OSKAL — Kubernetes Continuous Assurance Runtime
+# ckodex-oskal -- Kubernetes Continuous Assurance Runtime
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/ckodex-labs/oskal)](https://goreportcard.com/report/github.com/ckodex-labs/oskal)
+[![Go Report Card](https://goreportcard.com/badge/github.com/ckodex-labs/ckodex-oskal)](https://goreportcard.com/report/github.com/ckodex-labs/ckodex-oskal)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![OSCAL Version](https://img.shields.io/badge/OSCAL-v1.2.3-green.svg)](https://pages.nist.gov/OSCAL/)
 
@@ -43,7 +43,7 @@ OSCAL v1.2.3 Specification Artifacts
 ## Directory Structure
 
 ```text
-ckx-oskal-001/
+ckodex-oskal/
 ├── api/assurance/v1alpha1/      # Five Kubernetes CRDs
 ├── cmd/oskal-controller/        # Controller entrypoint (leader election, probes, metrics)
 ├── config/                      # Kustomize / CRD / RBAC manifests

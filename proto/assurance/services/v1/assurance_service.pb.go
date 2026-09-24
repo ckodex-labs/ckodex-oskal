@@ -7,11 +7,11 @@
 package servicesv1
 
 import (
-	v13 "github.com/ckodex-labs/oskal/proto/assurance/assessment/v1"
-	v11 "github.com/ckodex-labs/oskal/proto/assurance/common/v1"
-	v12 "github.com/ckodex-labs/oskal/proto/assurance/control/v1"
-	v1 "github.com/ckodex-labs/oskal/proto/assurance/evidence/v1"
-	v14 "github.com/ckodex-labs/oskal/proto/assurance/receipt/v1"
+	v13 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/assessment/v1"
+	v11 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
+	v12 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1"
+	v1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/evidence/v1"
+	v14 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/receipt/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -744,7 +744,7 @@ const file_assurance_services_v1_assurance_service_proto_rawDesc = "" +
 	"\x0fEvaluateSubject\x124.ckodex.assurance.services.v1.EvaluateSubjectRequest\x1a5.ckodex.assurance.services.v1.EvaluateSubjectResponse\x12u\n" +
 	"\fExplainClaim\x121.ckodex.assurance.services.v1.ExplainClaimRequest\x1a2.ckodex.assurance.services.v1.ExplainClaimResponse\x12\x84\x01\n" +
 	"\x11GetAssuranceState\x126.ckodex.assurance.services.v1.GetAssuranceStateRequest\x1a7.ckodex.assurance.services.v1.GetAssuranceStateResponse\x12x\n" +
-	"\rSubmitReceipt\x122.ckodex.assurance.services.v1.SubmitReceiptRequest\x1a3.ckodex.assurance.services.v1.SubmitReceiptResponseBEZCgithub.com/ckodex-labs/oskal/proto/assurance/services/v1;servicesv1b\x06proto3"
+	"\rSubmitReceipt\x122.ckodex.assurance.services.v1.SubmitReceiptRequest\x1a3.ckodex.assurance.services.v1.SubmitReceiptResponseBLZJgithub.com/ckodex-labs/ckodex-oskal/proto/assurance/services/v1;servicesv1b\x06proto3"
 
 var (
 	file_assurance_services_v1_assurance_service_proto_rawDescOnce sync.Once

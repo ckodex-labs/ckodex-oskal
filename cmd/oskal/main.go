@@ -16,14 +16,14 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
-	"github.com/ckodex-labs/oskal/internal/application/explain"
-	"github.com/ckodex-labs/oskal/internal/projection/oscal"
-	"github.com/ckodex-labs/oskal/internal/receipts"
-	"github.com/ckodex-labs/oskal/internal/service"
-	commonv1 "github.com/ckodex-labs/oskal/proto/assurance/common/v1"
-	controlv1 "github.com/ckodex-labs/oskal/proto/assurance/control/v1"
-	servicesv1 "github.com/ckodex-labs/oskal/proto/assurance/services/v1"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
+	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
+	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
+	"github.com/ckodex-labs/ckodex-oskal/internal/service"
+	commonv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
+	controlv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1"
+	servicesv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/services/v1"
 )
 
 var (

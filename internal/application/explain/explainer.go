@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
 // Explainer coordinates multi-dimensional evidence to construct an ExplainGraph (Section 49).

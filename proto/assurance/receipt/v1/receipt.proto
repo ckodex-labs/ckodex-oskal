@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package ckodex.assurance.receipt.v1;
 
-option go_package = "github.com/ckodex-labs/oskal/proto/assurance/receipt/v1;receiptv1";
+option go_package = "github.com/ckodex-labs/ckodex-oskal/proto/assurance/receipt/v1;receiptv1";
 
 import "google/protobuf/timestamp.proto";
 import "assurance/common/v1/common.proto";

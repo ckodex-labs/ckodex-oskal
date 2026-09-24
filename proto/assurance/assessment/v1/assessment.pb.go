@@ -7,9 +7,9 @@
 package assessmentv1
 
 import (
-	v1 "github.com/ckodex-labs/oskal/proto/assurance/common/v1"
-	v11 "github.com/ckodex-labs/oskal/proto/assurance/control/v1"
-	v12 "github.com/ckodex-labs/oskal/proto/assurance/evidence/v1"
+	v1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
+	v11 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1"
+	v12 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/evidence/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	durationpb "google.golang.org/protobuf/types/known/durationpb"
@@ -565,7 +565,7 @@ const file_assurance_assessment_v1_assessment_proto_rawDesc = "" +
 	"\rrequire_fresh\x18\x03 \x01(\bR\frequireFresh\x12=\n" +
 	"\x1bfail_on_confirmed_violation\x18\x04 \x01(\bR\x18failOnConfirmedViolation\x120\n" +
 	"\x14unknown_is_violation\x18\x05 \x01(\bR\x12unknownIsViolation\x12G\n" +
-	"\x12max_evaluation_age\x18\x06 \x01(\v2\x19.google.protobuf.DurationR\x10maxEvaluationAgeBIZGgithub.com/ckodex-labs/oskal/proto/assurance/assessment/v1;assessmentv1b\x06proto3"
+	"\x12max_evaluation_age\x18\x06 \x01(\v2\x19.google.protobuf.DurationR\x10maxEvaluationAgeBPZNgithub.com/ckodex-labs/ckodex-oskal/proto/assurance/assessment/v1;assessmentv1b\x06proto3"
 
 var (
 	file_assurance_assessment_v1_assessment_proto_rawDescOnce sync.Once

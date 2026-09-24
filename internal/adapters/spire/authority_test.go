@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
 func TestSpireAuthorityAuthenticationAndAuthorization(t *testing.T) {

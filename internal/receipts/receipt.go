@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
 // ReceiptManager handles creation, signing, and verification of ControlReceipts (Section 41 & 42).

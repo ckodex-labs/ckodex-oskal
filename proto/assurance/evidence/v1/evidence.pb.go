@@ -7,8 +7,8 @@
 package evidencev1
 
 import (
-	v1 "github.com/ckodex-labs/oskal/proto/assurance/common/v1"
-	v11 "github.com/ckodex-labs/oskal/proto/assurance/control/v1"
+	v1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
+	v11 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	durationpb "google.golang.org/protobuf/types/known/durationpb"
@@ -581,7 +581,7 @@ const file_assurance_evidence_v1_evidence_proto_rawDesc = "" +
 	"\apresent\x18\x02 \x01(\x05R\apresent\x12\x1a\n" +
 	"\bverified\x18\x03 \x01(\x05R\bverified\x12\x14\n" +
 	"\x05stale\x18\x04 \x01(\x05R\x05stale\x12\x18\n" +
-	"\amissing\x18\x05 \x01(\x05R\amissingBEZCgithub.com/ckodex-labs/oskal/proto/assurance/evidence/v1;evidencev1b\x06proto3"
+	"\amissing\x18\x05 \x01(\x05R\amissingBLZJgithub.com/ckodex-labs/ckodex-oskal/proto/assurance/evidence/v1;evidencev1b\x06proto3"
 
 var (
 	file_assurance_evidence_v1_evidence_proto_rawDescOnce sync.Once

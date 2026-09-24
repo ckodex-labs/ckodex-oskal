@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package ckodex.assurance.services.v1;
 
-option go_package = "github.com/ckodex-labs/oskal/proto/assurance/services/v1;servicesv1";
+option go_package = "github.com/ckodex-labs/ckodex-oskal/proto/assurance/services/v1;servicesv1";
 
 import "assurance/common/v1/common.proto";
 import "assurance/control/v1/control.proto";

@@ -1,4 +1,4 @@
-module github.com/ckodex-labs/oskal
+module github.com/ckodex-labs/ckodex-oskal
 
 go 1.27.1
 

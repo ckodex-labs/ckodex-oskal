@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ckodex-labs/oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
 // ArtifactMetadata captures supply chain identity (Section 26).
