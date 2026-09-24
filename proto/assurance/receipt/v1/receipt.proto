@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package ckodex.assurance.receipt.v1;
+
+option go_package = "github.com/ckodex-labs/oskal/proto/assurance/receipt/v1;receiptv1";
+
+import "google/protobuf/timestamp.proto";
+import "assurance/common/v1/common.proto";
+import "assurance/control/v1/control.proto";
+
+// ControlReceipt is a cryptographically verifiable record of an evaluation.
+message ControlReceipt {
+  ckodex.assurance.common.v1.SubjectRef subject = 1;
+  ckodex.assurance.control.v1.ControlRef control = 2;
+  ckodex.assurance.common.v1.AssuranceState state = 3;
+  ckodex.assurance.common.v1.AssuranceEpoch epoch = 4;
+  string evidence_root = 5;
+  ckodex.assurance.common.v1.AuthorityRef evaluator = 6;
+  google.protobuf.Timestamp evaluated_at = 7;
+  string signature = 8;
+  string format = 9; // e.g. "sigstore-bundle", "ed25519"
+}

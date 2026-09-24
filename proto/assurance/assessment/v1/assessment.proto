@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package ckodex.assurance.assessment.v1;
+
+option go_package = "github.com/ckodex-labs/oskal/proto/assurance/assessment/v1;assessmentv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "assurance/common/v1/common.proto";
+import "assurance/control/v1/control.proto";
+import "assurance/evidence/v1/evidence.proto";
+
+// Claim represents a statement that a subject satisfies a control.
+message Claim {
+  string id = 1;
+  ckodex.assurance.common.v1.SubjectRef subject = 2;
+  ckodex.assurance.control.v1.ControlRef control = 3;
+  ckodex.assurance.common.v1.AssuranceState target_state = 4;
+}
+
+// ClaimEvaluation is the deterministic evaluation of a Claim against verified evidence.
+message ClaimEvaluation {
+  string id = 1;
+  ckodex.assurance.control.v1.ControlRef control = 2;
+  ckodex.assurance.common.v1.SubjectRef subject = 3;
+  ckodex.assurance.common.v1.AssuranceState state = 4;
+  ckodex.assurance.common.v1.AssuranceVector vector = 5;
+  ckodex.assurance.common.v1.AssuranceEpoch epoch = 6;
+  repeated ckodex.assurance.evidence.v1.EvidenceRef evidence = 7;
+  ckodex.assurance.evidence.v1.EvidenceCompleteness completeness = 8;
+  string evidence_root = 9;
+  google.protobuf.Timestamp evaluated_at = 10;
+  google.protobuf.Timestamp valid_until = 11;
+  repeated string trace = 12;
+}
+
+// Finding represents a confirmed, material non-conformance.
+message Finding {
+  string id = 1;
+  ckodex.assurance.common.v1.SubjectRef subject = 2;
+  ckodex.assurance.control.v1.ControlRef control = 3;
+  string severity = 4;
+  string title = 5;
+  string description = 6;
+  google.protobuf.Timestamp discovered_at = 7;
+  repeated ckodex.assurance.evidence.v1.EvidenceRef evidence_refs = 8;
+}
+
+// ControlException models an authorized, bounded derogation.
+message ControlException {
+  string id = 1;
+  ckodex.assurance.common.v1.SubjectRef subject = 2;
+  repeated ckodex.assurance.control.v1.ControlRef controls = 3;
+  string justification = 4;
+  repeated ckodex.assurance.common.v1.AuthorityRef required_approvers = 5;
+  google.protobuf.Timestamp not_before = 6;
+  google.protobuf.Timestamp not_after = 7;
+  repeated ckodex.assurance.control.v1.ControlRef compensating_controls = 8;
+}
+
+// AssurancePolicy specifies higher-level evaluation rules.
+message AssurancePolicy {
+  string name = 1;
+  ckodex.assurance.common.v1.AssuranceState required_state = 2;
+  bool require_fresh = 3;
+  bool fail_on_confirmed_violation = 4;
+  bool unknown_is_violation = 5;
+  google.protobuf.Duration max_evaluation_age = 6;
+}

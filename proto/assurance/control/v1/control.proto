@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package ckodex.assurance.control.v1;
+
+option go_package = "github.com/ckodex-labs/oskal/proto/assurance/control/v1;controlv1";
+
+import "assurance/common/v1/common.proto";
+
+// ControlRef identifies a standard or canonical security control.
+message ControlRef {
+  string namespace = 1;
+  string id = 2;
+  string version = 3;
+}
+
+// ImplementationPurpose defines control realization purpose.
+enum ImplementationPurpose {
+  IMPLEMENTATION_PURPOSE_UNSPECIFIED = 0;
+  IMPLEMENTATION_PURPOSE_PREVENTIVE = 1;
+  IMPLEMENTATION_PURPOSE_DETECTIVE = 2;
+  IMPLEMENTATION_PURPOSE_CORRECTIVE = 3;
+  IMPLEMENTATION_PURPOSE_COMPENSATING = 4;
+  IMPLEMENTATION_PURPOSE_INFORMATIONAL = 5;
+}
+
+// ImplementationRef identifies a realization mechanism.
+message ImplementationRef {
+  string provider = 1;
+  string id = 2;
+  string digest = 3;
+  ImplementationPurpose purpose = 4;
+}
+
+// AtomicControl represents an individually evaluable decomposed control atom.
+message AtomicControl {
+  string id = 1;
+  string description = 2;
+  bool satisfied = 3;
+}
+
+// ImplementationBinding binds controls, subjects, and implementation providers.
+message ImplementationBinding {
+  string id = 1;
+  repeated ControlRef controls = 2;
+  repeated ckodex.assurance.common.v1.SubjectRef subjects = 3;
+  repeated ImplementationRef implementations = 4;
+  repeated string evidence_contract_refs = 5;
+}

@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package ckodex.assurance.common.v1;
+
+option go_package = "github.com/ckodex-labs/oskal/proto/assurance/common/v1;commonv1";
+
+// SubjectRef uniquely and stably addresses an evaluated entity.
+message SubjectRef {
+  string scheme = 1;
+  string id = 2;
+  map<string, string> attributes = 3;
+}
+
+// AuthorityRef identifies the authority backing an assertion or signature.
+message AuthorityRef {
+  string scheme = 1;
+  string subject = 2;
+  string trust_domain = 3;
+}
+
+// AssuranceEpoch encapsulates the cryptographic state vector of the environment.
+message AssuranceEpoch {
+  string subject_digest = 1;
+  string implementation_digest = 2;
+  string policy_digest = 3;
+  string authority_digest = 4;
+  string environment_digest = 5;
+}
+
+// AssuranceState represents canonical lifecycle states.
+enum AssuranceState {
+  ASSURANCE_STATE_UNSPECIFIED = 0;
+  ASSURANCE_STATE_UNKNOWN = 1;
+  ASSURANCE_STATE_OBSERVED = 2;
+  ASSURANCE_STATE_VERIFIED = 3;
+  ASSURANCE_STATE_ASSURED = 4;
+  ASSURANCE_STATE_STALE = 5;
+  ASSURANCE_STATE_FAILED = 6;
+}
+
+// Valence describes the directional effect of evidence.
+enum Valence {
+  VALENCE_UNSPECIFIED = 0;
+  VALENCE_POSITIVE = 1;
+  VALENCE_NEGATIVE = 2;
+  VALENCE_NEUTRAL = 3;
+  VALENCE_MIXED = 4;
+  VALENCE_UNRESOLVED = 5;
+}
+
+// Coherence describes whether representations form one trustworthy state.
+enum Coherence {
+  COHERENCE_UNSPECIFIED = 0;
+  COHERENCE_COHERENT = 1;
+  COHERENCE_PARTIALLY_COHERENT = 2;
+  COHERENCE_DECOHERENT = 3;
+  COHERENCE_RECONCILING = 4;
+}
+
+// AssuranceVector models continuous multidimensional state.
+message AssuranceVector {
+  Valence applicability = 1;
+  Valence conformance = 2;
+  Valence provenance = 3;
+  Valence integrity = 4;
+  Valence authority = 5;
+  Valence identity = 6;
+  Valence runtime = 7;
+  Valence freshness = 8;
+  Valence completeness = 9;
+  Coherence coherence = 10;
+}

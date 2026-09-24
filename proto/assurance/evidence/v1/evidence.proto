@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package ckodex.assurance.evidence.v1;
+
+option go_package = "github.com/ckodex-labs/oskal/proto/assurance/evidence/v1;evidencev1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "assurance/common/v1/common.proto";
+import "assurance/control/v1/control.proto";
+
+// EvidenceRef points to an immutable content-addressed evidence artifact.
+message EvidenceRef {
+  string uri = 1;
+  string digest = 2;
+  string media_type = 3;
+}
+
+// Observation represents an atomic fact captured about a subject.
+message Observation {
+  string id = 1;
+  ckodex.assurance.common.v1.SubjectRef subject = 2;
+  string type = 3;
+  google.protobuf.Timestamp observed_at = 4;
+  ckodex.assurance.common.v1.AuthorityRef observer = 5;
+  repeated EvidenceRef evidence = 6;
+  map<string, string> attributes = 7;
+}
+
+// EvidenceRequirement specifies an individual required piece of evidence.
+message EvidenceRequirement {
+  string id = 1;
+  string evidence_type = 2;
+  bool required = 3;
+  google.protobuf.Duration max_age = 4;
+  repeated string accepted_producers = 5;
+}
+
+// EvidenceContract defines mandatory proof requirements for a control binding.
+message EvidenceContract {
+  string id = 1;
+  string name = 2;
+  repeated EvidenceRequirement requirements = 3;
+  ckodex.assurance.common.v1.AssuranceState on_missing_required_state = 4;
+}
+
+// EvidenceEnvelope packages evidence metadata and cryptographic bindings.
+message EvidenceEnvelope {
+  string schema = 1;
+  string id = 2;
+  ckodex.assurance.common.v1.SubjectRef subject = 3;
+  string observation_type = 4;
+  google.protobuf.Timestamp captured_at = 5;
+  ckodex.assurance.common.v1.AuthorityRef producer = 6;
+  EvidenceRef artifact = 7;
+  string integrity_digest = 8;
+  string signature_ref = 9;
+  ckodex.assurance.common.v1.AssuranceEpoch epoch = 10;
+  repeated ckodex.assurance.control.v1.ControlRef control_refs = 11;
+}
+
+// EvidenceCompleteness tracks coverage of required evidence.
+message EvidenceCompleteness {
+  int32 required = 1;
+  int32 present = 2;
+  int32 verified = 3;
+  int32 stale = 4;
+  int32 missing = 5;
+}

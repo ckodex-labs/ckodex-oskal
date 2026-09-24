@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package ckodex.assurance.services.v1;
+
+option go_package = "github.com/ckodex-labs/oskal/proto/assurance/services/v1;servicesv1";
+
+import "assurance/common/v1/common.proto";
+import "assurance/control/v1/control.proto";
+import "assurance/evidence/v1/evidence.proto";
+import "assurance/assessment/v1/assessment.proto";
+import "assurance/receipt/v1/receipt.proto";
+
+message SubmitObservationRequest {
+  ckodex.assurance.evidence.v1.Observation observation = 1;
+}
+
+message SubmitObservationResponse {
+  string observation_id = 1;
+  bool accepted = 2;
+  string message = 3;
+}
+
+message EvaluateSubjectRequest {
+  ckodex.assurance.common.v1.SubjectRef subject = 1;
+  repeated ckodex.assurance.control.v1.ControlRef controls = 2;
+  bool force_fresh = 3;
+}
+
+message EvaluateSubjectResponse {
+  ckodex.assurance.common.v1.SubjectRef subject = 1;
+  repeated ckodex.assurance.assessment.v1.ClaimEvaluation evaluations = 2;
+  ckodex.assurance.common.v1.AssuranceState summary_state = 3;
+}
+
+message ExplainClaimRequest {
+  ckodex.assurance.common.v1.SubjectRef subject = 1;
+  ckodex.assurance.control.v1.ControlRef control = 2;
+}
+
+message ExplainClaimResponse {
+  ckodex.assurance.common.v1.SubjectRef subject = 1;
+  ckodex.assurance.control.v1.ControlRef control = 2;
+  string canonical_control = 3;
+  string applicability = 4;
+  repeated ckodex.assurance.control.v1.AtomicControl atomic_requirements = 5;
+  repeated ckodex.assurance.control.v1.ImplementationRef implementations = 6;
+  repeated ckodex.assurance.evidence.v1.EvidenceRef evidence = 7;
+  ckodex.assurance.evidence.v1.EvidenceCompleteness completeness = 8;
+  string freshness = 9;
+  string authority = 10;
+  ckodex.assurance.common.v1.AssuranceEpoch epoch = 11;
+  ckodex.assurance.common.v1.AssuranceState assurance_state = 12;
+  string evidence_root = 13;
+  map<string, string> projections = 14;
+  string rendered_text = 15;
+}
+
+message GetAssuranceStateRequest {
+  ckodex.assurance.common.v1.SubjectRef subject = 1;
+}
+
+message GetAssuranceStateResponse {
+  ckodex.assurance.common.v1.SubjectRef subject = 1;
+  ckodex.assurance.common.v1.AssuranceState state = 2;
+  ckodex.assurance.common.v1.AssuranceEpoch epoch = 3;
+  string evidence_root = 4;
+  repeated ckodex.assurance.assessment.v1.ClaimEvaluation evaluations = 5;
+}
+
+message SubmitReceiptRequest {
+  ckodex.assurance.receipt.v1.ControlReceipt receipt = 1;
+}
+
+message SubmitReceiptResponse {
+  bool verified = 1;
+  string receipt_digest = 2;
+  string message = 3;
+}
+
+service AssuranceService {
+  rpc SubmitObservation(SubmitObservationRequest) returns (SubmitObservationResponse);
+  rpc EvaluateSubject(EvaluateSubjectRequest) returns (EvaluateSubjectResponse);
+  rpc ExplainClaim(ExplainClaimRequest) returns (ExplainClaimResponse);
+  rpc GetAssuranceState(GetAssuranceStateRequest) returns (GetAssuranceStateResponse);
+  rpc SubmitReceipt(SubmitReceiptRequest) returns (SubmitReceiptResponse);
+}
