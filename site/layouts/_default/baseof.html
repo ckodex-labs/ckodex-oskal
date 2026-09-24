@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ if .Title }}{{ .Title }} &middot; {{ end }}{{ .Site.Title }}</title>
-  <link rel="stylesheet" href="/css/styles.css">
-  <link rel="icon" type="image/svg+xml" href="/assets/logos/mark-a2-favicon.svg">
+  <link rel="stylesheet" href="{{ "css/styles.css" | relURL }}">
+  <link rel="icon" type="image/svg+xml" href="{{ "assets/logos/mark-a2-favicon.svg" | relURL }}">
   <style>
     /* ==========================================================================
        RESPONSIVE & TOUCH DESIGN OVERHAUL (CKODEX-DS-3 & CORTAIX-DS-1 Section 10)
@@ -235,6 +235,6 @@
     {{ partial "margin.html" . }}
     {{ partial "footer.html" . }}
   </div>
-  <script src="/js/theme.js"></script>
+  <script src="{{ "js/theme.js" | relURL }}"></script>
 </body>
 </html>

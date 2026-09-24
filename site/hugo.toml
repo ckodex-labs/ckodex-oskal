@@ -1,4 +1,4 @@
-baseURL = "/"
+baseURL = "https://ckodex-labs.github.io/ckodex-oskal/"
 locale = "en-US"
 title = "CKODEX-OSKAL - Continuous Assurance Runtime"
 
