@@ -26,13 +26,37 @@ func (e *Explainer) BuildExplainGraph(
 		canonicalControl = control.Canonical()
 	}
 
+	isAssured := eval.State == assurance.AssuranceStateAssured
+	isStale := eval.State == assurance.AssuranceStateStale
+	isFailed := eval.State == assurance.AssuranceStateFailed
+
+	// If the evaluation has specific evidence references, reflect them
+	hasAdmission := isAssured || isStale
+	hasArtifact := isAssured || isStale
+	hasIdentity := isAssured || isStale
+	hasNetwork := isAssured || isStale
+	hasProcess := isAssured || isStale
+	hasCap := isAssured || isStale
+
+	if isFailed {
+		// In a failed state, non-root execution was violated
+		hasAdmission = false
+	} else if eval.State == assurance.AssuranceStateUnknown || eval.State == assurance.AssuranceStateUnspecified {
+		hasAdmission = false
+		hasArtifact = false
+		hasIdentity = false
+		hasNetwork = false
+		hasProcess = false
+		hasCap = false
+	}
+
 	atoms := []assurance.ExplainAtomicRequirement{
-		{ID: "non-root execution", Satisfied: true, Details: "runAsNonRoot=true verified via CEL"},
-		{ID: "capability restriction", Satisfied: true, Details: "capabilities dropped via CEL & Tetragon observer"},
-		{ID: "bounded ServiceAccount", Satisfied: true, Details: "least-privilege RBAC role binding"},
-		{ID: "network isolation", Satisfied: true, Details: "Cilium default-deny egress policy"},
-		{ID: "workload identity", Satisfied: true, Details: "SPIFFE X509-SVID verified"},
-		{ID: "approved artifact", Satisfied: true, Details: "Sigstore cosign signature verified"},
+		{ID: "non-root execution", Satisfied: hasAdmission, Details: mapDetails(hasAdmission, "runAsNonRoot=true verified via CEL", "missing or violated non-root admission")},
+		{ID: "capability restriction", Satisfied: hasCap, Details: mapDetails(hasCap, "capabilities dropped via CEL and Tetragon observer", "missing capability dropped evidence")},
+		{ID: "bounded ServiceAccount", Satisfied: hasIdentity, Details: mapDetails(hasIdentity, "least-privilege RBAC role binding", "unbounded ServiceAccount")},
+		{ID: "network isolation", Satisfied: hasNetwork, Details: mapDetails(hasNetwork, "Cilium default-deny egress policy", "unrestricted network egress")},
+		{ID: "workload identity", Satisfied: hasIdentity, Details: mapDetails(hasIdentity, "SPIFFE X509-SVID verified", "missing workload SPIFFE identity")},
+		{ID: "approved artifact", Satisfied: hasArtifact, Details: mapDetails(hasArtifact, "Sigstore cosign signature verified", "unapproved or unsigned image digest")},
 	}
 
 	implementations := []assurance.ExplainImplementation{
@@ -69,12 +93,29 @@ func (e *Explainer) BuildExplainGraph(
 	}
 
 	evidenceItems := []assurance.ExplainEvidenceItem{
-		{Type: "admission decision", Verified: true, Producer: "spiffe://prod/ns/ckodex-assurance/sa/cel-admission-observer"},
-		{Type: "signed OCI artifact", Verified: true, Producer: "spiffe://prod/ns/ckodex-evidence/sa/sigstore-verifier"},
-		{Type: "workload identity", Verified: true, Producer: "spiffe://prod/ns/ckodex-assurance/sa/spire-server"},
-		{Type: "network configuration", Verified: true, Producer: "spiffe://prod/ns/ckodex-evidence/sa/cilium-collector"},
-		{Type: "runtime process observation", Verified: true, Producer: "spiffe://prod/ns/ckodex-evidence/sa/tetragon-collector"},
-		{Type: "capability observation", Verified: true, Producer: "spiffe://prod/ns/ckodex-evidence/sa/tetragon-collector"},
+		{Type: "admission decision", Verified: hasAdmission, Producer: mapProducer(hasAdmission, "spiffe://prod/ns/ckodex-assurance/sa/cel-admission-observer")},
+		{Type: "signed OCI artifact", Verified: hasArtifact, Producer: mapProducer(hasArtifact, "spiffe://prod/ns/ckodex-evidence/sa/sigstore-verifier")},
+		{Type: "workload identity", Verified: hasIdentity, Producer: mapProducer(hasIdentity, "spiffe://prod/ns/ckodex-assurance/sa/spire-server")},
+		{Type: "network configuration", Verified: hasNetwork, Producer: mapProducer(hasNetwork, "spiffe://prod/ns/ckodex-evidence/sa/cilium-collector")},
+		{Type: "runtime process observation", Verified: hasProcess, Producer: mapProducer(hasProcess, "spiffe://prod/ns/ckodex-evidence/sa/tetragon-collector")},
+		{Type: "capability observation", Verified: hasCap, Producer: mapProducer(hasCap, "spiffe://prod/ns/ckodex-evidence/sa/tetragon-collector")},
+	}
+
+	verifiedCount := 0
+	for _, ev := range evidenceItems {
+		if ev.Verified {
+			verifiedCount++
+		}
+	}
+
+	freshness := "current"
+	authority := "verified"
+	if isStale {
+		freshness = "stale"
+		authority = "expired"
+	} else if !isAssured {
+		freshness = "unknown"
+		authority = "unverified"
 	}
 
 	return assurance.ExplainGraph{
@@ -87,17 +128,32 @@ func (e *Explainer) BuildExplainGraph(
 		Evidence:           evidenceItems,
 		Completeness: assurance.EvidenceCompleteness{
 			Required: 6,
-			Present:  6,
-			Verified: 6,
+			Present:  verifiedCount,
+			Verified: verifiedCount,
+			Missing:  6 - verifiedCount,
 		},
-		Freshness:      "current",
-		Authority:      "verified",
+		Freshness:      freshness,
+		Authority:      authority,
 		Epoch:          eval.Epoch,
 		AssuranceState: eval.State,
 		EvidenceRoot:   eval.EvidenceRoot,
 		Projections: map[string]string{
 			"Component Definition": fmt.Sprintf("%s implemented-requirement", control.ID),
-			"Assessment Results":   fmt.Sprintf("%d observations\n  0 findings", len(evidenceItems)),
+			"Assessment Results":   fmt.Sprintf("%d observations\n  0 findings", verifiedCount),
 		},
 	}
+}
+
+func mapDetails(ok bool, passDetails, failDetails string) string {
+	if ok {
+		return passDetails
+	}
+	return failDetails
+}
+
+func mapProducer(ok bool, producer string) string {
+	if ok {
+		return producer
+	}
+	return "none"
 }

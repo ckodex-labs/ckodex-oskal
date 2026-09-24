@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -16,14 +17,18 @@ import (
 	commonv1 "github.com/ckodex-labs/oskal/proto/assurance/common/v1"
 	controlv1 "github.com/ckodex-labs/oskal/proto/assurance/control/v1"
 	evidencev1 "github.com/ckodex-labs/oskal/proto/assurance/evidence/v1"
+	receiptv1 "github.com/ckodex-labs/oskal/proto/assurance/receipt/v1"
 	servicesv1 "github.com/ckodex-labs/oskal/proto/assurance/services/v1"
 )
 
 // Server implements servicesv1.AssuranceServiceServer (Section 29).
 type Server struct {
 	servicesv1.UnimplementedAssuranceServiceServer
-	explainer  *explain.Explainer
-	receiptMgr *receipts.ReceiptManager
+	mu           sync.RWMutex
+	explainer    *explain.Explainer
+	receiptMgr   *receipts.ReceiptManager
+	observations map[string][]*evidencev1.Observation
+	receipts     map[string]*receiptv1.ControlReceipt
 }
 
 // NewServer creates a new AssuranceService gRPC server.
@@ -36,8 +41,10 @@ func NewServer(receiptMgr *receipts.ReceiptManager) *Server {
 		receiptMgr = mgr
 	}
 	return &Server{
-		explainer:  explain.NewExplainer(),
-		receiptMgr: receiptMgr,
+		explainer:    explain.NewExplainer(),
+		receiptMgr:   receiptMgr,
+		observations: make(map[string][]*evidencev1.Observation),
+		receipts:     make(map[string]*receiptv1.ControlReceipt),
 	}
 }
 
@@ -51,6 +58,15 @@ func (s *Server) SubmitObservation(ctx context.Context, req *servicesv1.SubmitOb
 	if obs.Id == "" {
 		obs.Id = fmt.Sprintf("obs-%d", time.Now().UnixNano())
 	}
+	if obs.Subject == nil {
+		return nil, status.Error(codes.InvalidArgument, "observation subject cannot be nil")
+	}
+
+	subKey := obs.Subject.Scheme + "://" + obs.Subject.Id
+
+	s.mu.Lock()
+	s.observations[subKey] = append(s.observations[subKey], obs)
+	s.mu.Unlock()
 
 	return &servicesv1.SubmitObservationResponse{
 		ObservationId: obs.Id,
@@ -59,45 +75,76 @@ func (s *Server) SubmitObservation(ctx context.Context, req *servicesv1.SubmitOb
 	}, nil
 }
 
-// EvaluateSubject evaluates all claims for a given subject.
+// EvaluateSubject evaluates all claims for a given subject based on ingested evidence.
 func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSubjectRequest) (*servicesv1.EvaluateSubjectResponse, error) {
 	if req.Subject == nil {
 		return nil, status.Error(codes.InvalidArgument, "subject cannot be nil")
 	}
 
 	now := time.Now().UTC()
-	var evaluations []*assessmentv1.ClaimEvaluation
+	subKey := req.Subject.Scheme + "://" + req.Subject.Id
 
+	s.mu.RLock()
+	obsList := s.observations[subKey]
+	s.mu.RUnlock()
+
+	hasEvidence := len(obsList) > 0
+	targetState := commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN
+	valence := commonv1.Valence_VALENCE_UNRESOLVED
+	var evCompleteness *evidencev1.EvidenceCompleteness
+	var evRoot string
+
+	if hasEvidence {
+		targetState = commonv1.AssuranceState_ASSURANCE_STATE_ASSURED
+		valence = commonv1.Valence_VALENCE_POSITIVE
+		evCompleteness = &evidencev1.EvidenceCompleteness{
+			Required: 1,
+			Present:  int32(len(obsList)),
+			Verified: int32(len(obsList)),
+		}
+		var evRefs []assurance.EvidenceRef
+		for _, obs := range obsList {
+			for _, ev := range obs.Evidence {
+				evRefs = append(evRefs, assurance.EvidenceRef{Digest: ev.Digest})
+			}
+		}
+		evRoot = receipts.ComputeEvidenceRoot(evRefs)
+	} else {
+		evCompleteness = &evidencev1.EvidenceCompleteness{
+			Required: 1,
+			Present:  0,
+			Verified: 0,
+			Missing:  1,
+		}
+	}
+
+	var evaluations []*assessmentv1.ClaimEvaluation
 	for _, ctrl := range req.Controls {
 		eval := &assessmentv1.ClaimEvaluation{
 			Id:      fmt.Sprintf("eval-%s-%s", req.Subject.Id, ctrl.Id),
 			Control: ctrl,
 			Subject: req.Subject,
-			State:   commonv1.AssuranceState_ASSURANCE_STATE_ASSURED,
+			State:   targetState,
 			Vector: &commonv1.AssuranceVector{
 				Applicability: commonv1.Valence_VALENCE_POSITIVE,
-				Conformance:   commonv1.Valence_VALENCE_POSITIVE,
-				Integrity:     commonv1.Valence_VALENCE_POSITIVE,
-				Authority:     commonv1.Valence_VALENCE_POSITIVE,
-				Identity:      commonv1.Valence_VALENCE_POSITIVE,
-				Runtime:       commonv1.Valence_VALENCE_POSITIVE,
-				Freshness:     commonv1.Valence_VALENCE_POSITIVE,
-				Completeness:  commonv1.Valence_VALENCE_POSITIVE,
+				Conformance:   valence,
+				Integrity:     valence,
+				Authority:     valence,
+				Identity:      valence,
+				Runtime:       valence,
+				Freshness:     valence,
+				Completeness:  valence,
 				Coherence:     commonv1.Coherence_COHERENCE_COHERENT,
 			},
 			Epoch: &commonv1.AssuranceEpoch{
-				SubjectDigest:        "sha256:sub",
+				SubjectDigest:        assurance.ComputeStringDigest(subKey),
 				ImplementationDigest: "sha256:imp",
 				PolicyDigest:         "sha256:pol",
 				AuthorityDigest:      "sha256:auth",
 				EnvironmentDigest:    "sha256:env",
 			},
-			Completeness: &evidencev1.EvidenceCompleteness{
-				Required: 1,
-				Present:  1,
-				Verified: 1,
-			},
-			EvidenceRoot: "sha256:evidenceRoot",
+			Completeness: evCompleteness,
+			EvidenceRoot: evRoot,
 			EvaluatedAt:  timestamppb.New(now),
 			ValidUntil:   timestamppb.New(now.Add(5 * time.Minute)),
 		}
@@ -107,7 +154,7 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 	return &servicesv1.EvaluateSubjectResponse{
 		Subject:      req.Subject,
 		Evaluations:  evaluations,
-		SummaryState: commonv1.AssuranceState_ASSURANCE_STATE_ASSURED,
+		SummaryState: targetState,
 	}, nil
 }
 
@@ -115,6 +162,28 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimRequest) (*servicesv1.ExplainClaimResponse, error) {
 	if req.Subject == nil || req.Control == nil {
 		return nil, status.Error(codes.InvalidArgument, "subject and control are required")
+	}
+
+	subKey := req.Subject.Scheme + "://" + req.Subject.Id
+
+	s.mu.RLock()
+	obsList := s.observations[subKey]
+	s.mu.RUnlock()
+
+	claimState := assurance.AssuranceStateUnknown
+	respState := commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN
+	var evRoot string
+
+	if len(obsList) > 0 {
+		claimState = assurance.AssuranceStateAssured
+		respState = commonv1.AssuranceState_ASSURANCE_STATE_ASSURED
+		var evRefs []assurance.EvidenceRef
+		for _, obs := range obsList {
+			for _, ev := range obs.Evidence {
+				evRefs = append(evRefs, assurance.EvidenceRef{Digest: ev.Digest})
+			}
+		}
+		evRoot = receipts.ComputeEvidenceRoot(evRefs)
 	}
 
 	sub := assurance.SubjectRef{
@@ -131,15 +200,15 @@ func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimR
 		ID:      "eval-01",
 		Subject: sub,
 		Control: ctrl,
-		State:   assurance.AssuranceStateAssured,
+		State:   claimState,
 		Epoch: assurance.AssuranceEpoch{
-			SubjectDigest:        "sha256:sub",
+			SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
 			ImplementationDigest: "sha256:imp",
 			PolicyDigest:         "sha256:pol",
 			AuthorityDigest:      "sha256:auth",
 			EnvironmentDigest:    "sha256:env",
 		},
-		EvidenceRoot: "sha256:root",
+		EvidenceRoot: evRoot,
 	}
 
 	graph := s.explainer.BuildExplainGraph(ctx, sub, ctrl, eval)
@@ -185,27 +254,56 @@ func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimR
 		},
 		Freshness:        graph.Freshness,
 		Authority:        graph.Authority,
-		AssuranceState:   commonv1.AssuranceState_ASSURANCE_STATE_ASSURED,
+		AssuranceState:   respState,
 		EvidenceRoot:     graph.EvidenceRoot,
 		Projections:      graph.Projections,
 		RenderedText:     graph.RenderText(),
 	}, nil
 }
 
-// GetAssuranceState returns summary assurance state.
+// GetAssuranceState returns summary assurance state based on verified evidence.
 func (s *Server) GetAssuranceState(ctx context.Context, req *servicesv1.GetAssuranceStateRequest) (*servicesv1.GetAssuranceStateResponse, error) {
 	if req.Subject == nil {
 		return nil, status.Error(codes.InvalidArgument, "subject is required")
 	}
 
+	subKey := req.Subject.Scheme + "://" + req.Subject.Id
+
+	s.mu.RLock()
+	obsList := s.observations[subKey]
+	s.mu.RUnlock()
+
+	// Invariant I-02: Absence of evidence is UNKNOWN, never PASS
+	if len(obsList) == 0 {
+		return &servicesv1.GetAssuranceStateResponse{
+			Subject:      req.Subject,
+			State:        commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN,
+			EvidenceRoot: "",
+			Epoch:        nil,
+		}, nil
+	}
+
+	var evRefs []assurance.EvidenceRef
+	for _, obs := range obsList {
+		for _, ev := range obs.Evidence {
+			evRefs = append(evRefs, assurance.EvidenceRef{
+				URI:       ev.Uri,
+				Digest:    ev.Digest,
+				MediaType: ev.MediaType,
+			})
+		}
+	}
+	root := receipts.ComputeEvidenceRoot(evRefs)
+	policyDigest := assurance.ComputeStringDigest(subKey + ":" + root)
+
 	return &servicesv1.GetAssuranceStateResponse{
 		Subject:      req.Subject,
 		State:        commonv1.AssuranceState_ASSURANCE_STATE_ASSURED,
-		EvidenceRoot: "sha256:evidenceRoot",
+		EvidenceRoot: root,
 		Epoch: &commonv1.AssuranceEpoch{
-			SubjectDigest:        "sha256:sub",
+			SubjectDigest:        assurance.ComputeStringDigest(subKey),
 			ImplementationDigest: "sha256:imp",
-			PolicyDigest:         "sha256:pol",
+			PolicyDigest:         policyDigest,
 			AuthorityDigest:      "sha256:auth",
 			EnvironmentDigest:    "sha256:env",
 		},
@@ -253,9 +351,14 @@ func (s *Server) SubmitReceipt(ctx context.Context, req *servicesv1.SubmitReceip
 		}, nil
 	}
 
+	digest := coreReceipt.Digest()
+	s.mu.Lock()
+	s.receipts[digest] = rcpt
+	s.mu.Unlock()
+
 	return &servicesv1.SubmitReceiptResponse{
 		Verified:      true,
-		ReceiptDigest: coreReceipt.Digest(),
+		ReceiptDigest: digest,
 		Message:       "Receipt verified and accepted",
 	}, nil
 }

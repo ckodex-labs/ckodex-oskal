@@ -105,8 +105,8 @@ func TestEvaluateSubject(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// 1. Valid request
-	resp, err := client.EvaluateSubject(ctx, &servicesv1.EvaluateSubjectRequest{
+	// 1. Without observations: should return ASSURANCE_STATE_UNKNOWN (Invariant I-02)
+	respUnknown, err := client.EvaluateSubject(ctx, &servicesv1.EvaluateSubjectRequest{
 		Subject: &commonv1.SubjectRef{
 			Scheme: "k8s",
 			Id:     "default/pod-secure",
@@ -119,14 +119,53 @@ func TestEvaluateSubject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(resp.Evaluations) != 2 {
-		t.Fatalf("expected 2 evaluations, got %d", len(resp.Evaluations))
+	if len(respUnknown.Evaluations) != 2 {
+		t.Fatalf("expected 2 evaluations, got %d", len(respUnknown.Evaluations))
 	}
-	if resp.SummaryState != commonv1.AssuranceState_ASSURANCE_STATE_ASSURED {
-		t.Fatalf("expected ASSURED summary state, got %v", resp.SummaryState)
+	if respUnknown.SummaryState != commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN {
+		t.Fatalf("expected UNKNOWN summary state without evidence, got %v", respUnknown.SummaryState)
 	}
 
-	// 2. Nil subject
+	// 2. Submit observation for subject
+	_, err = client.SubmitObservation(ctx, &servicesv1.SubmitObservationRequest{
+		Observation: &evidencev1.Observation{
+			Id:   "obs-01",
+			Type: "admission",
+			Subject: &commonv1.SubjectRef{
+				Scheme: "k8s",
+				Id:     "default/pod-secure",
+			},
+			Evidence: []*evidencev1.EvidenceRef{
+				{Uri: "evidence://cel/admission", Digest: "sha256:cel123", MediaType: "application/json"},
+			},
+			ObservedAt: timestamppb.Now(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error submitting observation: %v", err)
+	}
+
+	// 3. Now evaluate subject: should be ASSURED with evidence root
+	respAssured, err := client.EvaluateSubject(ctx, &servicesv1.EvaluateSubjectRequest{
+		Subject: &commonv1.SubjectRef{
+			Scheme: "k8s",
+			Id:     "default/pod-secure",
+		},
+		Controls: []*controlv1.ControlRef{
+			{Namespace: "nist-sp-800-53", Id: "AC-6"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if respAssured.SummaryState != commonv1.AssuranceState_ASSURANCE_STATE_ASSURED {
+		t.Fatalf("expected ASSURED summary state with evidence, got %v", respAssured.SummaryState)
+	}
+	if respAssured.Evaluations[0].EvidenceRoot == "" {
+		t.Fatal("expected non-empty EvidenceRoot with verified evidence")
+	}
+
+	// 4. Nil subject
 	_, err = client.EvaluateSubject(ctx, &servicesv1.EvaluateSubjectRequest{})
 	if err == nil {
 		t.Fatal("expected error for nil subject, got nil")
@@ -140,7 +179,8 @@ func TestExplainClaim(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	resp, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
+	// 1. Without observations: Explain returns UNKNOWN state
+	respUnknown, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
 		Subject: &commonv1.SubjectRef{
 			Scheme: "k8s",
 			Id:     "payments/payments-api",
@@ -153,14 +193,54 @@ func TestExplainClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp.CanonicalControl != "ckodex:least-privilege" {
-		t.Fatalf("unexpected canonical control: %s", resp.CanonicalControl)
+	if respUnknown.CanonicalControl != "ckodex:least-privilege" {
+		t.Fatalf("unexpected canonical control: %s", respUnknown.CanonicalControl)
 	}
-	if resp.RenderedText == "" {
+	if respUnknown.AssuranceState != commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN {
+		t.Fatalf("expected UNKNOWN state without evidence, got %v", respUnknown.AssuranceState)
+	}
+
+	// 2. Submit observation
+	_, err = client.SubmitObservation(ctx, &servicesv1.SubmitObservationRequest{
+		Observation: &evidencev1.Observation{
+			Id:   "obs-explain-01",
+			Type: "admission",
+			Subject: &commonv1.SubjectRef{
+				Scheme: "k8s",
+				Id:     "payments/payments-api",
+			},
+			Evidence: []*evidencev1.EvidenceRef{
+				{Uri: "evidence://cel/admission", Digest: "sha256:cel123", MediaType: "application/json"},
+			},
+			ObservedAt: timestamppb.Now(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error submitting observation: %v", err)
+	}
+
+	// 3. Explain with evidence: returns ASSURED state
+	respAssured, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
+		Subject: &commonv1.SubjectRef{
+			Scheme: "k8s",
+			Id:     "payments/payments-api",
+		},
+		Control: &controlv1.ControlRef{
+			Namespace: "nist-sp-800-53",
+			Id:        "AC-6",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if respAssured.AssuranceState != commonv1.AssuranceState_ASSURANCE_STATE_ASSURED {
+		t.Fatalf("expected ASSURED state with evidence, got %v", respAssured.AssuranceState)
+	}
+	if respAssured.RenderedText == "" {
 		t.Fatal("expected non-empty rendered explanation text")
 	}
 
-	// Nil request arguments
+	// 4. Nil request arguments
 	_, err = client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{})
 	if err == nil {
 		t.Fatal("expected error for nil args, got nil")
@@ -174,7 +254,8 @@ func TestGetAssuranceState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	resp, err := client.GetAssuranceState(ctx, &servicesv1.GetAssuranceStateRequest{
+	// 1. Without observations: should return ASSURANCE_STATE_UNKNOWN (Invariant I-02)
+	respUnknown, err := client.GetAssuranceState(ctx, &servicesv1.GetAssuranceStateRequest{
 		Subject: &commonv1.SubjectRef{
 			Scheme: "k8s",
 			Id:     "payments/payments-api",
@@ -183,10 +264,47 @@ func TestGetAssuranceState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if resp.State != commonv1.AssuranceState_ASSURANCE_STATE_ASSURED {
-		t.Fatalf("expected state ASSURED, got %v", resp.State)
+	if respUnknown.State != commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN {
+		t.Fatalf("expected state UNKNOWN without observations, got %v", respUnknown.State)
 	}
 
+	// 2. Submit observation
+	_, err = client.SubmitObservation(ctx, &servicesv1.SubmitObservationRequest{
+		Observation: &evidencev1.Observation{
+			Id:   "obs-state-01",
+			Type: "admission",
+			Subject: &commonv1.SubjectRef{
+				Scheme: "k8s",
+				Id:     "payments/payments-api",
+			},
+			Evidence: []*evidencev1.EvidenceRef{
+				{Uri: "evidence://cel/admission", Digest: "sha256:pay123", MediaType: "application/json"},
+			},
+			ObservedAt: timestamppb.Now(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error submitting observation: %v", err)
+	}
+
+	// 3. With observations: returns ASSURED state and real evidence root
+	respAssured, err := client.GetAssuranceState(ctx, &servicesv1.GetAssuranceStateRequest{
+		Subject: &commonv1.SubjectRef{
+			Scheme: "k8s",
+			Id:     "payments/payments-api",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if respAssured.State != commonv1.AssuranceState_ASSURANCE_STATE_ASSURED {
+		t.Fatalf("expected state ASSURED with observations, got %v", respAssured.State)
+	}
+	if respAssured.EvidenceRoot == "" {
+		t.Fatal("expected non-empty EvidenceRoot with observations")
+	}
+
+	// 4. Nil subject
 	_, err = client.GetAssuranceState(ctx, &servicesv1.GetAssuranceStateRequest{})
 	if err == nil {
 		t.Fatal("expected error for nil subject, got nil")

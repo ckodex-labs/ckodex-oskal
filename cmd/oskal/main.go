@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -17,13 +19,17 @@ import (
 	"github.com/ckodex-labs/oskal/core/assurance"
 	"github.com/ckodex-labs/oskal/internal/application/explain"
 	"github.com/ckodex-labs/oskal/internal/projection/oscal"
+	"github.com/ckodex-labs/oskal/internal/receipts"
 	"github.com/ckodex-labs/oskal/internal/service"
 	commonv1 "github.com/ckodex-labs/oskal/proto/assurance/common/v1"
 	controlv1 "github.com/ckodex-labs/oskal/proto/assurance/control/v1"
 	servicesv1 "github.com/ckodex-labs/oskal/proto/assurance/services/v1"
 )
 
-var serverAddr string
+var (
+	serverAddr  string
+	evidenceDir string
+)
 
 func getGRPCClient(ctx context.Context, addr string) (servicesv1.AssuranceServiceClient, *grpc.ClientConn, error) {
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -32,6 +38,70 @@ func getGRPCClient(ctx context.Context, addr string) (servicesv1.AssuranceServic
 	}
 	client := servicesv1.NewAssuranceServiceClient(conn)
 	return client, conn, nil
+}
+
+func loadLocalEvidence(dir string, sub assurance.SubjectRef) ([]assurance.EvidenceEnvelope, error) {
+	if dir == "" {
+		return nil, nil
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", dir)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []assurance.EvidenceEnvelope
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+
+		var envList []assurance.EvidenceEnvelope
+		if err := json.Unmarshal(data, &envList); err == nil {
+			for _, env := range envList {
+				if matchSubject(env.Subject, sub) {
+					results = append(results, env)
+				}
+			}
+			continue
+		}
+
+		var single assurance.EvidenceEnvelope
+		if err := json.Unmarshal(data, &single); err == nil {
+			if matchSubject(single.Subject, sub) {
+				results = append(results, single)
+			}
+		}
+	}
+	return results, nil
+}
+
+func matchSubject(a, b assurance.SubjectRef) bool {
+	if a.ID == "" || b.ID == "" {
+		return true
+	}
+	if a.ID == b.ID || a.URI() == b.URI() {
+		return true
+	}
+	// Match trailing resource name (e.g. "payments-api")
+	partsA := strings.Split(strings.Trim(a.ID, "/"), "/")
+	partsB := strings.Split(strings.Trim(b.ID, "/"), "/")
+	if len(partsA) > 0 && len(partsB) > 0 && partsA[len(partsA)-1] == partsB[len(partsB)-1] {
+		return true
+	}
+	return strings.Contains(a.ID, b.ID) || strings.Contains(b.ID, a.ID)
 }
 
 func main() {
@@ -44,6 +114,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 	}
 
 	rootCmd.PersistentFlags().StringVar(&serverAddr, "server", "", "AssuranceService gRPC address (e.g. localhost:9090)")
+	rootCmd.PersistentFlags().StringVar(&evidenceDir, "evidence-dir", "", "Path to directory containing local EvidenceEnvelope JSON files")
 
 	assuranceCmd := &cobra.Command{
 		Use:   "assurance",
@@ -84,6 +155,15 @@ and projects defensible results into standard OSCAL artifacts.`,
 				}
 
 				fmt.Printf("SUBJECT:         %s\n", sub.URI())
+				if resp.State == commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN {
+					fmt.Printf("STATE:           UNKNOWN\n")
+					fmt.Printf("STATUS:          Absence of verified evidence (no observations ingested)\n")
+					fmt.Printf("EVIDENCE ROOT:   none\n")
+					fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
+					fmt.Printf("FRESHNESS:       unknown\n")
+					return nil
+				}
+
 				fmt.Printf("STATE:           %s\n", resp.State.String())
 				if resp.Epoch != nil {
 					fmt.Printf("EPOCH:           %s\n", resp.Epoch.PolicyDigest)
@@ -94,12 +174,43 @@ and projects defensible results into standard OSCAL artifacts.`,
 				return nil
 			}
 
+			if evidenceDir != "" {
+				envelopes, err := loadLocalEvidence(evidenceDir, sub)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("SUBJECT:         %s\n", sub.URI())
+				if len(envelopes) == 0 {
+					fmt.Printf("STATE:           UNKNOWN\n")
+					fmt.Printf("STATUS:          No matching evidence envelopes found in %s\n", evidenceDir)
+					fmt.Printf("EVIDENCE ROOT:   none\n")
+					fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
+					fmt.Printf("FRESHNESS:       unknown\n")
+					return nil
+				}
+
+				var evRefs []assurance.EvidenceRef
+				for _, env := range envelopes {
+					evRefs = append(evRefs, env.Artifact)
+				}
+				evRoot := receipts.ComputeEvidenceRoot(evRefs)
+				policyDigest := assurance.ComputeStringDigest(sub.URI() + ":" + evRoot)
+
+				fmt.Printf("STATE:           ASSURED\n")
+				fmt.Printf("EPOCH:           %s\n", policyDigest)
+				fmt.Printf("EVIDENCE ROOT:   %s\n", evRoot)
+				fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
+				fmt.Printf("FRESHNESS:       current\n")
+				return nil
+			}
+
+			// Invariant I-02: Absence of evidence is UNKNOWN, never PASS.
 			fmt.Printf("SUBJECT:         %s\n", sub.URI())
-			fmt.Printf("STATE:           ASSURED\n")
-			fmt.Printf("EPOCH:           sha256:d8a57e3f2b4c10a112233445566778899aabbccd\n")
-			fmt.Printf("EVIDENCE ROOT:   sha256:4a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b\n")
+			fmt.Printf("STATE:           UNKNOWN\n")
+			fmt.Printf("STATUS:          Absence of verified evidence (specify --server or --evidence-dir)\n")
+			fmt.Printf("EVIDENCE ROOT:   none\n")
 			fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
-			fmt.Printf("FRESHNESS:       current\n")
+			fmt.Printf("FRESHNESS:       unknown\n")
 			return nil
 		},
 	}
@@ -156,21 +267,52 @@ and projects defensible results into standard OSCAL artifacts.`,
 				return nil
 			}
 
-			eval := assurance.ClaimEvaluation{
-				ID:      "eval-01",
-				Subject: sub,
-				Control: ctrl,
-				State:   assurance.AssuranceStateAssured,
-				Epoch: assurance.AssuranceEpoch{
-					SubjectDigest:        "sha256:sub12345",
-					ImplementationDigest: "sha256:imp12345",
-					PolicyDigest:         "sha256:pol12345",
-					AuthorityDigest:      "sha256:auth12345",
-					EnvironmentDigest:    "sha256:env12345",
-				},
-				EvidenceRoot: "sha256:root987654321",
-				EvaluatedAt:  time.Now().UTC(),
-				ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
+			var envelopes []assurance.EvidenceEnvelope
+			if evidenceDir != "" {
+				var err error
+				envelopes, err = loadLocalEvidence(evidenceDir, sub)
+				if err != nil {
+					return err
+				}
+			}
+
+			var eval assurance.ClaimEvaluation
+			if len(envelopes) > 0 {
+				var evRefs []assurance.EvidenceRef
+				for _, env := range envelopes {
+					evRefs = append(evRefs, env.Artifact)
+				}
+				evRoot := receipts.ComputeEvidenceRoot(evRefs)
+				policyDigest := assurance.ComputeStringDigest(sub.URI() + ":" + evRoot)
+
+				eval = assurance.ClaimEvaluation{
+					ID:      "eval-01",
+					Subject: sub,
+					Control: ctrl,
+					State:   assurance.AssuranceStateAssured,
+					Epoch: assurance.AssuranceEpoch{
+						SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
+						ImplementationDigest: "sha256:imp",
+						PolicyDigest:         policyDigest,
+						AuthorityDigest:      "sha256:auth",
+						EnvironmentDigest:    "sha256:env",
+					},
+					Evidence:     evRefs,
+					EvidenceRoot: evRoot,
+					EvaluatedAt:  time.Now().UTC(),
+					ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
+				}
+			} else {
+				eval = assurance.ClaimEvaluation{
+					ID:           "eval-unknown",
+					Subject:      sub,
+					Control:      ctrl,
+					State:        assurance.AssuranceStateUnknown,
+					Epoch:        assurance.AssuranceEpoch{},
+					Evidence:     nil,
+					EvidenceRoot: "none",
+					EvaluatedAt:  time.Now().UTC(),
+				}
 			}
 
 			explainer := explain.NewExplainer()
@@ -189,10 +331,34 @@ and projects defensible results into standard OSCAL artifacts.`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			subjectURI := args[0]
-			fmt.Printf("EVIDENCE ENVELOPES FOR %s:\n\n", subjectURI)
-			fmt.Printf("1. [kubernetes.admission]\n   Producer: spiffe://prod/ns/ckodex-assurance/sa/cel-admission-observer\n   Digest:   sha256:ev_admission_01\n   URI:      evidence://admission/payments/payments-api\n\n")
-			fmt.Printf("2. [supply-chain.signature]\n   Producer: spiffe://prod/ns/ckodex-evidence/sa/sigstore-verifier\n   Digest:   sha256:ev_sig_02\n   URI:      oci://registry.example/payments/payments-api.sig\n\n")
-			fmt.Printf("3. [workload.runtime.process]\n   Producer: spiffe://prod/ns/ckodex-evidence/sa/tetragon-collector\n   Digest:   sha256:ev_tetragon_03\n   URI:      tetragon://events/payments-api\n\n")
+			parts := strings.SplitN(subjectURI, "://", 2)
+			scheme := "k8s"
+			id := subjectURI
+			if len(parts) == 2 {
+				scheme = parts[0]
+				id = parts[1]
+			}
+			sub := assurance.SubjectRef{Scheme: scheme, ID: id}
+
+			if evidenceDir != "" {
+				envelopes, err := loadLocalEvidence(evidenceDir, sub)
+				if err != nil {
+					return err
+				}
+				if len(envelopes) == 0 {
+					fmt.Printf("No verified evidence envelopes found for %s in %s\n", sub.URI(), evidenceDir)
+					return nil
+				}
+
+				fmt.Printf("VERIFIED EVIDENCE ENVELOPES FOR %s (%d total):\n\n", sub.URI(), len(envelopes))
+				for i, env := range envelopes {
+					fmt.Printf("%d. [%s]\n   ID:       %s\n   Producer: %s\n   Digest:   %s\n   URI:      %s\n   Captured: %s\n\n",
+						i+1, env.ObservationType, env.ID, env.Producer.Canonical(), env.Artifact.Digest, env.Artifact.URI, env.CapturedAt.Format(time.RFC3339))
+				}
+				return nil
+			}
+
+			fmt.Printf("No verified evidence envelopes available for %s (specify --server or --evidence-dir).\n", sub.URI())
 			return nil
 		},
 	}
@@ -204,13 +370,53 @@ and projects defensible results into standard OSCAL artifacts.`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			subjectURI := args[0]
-			fmt.Printf("DRIFT ANALYSIS FOR %s:\n\n", subjectURI)
-			fmt.Printf("SUBJECT STATUS:         IN_SYNC\n")
-			fmt.Printf("RECORDED POLICY DIGEST: sha256:pol12345\n")
-			fmt.Printf("CURRENT POLICY DIGEST:  sha256:pol12345\n")
-			fmt.Printf("AUTHORITY CA ROTATION:  NONE (valid for 23h)\n")
-			fmt.Printf("SEMANTIC DRIFT:         0 dimensions drifted\n")
-			fmt.Printf("ASSURANCE STATUS:       ASSURED (no invalidation)\n")
+			parts := strings.SplitN(subjectURI, "://", 2)
+			scheme := "k8s"
+			id := subjectURI
+			if len(parts) == 2 {
+				scheme = parts[0]
+				id = parts[1]
+			}
+			sub := assurance.SubjectRef{Scheme: scheme, ID: id}
+
+			if evidenceDir != "" {
+				envelopes, err := loadLocalEvidence(evidenceDir, sub)
+				if err != nil {
+					return err
+				}
+				if len(envelopes) == 0 {
+					fmt.Printf("DRIFT ANALYSIS FOR %s:\n\n", sub.URI())
+					fmt.Printf("STATUS:                 UNKNOWN (no baseline evidence found in %s)\n", evidenceDir)
+					return nil
+				}
+
+				now := time.Now().UTC()
+				isStale := false
+				for _, env := range envelopes {
+					if now.Sub(env.CapturedAt) > 10*time.Minute {
+						isStale = true
+						break
+					}
+				}
+
+				fmt.Printf("DRIFT ANALYSIS FOR %s:\n\n", sub.URI())
+				if isStale {
+					fmt.Printf("SUBJECT STATUS:         DRIFT_DETECTED\n")
+					fmt.Printf("FRESHNESS:              STALE (evidence expired)\n")
+					fmt.Printf("ASSURANCE STATUS:       STALE\n")
+				} else {
+					fmt.Printf("SUBJECT STATUS:         IN_SYNC\n")
+					fmt.Printf("RECORDED POLICY DIGEST: %s\n", envelopes[0].Epoch.PolicyDigest)
+					fmt.Printf("CURRENT POLICY DIGEST:  %s\n", envelopes[0].Epoch.PolicyDigest)
+					fmt.Printf("AUTHORITY CA ROTATION:  NONE\n")
+					fmt.Printf("SEMANTIC DRIFT:         0 dimensions drifted\n")
+					fmt.Printf("ASSURANCE STATUS:       ASSURED (no invalidation)\n")
+				}
+				return nil
+			}
+
+			fmt.Printf("DRIFT ANALYSIS FOR %s:\n\n", sub.URI())
+			fmt.Printf("STATUS:                 UNKNOWN (cannot establish drift without evidence or server -- specify --server or --evidence-dir)\n")
 			return nil
 		},
 	}

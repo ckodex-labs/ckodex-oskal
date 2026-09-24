@@ -311,7 +311,7 @@ func (p *Projector) ProjectAssessmentResults(
 			Description: f.Description,
 			Target: OscalFindingTarget{
 				Type:   "control-objective",
-				IdRef:  f.Control.Canonical(),
+				IdRef:  f.Control.ID,
 				Status: "not-satisfied",
 			},
 		})
@@ -414,7 +414,7 @@ func (p *Projector) ProjectSSP(
 			ssp.ControlImplementation.ImplementedRequirements,
 			OscalImplementedRequirement{
 				UUID:        uuid.NewString(),
-				ControlID:   eval.Control.Canonical(),
+				ControlID:   eval.Control.ID,
 				Description: fmt.Sprintf("Continuous State: %s", eval.State),
 				Props: []Property{
 					{Name: "state", Value: eval.State.String()},
