@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oskal-controller-manager
+  namespace: ckodex-assurance
+  labels:
+    control-plane: oskal-controller-manager
+    app.kubernetes.io/name: oskal
+    app.kubernetes.io/part-of: ckodex
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: oskal-controller-manager
+  template:
+    metadata:
+      labels:
+        control-plane: oskal-controller-manager
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: oskal-controller-manager
+      containers:
+        - name: manager
+          image: ghcr.io/ckodex-labs/oskal-controller:v0.1.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /oskal-controller
+          args:
+            - --leader-elect=true
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=:8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - "ALL"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 64Mi
+          ports:
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+            - containerPort: 8081
+              name: health
+              protocol: TCP
