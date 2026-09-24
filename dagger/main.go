@@ -35,16 +35,17 @@ func (m *OskalPipeline) ProtoCheck(ctx context.Context, source *Directory) (*Con
 		WithExec([]string{"buf", "lint"}), nil
 }
 
-// Build compiles the oskal-controller binary.
-func (m *OskalPipeline) Build(ctx context.Context, source *Directory) (*File, error) {
+// Build compiles the oskal and oskal-controller binaries.
+func (m *OskalPipeline) Build(ctx context.Context, source *Directory) (*Directory, error) {
 	builder := dag.Container().
 		From("golang:1.27").
 		WithMountedDirectory("/src", source).
 		WithWorkdir("/src").
 		WithEnvVariable("CGO_ENABLED", "0").
+		WithExec([]string{"go", "build", "-ldflags", "-s -w", "-o", "/bin/oskal", "./cmd/oskal"}).
 		WithExec([]string{"go", "build", "-ldflags", "-s -w", "-o", "/bin/oskal-controller", "./cmd/oskal-controller"})
 
-	return builder.File("/bin/oskal-controller"), nil
+	return builder.Directory("/bin"), nil
 }
 
 // All runs the complete DAG pipeline from Section 63.
