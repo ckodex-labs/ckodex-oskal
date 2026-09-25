@@ -115,7 +115,7 @@ func parseSubjectURI(raw string) assurance.SubjectRef {
 	return assurance.SubjectRef{Scheme: "k8s", ID: raw}
 }
 
-func main() {
+func NewRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "oskal",
 		Short: "OSKAL -- Continuous Kubernetes Assurance CLI",
@@ -738,8 +738,11 @@ and projects defensible results into standard OSCAL artifacts.`,
 
 	assuranceCmd.AddCommand(stateCmd, explainCmd, evidenceCmd, driftCmd)
 	rootCmd.AddCommand(assuranceCmd, exportCmd, importCmd, serveCmd)
+	return rootCmd
+}
 
-	if err := rootCmd.Execute(); err != nil {
+func main() {
+	if err := NewRootCommand().Execute(); err != nil {
 		os.Exit(1)
 	}
 }
