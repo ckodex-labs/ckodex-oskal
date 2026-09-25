@@ -1,0 +1,61 @@
+# Default values for ckodex-oskal.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/ckodex-labs/oskal-controller
+  pullPolicy: IfNotPresent
+  tag: "v0.2.0-alpha.1"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: "oskal-controller-manager"
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+leaderElection:
+  enabled: true
+
+metrics:
+  port: 8080
+  service:
+    type: ClusterIP
+    port: 8080
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+probes:
+  port: 8081
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

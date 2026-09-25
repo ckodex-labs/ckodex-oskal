@@ -1,0 +1,147 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ckodex-oskal.fullname" . }}-role
+  labels:
+    {{- include "ckodex-oskal.labels" . | nindent 4 }}
+rules:
+  # Assurance CRD access
+  - apiGroups:
+      - assurance.ckodex.io
+    resources:
+      - controlbindings
+      - evidencecontracts
+      - assurancepolicies
+      - controlexceptions
+      - assurancestates
+      - capabilityleases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - assurance.ckodex.io
+    resources:
+      - controlbindings/status
+      - evidencecontracts/status
+      - assurancepolicies/status
+      - controlexceptions/status
+      - assurancestates/status
+      - capabilityleases/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - assurance.ckodex.io
+    resources:
+      - controlbindings/finalizers
+      - assurancestates/finalizers
+    verbs:
+      - update
+  # Read-only observation of workloads & cluster namespaces (Section 52)
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+      - pods
+      - serviceaccounts
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - daemonsets
+      - statefulsets
+    verbs:
+      - get
+      - list
+      - watch
+  # Read-only observation of admission policies
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - validatingadmissionpolicies
+      - validatingadmissionpolicybindings
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "ckodex-oskal.fullname" . }}-rolebinding
+  labels:
+    {{- include "ckodex-oskal.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "ckodex-oskal.fullname" . }}-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ckodex-oskal.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "ckodex-oskal.fullname" . }}-leader-election-role
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ckodex-oskal.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "ckodex-oskal.fullname" . }}-leader-election-rolebinding
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ckodex-oskal.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "ckodex-oskal.fullname" . }}-leader-election-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ckodex-oskal.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

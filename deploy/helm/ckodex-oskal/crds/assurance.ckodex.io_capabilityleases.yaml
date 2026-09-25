@@ -1,0 +1,109 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: capabilityleases.assurance.ckodex.io
+spec:
+  group: assurance.ckodex.io
+  names:
+    kind: CapabilityLease
+    listKind: CapabilityLeaseList
+    plural: capabilityleases
+    shortNames:
+    - cl
+    singular: capabilitylease
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.currentTurn
+      name: Turn
+      type: integer
+    - jsonPath: .spec.maxTurns
+      name: MaxTurns
+      type: integer
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: CapabilityLease is the Schema for the capabilityleases API in an AI workcell environment.
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: CapabilityLeaseSpec defines the desired execution bounds and privileges for an AI workcell.
+            properties:
+              allowedCapabilities:
+                items:
+                  type: string
+                type: array
+              maxTurns:
+                type: integer
+              principal:
+                type: string
+              scope:
+                type: string
+              ttl:
+                type: string
+            required:
+            - allowedCapabilities
+            - maxTurns
+            - principal
+            - scope
+            - ttl
+            type: object
+          status:
+            description: CapabilityLeaseStatus defines the observed execution state and turn chaining of the lease.
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                    message:
+                      type: string
+                    reason:
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              currentTurn:
+                type: integer
+              expiresAt:
+                type: string
+                format: date-time
+              issuedAt:
+                type: string
+                format: date-time
+              lastReceiptHash:
+                type: string
+              observedGeneration:
+                type: integer
+                format: int64
+              phase:
+                type: string
+              revocationReason:
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

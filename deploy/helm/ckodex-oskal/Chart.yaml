@@ -1,0 +1,19 @@
+apiVersion: v2
+name: ckodex-oskal
+description: CKODEX OSKAL - Continuous Kubernetes Assurance & NIST OSCAL Reconciliation Runtime
+type: application
+version: 0.2.0
+appVersion: 0.2.0
+keywords:
+  - compliance
+  - security
+  - oscal
+  - nist-sp-800-53
+  - continuous-assurance
+  - zero-trust
+home: https://ckodex-labs.github.io/ckodex-oskal/
+sources:
+  - https://github.com/ckodex-labs/ckodex-oskal
+maintainers:
+  - name: ckodex-labs
+    url: https://github.com/ckodex-labs
