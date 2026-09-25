@@ -1,0 +1,60 @@
+{
+  "component-definition": {
+    "uuid": "8b9487b3-c11f-4d4e-b552-84b2c1598501",
+    "metadata": {
+      "title": "Payment Gateway Service Component Definition",
+      "published": "2026-09-25T12:00:00Z",
+      "last-modified": "2026-09-25T12:00:00Z",
+      "version": "1.0.0",
+      "oscal-version": "1.2.3"
+    },
+    "components": [
+      {
+        "uuid": "comp-payments-api-001",
+        "type": "software",
+        "title": "payments-api",
+        "description": "Core payment transaction processing API",
+        "purpose": "Financial transaction settlement and PCI DSS compliance",
+        "control-implementations": [
+          {
+            "uuid": "ci-pci-01",
+            "source": "https://csrc.nist.gov/publications/detail/sp/800-53/rev-5/final",
+            "description": "PCI DSS and NIST SP 800-53 security controls",
+            "implemented-requirements": [
+              {
+                "uuid": "ir-ac-6",
+                "control-id": "AC-6",
+                "description": "Least privilege admission enforcement",
+                "props": [
+                  {"name": "evidence-type", "value": "admission"},
+                  {"name": "producer", "value": "kubernetes-validating-admission"},
+                  {"name": "freshness", "value": "24h"}
+                ]
+              },
+              {
+                "uuid": "ir-sc-7",
+                "control-id": "SC-7",
+                "description": "Boundary protection and network isolation",
+                "props": [
+                  {"name": "evidence-type", "value": "network-policy"},
+                  {"name": "producer", "value": "cilium"},
+                  {"name": "freshness", "value": "12h"}
+                ]
+              },
+              {
+                "uuid": "ir-cm-8",
+                "control-id": "CM-8",
+                "description": "Component inventory and vulnerability scanning",
+                "props": [
+                  {"name": "evidence-type", "value": "vulnerability"},
+                  {"name": "producer", "value": "trivy"},
+                  {"name": "freshness", "value": "24h"}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

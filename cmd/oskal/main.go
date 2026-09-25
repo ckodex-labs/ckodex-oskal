@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -20,10 +21,12 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
+	recoscal "github.com/ckodex-labs/ckodex-oskal/internal/reconciler/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/service"
 	commonv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
 	controlv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1"
 	servicesv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/services/v1"
+	"sigs.k8s.io/yaml"
 )
 
 var (
@@ -559,7 +562,86 @@ and projects defensible results into standard OSCAL artifacts.`,
 
 	exportCmd.AddCommand(exportARCmd, exportCompDefCmd, exportAPCmd, exportPOAMCmd)
 
-	// 6. oscal serve --port <port>
+	// 6. oscal import oscal --file <path> [--namespace <ns>] [--output-dir <dir>]
+	var (
+		importFilePath  string
+		importNamespace string
+		importOutputDir string
+	)
+	importCmd := &cobra.Command{
+		Use:   "import",
+		Short: "Import external compliance artifacts into Kubernetes CRDs",
+	}
+
+	importOscalCmd := &cobra.Command{
+		Use:   "oscal",
+		Short: "Import NIST OSCAL v1.2.3 Component Definition or SSP and output Kubernetes manifests",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if importFilePath == "" {
+				return fmt.Errorf("--file flag is required")
+			}
+
+			var data []byte
+			var err error
+			if importFilePath == "-" {
+				data, err = io.ReadAll(os.Stdin)
+			} else {
+				data, err = os.ReadFile(importFilePath)
+			}
+			if err != nil {
+				return fmt.Errorf("failed to read input OSCAL file: %w", err)
+			}
+
+			res, err := recoscal.IngestOSCAL(data, importNamespace)
+			if err != nil {
+				return fmt.Errorf("failed to ingest OSCAL document: %w", err)
+			}
+
+			fmt.Fprintf(os.Stderr, "[PASS] Ingested OSCAL %s: %s (UUID: %s)\n", res.SourceType, res.Title, res.SourceUUID)
+			fmt.Fprintf(os.Stderr, "[INFO] Generated %d ControlBinding(s) and %d EvidenceContract(s)\n", len(res.ControlBindings), len(res.EvidenceContracts))
+			fmt.Fprintf(os.Stderr, "---\n")
+
+			var allManifests []string
+			for _, ec := range res.EvidenceContracts {
+				ecYaml, err := yaml.Marshal(ec)
+				if err != nil {
+					return err
+				}
+				allManifests = append(allManifests, string(ecYaml))
+			}
+			for _, cb := range res.ControlBindings {
+				cbYaml, err := yaml.Marshal(cb)
+				if err != nil {
+					return err
+				}
+				allManifests = append(allManifests, string(cbYaml))
+			}
+
+			output := strings.Join(allManifests, "\n---\n")
+
+			if importOutputDir != "" {
+				if err := os.MkdirAll(importOutputDir, 0755); err != nil {
+					return err
+				}
+				targetPath := filepath.Join(importOutputDir, fmt.Sprintf("%s-crds.yaml", recoscal.SanitizeK8sName(res.Title)))
+				if err := os.WriteFile(targetPath, []byte(output), 0644); err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "[PASS] Manifests written to %s\n", targetPath)
+			} else {
+				fmt.Println(output)
+			}
+
+			return nil
+		},
+	}
+	importOscalCmd.Flags().StringVarP(&importFilePath, "file", "f", "", "Path to OSCAL JSON or YAML file (or - for stdin)")
+	importOscalCmd.Flags().StringVarP(&importNamespace, "namespace", "n", "default", "Target Kubernetes namespace for generated CRDs")
+	importOscalCmd.Flags().StringVarP(&importOutputDir, "output-dir", "o", "", "Directory to write generated CRD manifests to (defaults to stdout)")
+
+	importCmd.AddCommand(importOscalCmd)
+
+	// 7. oscal serve --port <port>
 	var port int
 	serveCmd := &cobra.Command{
 		Use:   "serve",
@@ -594,7 +676,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 	serveCmd.Flags().IntVar(&port, "port", 9090, "Port for gRPC service to listen on")
 
 	assuranceCmd.AddCommand(stateCmd, explainCmd, evidenceCmd, driftCmd)
-	rootCmd.AddCommand(assuranceCmd, exportCmd, serveCmd)
+	rootCmd.AddCommand(assuranceCmd, exportCmd, importCmd, serveCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
