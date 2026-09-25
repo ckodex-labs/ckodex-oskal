@@ -5,7 +5,7 @@ set -euo pipefail
 # Purpose: Provision a live local Kind cluster, install CRDs, ingest OSCAL compliance models,
 # deploy governed workloads, and verify continuous assurance reconciliation.
 
-CLUSTER_NAME="ckodex-oskal-e2e"
+CLUSTER_NAME="${CLUSTER_NAME:-ckodex-oskal-e2e}"
 NAMESPACE="ckodex-assurance-test"
 KEEP_CLUSTER=false
 CLEAN_ONLY=false
@@ -16,14 +16,20 @@ for arg in "$@"; do
       KEEP_CLUSTER=true
       shift
       ;;
+    --cluster=*)
+      CLUSTER_NAME="${arg#*=}"
+      KEEP_CLUSTER=true
+      shift
+      ;;
     --clean)
       CLEAN_ONLY=true
       shift
       ;;
     --help|-h)
-      echo "Usage: $0 [--keep] [--clean]"
-      echo "  --keep   Retain the Kind cluster after test completion"
-      echo "  --clean  Delete the Kind cluster and exit"
+      echo "Usage: $0 [--keep] [--clean] [--cluster=<name>]"
+      echo "  --keep            Retain the Kind cluster after test completion"
+      echo "  --clean           Delete the Kind cluster and exit"
+      echo "  --cluster=<name>  Target an existing cluster (implies --keep)"
       exit 0
       ;;
   esac
