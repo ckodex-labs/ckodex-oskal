@@ -17,7 +17,7 @@ func TestOpenReportsIngestionAndNormalization(t *testing.T) {
 
 	now := time.Now().UTC()
 	epoch := assurance.AssuranceEpoch{
-		SubjectDigest: "sha256:sub",
+		SubjectDigest: assurance.ComputeStringDigest("subject-01"),
 	}
 
 	report := OpenReport{

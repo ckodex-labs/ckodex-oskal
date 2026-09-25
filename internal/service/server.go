@@ -118,6 +118,18 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 		}
 	}
 
+	impDigest := ""
+	polDigest := ""
+	authDigest := ""
+	envDigest := ""
+
+	if hasEvidence {
+		impDigest = assurance.ComputeStringDigest("kubernetes:workload-specification")
+		polDigest = assurance.ComputeStringDigest(subKey + ":" + evRoot)
+		authDigest = assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server")
+		envDigest = assurance.ComputeStringDigest("cluster:kubernetes")
+	}
+
 	var evaluations []*assessmentv1.ClaimEvaluation
 	for _, ctrl := range req.Controls {
 		eval := &assessmentv1.ClaimEvaluation{
@@ -138,10 +150,10 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 			},
 			Epoch: &commonv1.AssuranceEpoch{
 				SubjectDigest:        assurance.ComputeStringDigest(subKey),
-				ImplementationDigest: "sha256:imp",
-				PolicyDigest:         "sha256:pol",
-				AuthorityDigest:      "sha256:auth",
-				EnvironmentDigest:    "sha256:env",
+				ImplementationDigest: impDigest,
+				PolicyDigest:         polDigest,
+				AuthorityDigest:      authDigest,
+				EnvironmentDigest:    envDigest,
 			},
 			Completeness: evCompleteness,
 			EvidenceRoot: evRoot,
@@ -196,17 +208,28 @@ func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimR
 		Version:   req.Control.Version,
 	}
 
+	polDigest := ""
+	impDigest := ""
+	authDigest := ""
+	envDigest := ""
+	if evRoot != "" {
+		polDigest = assurance.ComputeStringDigest(sub.URI() + ":" + evRoot)
+		impDigest = assurance.ComputeStringDigest("kubernetes:workload-specification")
+		authDigest = assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server")
+		envDigest = assurance.ComputeStringDigest("cluster:kubernetes")
+	}
+
 	eval := assurance.ClaimEvaluation{
-		ID:      "eval-01",
+		ID:      fmt.Sprintf("eval-%s", ctrl.ID),
 		Subject: sub,
 		Control: ctrl,
 		State:   claimState,
 		Epoch: assurance.AssuranceEpoch{
 			SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-			ImplementationDigest: "sha256:imp",
-			PolicyDigest:         "sha256:pol",
-			AuthorityDigest:      "sha256:auth",
-			EnvironmentDigest:    "sha256:env",
+			ImplementationDigest: impDigest,
+			PolicyDigest:         polDigest,
+			AuthorityDigest:      authDigest,
+			EnvironmentDigest:    envDigest,
 		},
 		EvidenceRoot: evRoot,
 	}
@@ -302,10 +325,10 @@ func (s *Server) GetAssuranceState(ctx context.Context, req *servicesv1.GetAssur
 		EvidenceRoot: root,
 		Epoch: &commonv1.AssuranceEpoch{
 			SubjectDigest:        assurance.ComputeStringDigest(subKey),
-			ImplementationDigest: "sha256:imp",
+			ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload-specification"),
 			PolicyDigest:         policyDigest,
-			AuthorityDigest:      "sha256:auth",
-			EnvironmentDigest:    "sha256:env",
+			AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+			EnvironmentDigest:    assurance.ComputeStringDigest("cluster:kubernetes"),
 		},
 	}, nil
 }

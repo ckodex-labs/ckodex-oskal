@@ -25,11 +25,11 @@ func TestDeclarativeAndRuntimeEvidenceComposeIntoOneClaim(t *testing.T) {
 	policyDigest := cel.ComputePolicyDigest(policy)
 
 	epoch := assurance.AssuranceEpoch{
-		SubjectDigest:        "sha256:sub",
-		ImplementationDigest: "sha256:imp",
+		SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
+		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload-specification"),
 		PolicyDigest:         policyDigest,
-		AuthorityDigest:      "sha256:auth",
-		EnvironmentDigest:    "sha256:env",
+		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/authority"),
+		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
 	}
 
 	// 1. Declarative Evidence from CEL Admission

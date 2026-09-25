@@ -9,13 +9,13 @@ func TestEvidenceEnvelopeBuilder(t *testing.T) {
 	sub := SubjectRef{Scheme: "k8s", ID: "default/app"}
 	auth := AuthorityRef{Scheme: "spiffe", Subject: "prod/sa/tester"}
 	epoch := AssuranceEpoch{
-		SubjectDigest: "sha256:sub",
+		SubjectDigest: ComputeStringDigest("subject-01"),
 	}
 
 	// 1. Valid envelope construction
 	builder := NewEvidenceEnvelope("https://assurance.ckodex.io/schemas/v1", "env-001", sub, "admission").
 		WithProducer(auth).
-		WithArtifact("evidence://cel/01", "sha256:art123", "application/json").
+		WithArtifact("evidence://cel/01", ComputeStringDigest("artifact-01"), "application/json").
 		WithEpoch(epoch).
 		WithControlRefs(ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}).
 		WithCapturedAt(time.Now().UTC())
@@ -47,9 +47,10 @@ func TestObservationBuilder(t *testing.T) {
 	sub := SubjectRef{Scheme: "k8s", ID: "default/app"}
 	auth := AuthorityRef{Scheme: "spiffe", Subject: "prod/sa/tester"}
 
+	artDigest := ComputeStringDigest("artifact-01")
 	obs, err := NewObservation("obs-001", "admission", sub).
 		WithProducer(auth).
-		WithEvidenceRef("evidence://cel/01", "sha256:art123", "application/json").
+		WithEvidenceRef("evidence://cel/01", artDigest, "application/json").
 		Build()
 	if err != nil {
 		t.Fatalf("unexpected error building observation: %v", err)
@@ -58,7 +59,7 @@ func TestObservationBuilder(t *testing.T) {
 	if obs.Id != "obs-001" || obs.Type != "admission" {
 		t.Fatalf("unexpected observation fields: %+v", obs)
 	}
-	if len(obs.Evidence) != 1 || obs.Evidence[0].Digest != "sha256:art123" {
+	if len(obs.Evidence) != 1 || obs.Evidence[0].Digest != artDigest {
 		t.Fatalf("unexpected evidence list: %+v", obs.Evidence)
 	}
 
@@ -75,13 +76,17 @@ func TestComputeEvidenceRoot(t *testing.T) {
 		t.Fatalf("expected 'none' for empty digests, got %s", rootEmpty)
 	}
 
-	root1 := ComputeEvidenceRoot([]string{"sha256:aaa", "sha256:bbb"})
-	root2 := ComputeEvidenceRoot([]string{"sha256:aaa", "sha256:bbb"})
+	digestA := ComputeStringDigest("item-a")
+	digestB := ComputeStringDigest("item-b")
+	digestC := ComputeStringDigest("item-c")
+
+	root1 := ComputeEvidenceRoot([]string{digestA, digestB})
+	root2 := ComputeEvidenceRoot([]string{digestA, digestB})
 	if root1 != root2 {
 		t.Fatalf("expected deterministic root, got %s != %s", root1, root2)
 	}
 
-	rootDiff := ComputeEvidenceRoot([]string{"sha256:aaa", "sha256:ccc"})
+	rootDiff := ComputeEvidenceRoot([]string{digestA, digestC})
 	if root1 == rootDiff {
 		t.Fatal("expected different roots for different digests")
 	}

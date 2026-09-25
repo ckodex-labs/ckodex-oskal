@@ -58,7 +58,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	evaluator := &reconcile.DefaultMockEvaluator{}
+	evaluator := &reconcile.ContractEvaluator{}
 
 	if err = (&reconcile.ControlBindingReconciler{
 		Client:         mgr.GetClient(),

@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/service"
 	commonv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
 	controlv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1"
@@ -73,7 +74,7 @@ func TestInProcessClientLifecycle(t *testing.T) {
 			Id:     subject.ID,
 		},
 		Evidence: []*evidencev1.EvidenceRef{
-			{Uri: "evidence://cel/admission", Digest: "sha256:sdk123", MediaType: "application/json"},
+			{Uri: "evidence://cel/admission", Digest: ComputeStringDigest("sdk-evidence-01"), MediaType: "application/json"},
 		},
 		ObservedAt: timestamppb.Now(),
 	})
@@ -110,15 +111,15 @@ func TestInProcessClientLifecycle(t *testing.T) {
 
 	// 6. Submit cryptographic receipt
 	epoch := AssuranceEpoch{
-		SubjectDigest:        "sha256:sub",
-		ImplementationDigest: "sha256:imp",
-		PolicyDigest:         "sha256:pol",
-		AuthorityDigest:      "sha256:auth",
-		EnvironmentDigest:    "sha256:env",
+		SubjectDigest:        assurance.ComputeStringDigest(subject.ID),
+		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload"),
+		PolicyDigest:         assurance.ComputeStringDigest("policy:nist-ac6"),
+		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
 	}
 	now := time.Now().UTC()
 	coreReceipt, err := mgr.IssueReceipt(subject, ctrl, StateAssured, epoch, []EvidenceRef{
-		{Digest: "sha256:sdk123"},
+		{Digest: assurance.ComputeStringDigest("sdk-evidence-payload-123")},
 	}, now)
 	if err != nil {
 		t.Fatalf("failed to issue receipt: %v", err)
@@ -154,7 +155,7 @@ func TestInProcessClientLifecycle(t *testing.T) {
 
 	// 7. Submit tampered receipt -> verify rejection
 	tamperedProto := proto.Clone(protoRcpt).(*receiptv1.ControlReceipt)
-	tamperedProto.EvidenceRoot = "sha256:tampered"
+	tamperedProto.EvidenceRoot = ComputeStringDigest("tampered-root")
 
 	tamperedVerified, _, err := client.SubmitReceipt(ctx, tamperedProto)
 	if err != nil {
@@ -231,7 +232,7 @@ func TestGRPCClientLifecycle(t *testing.T) {
 			Id:     subject.ID,
 		},
 		Evidence: []*evidencev1.EvidenceRef{
-			{Uri: "evidence://cel/admission", Digest: "sha256:grpc123", MediaType: "application/json"},
+			{Uri: "evidence://cel/admission", Digest: ComputeStringDigest("grpc-evidence-01"), MediaType: "application/json"},
 		},
 		ObservedAt: timestamppb.Now(),
 	})

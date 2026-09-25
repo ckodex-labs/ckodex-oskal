@@ -6,19 +6,19 @@ import (
 
 func TestAssuranceEpochMatchesAndComposite(t *testing.T) {
 	epochA := AssuranceEpoch{
-		SubjectDigest:        "sha256:1111",
-		ImplementationDigest: "sha256:2222",
-		PolicyDigest:         "sha256:3333",
-		AuthorityDigest:      "sha256:4444",
-		EnvironmentDigest:    "sha256:5555",
+		SubjectDigest:        ComputeStringDigest("sub-01"),
+		ImplementationDigest: ComputeStringDigest("imp-01"),
+		PolicyDigest:         ComputeStringDigest("pol-01"),
+		AuthorityDigest:      ComputeStringDigest("auth-01"),
+		EnvironmentDigest:    ComputeStringDigest("env-01"),
 	}
 
 	epochB := AssuranceEpoch{
-		SubjectDigest:        "sha256:1111",
-		ImplementationDigest: "sha256:2222",
-		PolicyDigest:         "sha256:3333",
-		AuthorityDigest:      "sha256:4444",
-		EnvironmentDigest:    "sha256:5555",
+		SubjectDigest:        ComputeStringDigest("sub-01"),
+		ImplementationDigest: ComputeStringDigest("imp-01"),
+		PolicyDigest:         ComputeStringDigest("pol-01"),
+		AuthorityDigest:      ComputeStringDigest("auth-01"),
+		EnvironmentDigest:    ComputeStringDigest("env-01"),
 	}
 
 	if !epochA.Matches(epochB) {
@@ -31,7 +31,7 @@ func TestAssuranceEpochMatchesAndComposite(t *testing.T) {
 
 	// Change one dimension
 	epochC := epochB
-	epochC.PolicyDigest = "sha256:9999"
+	epochC.PolicyDigest = ComputeStringDigest("pol-02")
 
 	if epochA.Matches(epochC) {
 		t.Fatalf("expected epochA not to match epochC")
@@ -48,8 +48,11 @@ func TestAssuranceEpochMatchesAndComposite(t *testing.T) {
 }
 
 func TestCanonicalDigestListDeterminism(t *testing.T) {
-	listA := []string{"sha256:bbb", "sha256:aaa", "sha256:ccc"}
-	listB := []string{"sha256:ccc", "sha256:aaa", "sha256:bbb"}
+	d1 := ComputeStringDigest("item-1")
+	d2 := ComputeStringDigest("item-2")
+	d3 := ComputeStringDigest("item-3")
+	listA := []string{d2, d1, d3}
+	listB := []string{d3, d1, d2}
 
 	rootA := CanonicalDigestList(listA)
 	rootB := CanonicalDigestList(listB)

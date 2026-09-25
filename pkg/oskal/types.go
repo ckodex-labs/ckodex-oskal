@@ -43,6 +43,9 @@ const (
 	StateFailed      = assurance.AssuranceStateFailed
 )
 
+// ComputeStringDigest computes a canonical sha256: digest for a string.
+var ComputeStringDigest = assurance.ComputeStringDigest
+
 // Re-export protobuf models for wire interop.
 type (
 	ProtoSubjectRef     = commonv1.SubjectRef

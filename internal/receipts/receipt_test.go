@@ -22,16 +22,16 @@ func TestCryptographicReceiptIssueAndIndependentVerification(t *testing.T) {
 	sub := assurance.SubjectRef{Scheme: "k8s", ID: "payments/payments-api/Deployment/payments-api"}
 	ctrl := assurance.ControlRef{Namespace: "ckodex", ID: "container.least-privilege"}
 	epoch := assurance.AssuranceEpoch{
-		SubjectDigest:        "sha256:sub123",
-		ImplementationDigest: "sha256:imp123",
-		PolicyDigest:         "sha256:pol123",
-		AuthorityDigest:      "sha256:auth123",
-		EnvironmentDigest:    "sha256:env123",
+		SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
+		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload"),
+		PolicyDigest:         assurance.ComputeStringDigest("cel:policy:restricted-containers"),
+		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
 	}
 
 	evidences := []assurance.EvidenceRef{
-		{URI: "evidence://cel/1", Digest: "sha256:aaa", MediaType: "application/json"},
-		{URI: "evidence://tetragon/2", Digest: "sha256:bbb", MediaType: "application/json"},
+		{URI: "evidence://cel/1", Digest: assurance.ComputeStringDigest("artifact-content-aaa"), MediaType: "application/json"},
+		{URI: "evidence://tetragon/2", Digest: assurance.ComputeStringDigest("artifact-content-bbb"), MediaType: "application/json"},
 	}
 
 	now := time.Now().UTC()
@@ -74,7 +74,7 @@ func TestCryptographicReceiptIssueAndIndependentVerification(t *testing.T) {
 
 	// Tamper evidence root
 	tamperedReceiptRoot := receipt
-	tamperedReceiptRoot.EvidenceRoot = "sha256:fakeEvidenceRoot"
+	tamperedReceiptRoot.EvidenceRoot = assurance.ComputeStringDigest("fake-evidence-root")
 	validTamperedRoot, _ := VerifyIndependentReceipt(tamperedReceiptRoot, pubKeyHex)
 	if validTamperedRoot {
 		t.Fatalf("Security failure: Tampered evidence root was verified!")
@@ -82,15 +82,19 @@ func TestCryptographicReceiptIssueAndIndependentVerification(t *testing.T) {
 }
 
 func TestDeterministicEvidenceRoot(t *testing.T) {
+	dZ := assurance.ComputeStringDigest("item-z")
+	dA := assurance.ComputeStringDigest("item-a")
+	dM := assurance.ComputeStringDigest("item-m")
+
 	ev1 := []assurance.EvidenceRef{
-		{Digest: "sha256:zzz"},
-		{Digest: "sha256:aaa"},
-		{Digest: "sha256:mmm"},
+		{Digest: dZ},
+		{Digest: dA},
+		{Digest: dM},
 	}
 	ev2 := []assurance.EvidenceRef{
-		{Digest: "sha256:aaa"},
-		{Digest: "sha256:mmm"},
-		{Digest: "sha256:zzz"},
+		{Digest: dA},
+		{Digest: dM},
+		{Digest: dZ},
 	}
 
 	root1 := ComputeEvidenceRoot(ev1)

@@ -63,11 +63,11 @@ func TestControlReceiptCanonicalBytesAndDigest(t *testing.T) {
 	sub := SubjectRef{Scheme: "k8s", ID: "prod/payments/Deployment/payments-api"}
 	ctrl := ControlRef{Namespace: "ckodex", ID: "container.least-privilege"}
 	epoch := AssuranceEpoch{
-		SubjectDigest:        "sha256:sub",
-		ImplementationDigest: "sha256:imp",
-		PolicyDigest:         "sha256:pol",
-		AuthorityDigest:      "sha256:auth",
-		EnvironmentDigest:    "sha256:env",
+		SubjectDigest:        ComputeStringDigest(sub.URI()),
+		ImplementationDigest: ComputeStringDigest("kubernetes:workload-specification"),
+		PolicyDigest:         ComputeStringDigest("policy:restricted-containers"),
+		AuthorityDigest:      ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+		EnvironmentDigest:    ComputeStringDigest("cluster:local"),
 	}
 
 	receipt := ControlReceipt{
@@ -75,7 +75,7 @@ func TestControlReceiptCanonicalBytesAndDigest(t *testing.T) {
 		Control:      ctrl,
 		State:        AssuranceStateAssured,
 		Epoch:        epoch,
-		EvidenceRoot: "sha256:root12345",
+		EvidenceRoot: ComputeStringDigest("evidence:merkle:root"),
 		Evaluator:    AuthorityRef{Scheme: "spiffe", Subject: "prod/ns/oskal/sa/evaluator"},
 		EvaluatedAt:  time.Unix(1790200000, 0),
 	}
@@ -97,11 +97,11 @@ func TestExplainGraphRendering(t *testing.T) {
 	sub := SubjectRef{Scheme: "k8s", ID: "prod/payments/Deployment/payments-api"}
 	ctrl := ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
 	epoch := AssuranceEpoch{
-		SubjectDigest:        "sha256:sub",
-		ImplementationDigest: "sha256:imp",
-		PolicyDigest:         "sha256:pol",
-		AuthorityDigest:      "sha256:auth",
-		EnvironmentDigest:    "sha256:env",
+		SubjectDigest:        ComputeStringDigest(sub.URI()),
+		ImplementationDigest: ComputeStringDigest("kubernetes:workload-specification"),
+		PolicyDigest:         ComputeStringDigest("policy:nist-ac6"),
+		AuthorityDigest:      ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+		EnvironmentDigest:    ComputeStringDigest("cluster:local"),
 	}
 
 	graph := ExplainGraph{
@@ -115,8 +115,8 @@ func TestExplainGraphRendering(t *testing.T) {
 			{ID: "workload identity", Satisfied: true},
 		},
 		Implementations: []ExplainImplementation{
-			{Requirement: "non-root", Provider: "kubernetes ValidatingAdmissionPolicy", Digest: "sha256:cel123"},
-			{Requirement: "identity", Provider: "SPIFFE/SPIRE", Digest: "sha256:spire456"},
+			{Requirement: "non-root", Provider: "kubernetes ValidatingAdmissionPolicy", Digest: ComputeStringDigest("cel-policy")},
+			{Requirement: "identity", Provider: "SPIFFE/SPIRE", Digest: ComputeStringDigest("spire-agent")},
 		},
 		Evidence: []ExplainEvidenceItem{
 			{Type: "admission decision", Verified: true},
@@ -132,7 +132,7 @@ func TestExplainGraphRendering(t *testing.T) {
 		Authority:      "verified",
 		Epoch:          epoch,
 		AssuranceState: AssuranceStateAssured,
-		EvidenceRoot:   "sha256:merkle999",
+		EvidenceRoot:   ComputeStringDigest("merkle-root"),
 		Projections: map[string]string{
 			"Component Definition": "AC-6 implemented-requirement",
 			"Assessment Results":   "3 observations, 0 findings",
@@ -157,7 +157,7 @@ func TestExplainGraphRendering(t *testing.T) {
 		"FRESHNESS\ncurrent",
 		"AUTHORITY\nverified",
 		"ASSURANCE\nASSURED",
-		"EVIDENCE ROOT\nsha256:merkle999",
+		"EVIDENCE ROOT\n" + ComputeStringDigest("merkle-root"),
 	}
 
 	for _, sec := range expectedSections {

@@ -65,14 +65,57 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		telemetry.RecordDriftInvalidation(binding.Name, "generation_drift")
 	}
 
+	// Determine honest assurance state via ClaimEvaluator
+	targetState := assurance.AssuranceStateUnknown
+	if r.ClaimEvaluator != nil && len(binding.Spec.Controls) > 0 {
+		ctrlRef := assurance.ControlRef{
+			Namespace: binding.Spec.Controls[0].Canonical.Namespace,
+			ID:        binding.Spec.Controls[0].Canonical.ID,
+		}
+		subRef := assurance.SubjectRef{
+			Scheme: "k8s",
+			ID:     fmt.Sprintf("%s/%s", binding.Namespace, binding.Name),
+		}
+		claim := assurance.Claim{
+			ID:      fmt.Sprintf("claim-%s", binding.Name),
+			Subject: subRef,
+			Control: ctrlRef,
+		}
+
+		// Build contract from binding requirements
+		var reqs []assurance.EvidenceRequirement
+		for _, req := range binding.Spec.Requirements {
+			reqs = append(reqs, assurance.EvidenceRequirement{
+				ID:           req.ID,
+				EvidenceType: "admission",
+				Required:     true,
+				MaxAge:       24 * time.Hour,
+			})
+		}
+		contract := assurance.EvidenceContract{
+			ID:                     fmt.Sprintf("contract-%s", binding.Name),
+			Requirements:           reqs,
+			OnMissingRequiredState: assurance.AssuranceStateUnknown,
+		}
+
+		currentEpoch := assurance.AssuranceEpoch{
+			SubjectDigest: assurance.ComputeStringDigest(subRef.URI()),
+		}
+
+		eval, err := r.ClaimEvaluator.Evaluate(ctx, claim, contract, currentEpoch)
+		if err == nil {
+			targetState = eval.State
+		}
+	}
+
 	// Reconcile status conditions
 	binding.Status.ObservedGeneration = binding.Generation
 	metaCondition := metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
-		Reason:             "Reconciled",
-		Message:            fmt.Sprintf("Binding configured with %d controls", len(binding.Spec.Controls)),
+		Reason:             targetState.String(),
+		Message:            fmt.Sprintf("Binding configured with %d controls; evaluated state: %s", len(binding.Spec.Controls), targetState),
 	}
 
 	// Update condition in slice
@@ -93,9 +136,12 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	// Emit telemetry metrics
-	telemetry.RecordAssuranceState(binding.Namespace, binding.Name, "ASSURED", fmt.Sprintf("%d", binding.Generation), true)
-	telemetry.RecordReceiptIssued(binding.Name, "VALID")
+	// Emit truthful telemetry metrics reflecting verified state (never fabricated PASS)
+	telemetry.RecordAssuranceState(binding.Namespace, binding.Name, targetState.String(), fmt.Sprintf("%d", binding.Generation), true)
+
+	if r.ReceiptSigner != nil && targetState == assurance.AssuranceStateAssured {
+		telemetry.RecordReceiptIssued(binding.Name, "VALID")
+	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
@@ -136,18 +182,33 @@ func (r *AssuranceStateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// DefaultMockEvaluator provides a default ClaimEvaluator satisfying ports.ClaimEvaluator for standalone testing.
-type DefaultMockEvaluator struct{}
+// ContractEvaluator provides deterministic claim evaluation satisfying ports.ClaimEvaluator.
+type ContractEvaluator struct {
+	EvidenceSource []assurance.EvidenceEnvelope
+}
 
-func (e *DefaultMockEvaluator) Evaluate(ctx context.Context, claim assurance.Claim, contract assurance.EvidenceContract, currentEpoch assurance.AssuranceEpoch) (assurance.ClaimEvaluation, error) {
-	now := time.Now()
-	res := contract.Evaluate(nil, currentEpoch, now)
+func (e *ContractEvaluator) Evaluate(ctx context.Context, claim assurance.Claim, contract assurance.EvidenceContract, currentEpoch assurance.AssuranceEpoch) (assurance.ClaimEvaluation, error) {
+	now := time.Now().UTC()
+	res := contract.Evaluate(e.EvidenceSource, currentEpoch, now)
+
+	vec := assurance.NewDefaultAssuranceVector()
+	switch res.State {
+	case assurance.AssuranceStateAssured, assurance.AssuranceStateVerified:
+		vec.Applicability = assurance.ValencePositive
+		vec.Conformance = assurance.ValencePositive
+		vec.Completeness = assurance.ValencePositive
+		vec.Freshness = assurance.ValencePositive
+	case assurance.AssuranceStateFailed:
+		vec.Conformance = assurance.ValenceNegative
+		vec.Coherence = assurance.CoherenceDecoherent
+	}
+
 	return assurance.ClaimEvaluation{
 		ID:           fmt.Sprintf("eval-%s", claim.ID),
 		Control:      claim.Control,
 		Subject:      claim.Subject,
 		State:        res.State,
-		Vector:       assurance.NewDefaultAssuranceVector(),
+		Vector:       vec,
 		Epoch:        currentEpoch,
 		Completeness: res.Completeness,
 		EvaluatedAt:  now,

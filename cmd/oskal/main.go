@@ -107,6 +107,14 @@ func matchSubject(a, b assurance.SubjectRef) bool {
 	return strings.Contains(a.ID, b.ID) || strings.Contains(b.ID, a.ID)
 }
 
+func parseSubjectURI(raw string) assurance.SubjectRef {
+	if strings.Contains(raw, "://") {
+		parts := strings.SplitN(raw, "://", 2)
+		return assurance.SubjectRef{Scheme: parts[0], ID: parts[1]}
+	}
+	return assurance.SubjectRef{Scheme: "k8s", ID: raw}
+}
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "oskal",
@@ -289,16 +297,16 @@ and projects defensible results into standard OSCAL artifacts.`,
 				policyDigest := assurance.ComputeStringDigest(sub.URI() + ":" + evRoot)
 
 				eval = assurance.ClaimEvaluation{
-					ID:      "eval-01",
+					ID:      fmt.Sprintf("eval-%s", ctrl.ID),
 					Subject: sub,
 					Control: ctrl,
 					State:   assurance.AssuranceStateAssured,
 					Epoch: assurance.AssuranceEpoch{
 						SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-						ImplementationDigest: "sha256:imp",
+						ImplementationDigest: assurance.ComputeStringDigest("kubernetes:admission-policy"),
 						PolicyDigest:         policyDigest,
-						AuthorityDigest:      "sha256:auth",
-						EnvironmentDigest:    "sha256:env",
+						AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/operator"),
+						EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
 					},
 					Evidence:     evRefs,
 					EvidenceRoot: evRoot,
@@ -307,13 +315,13 @@ and projects defensible results into standard OSCAL artifacts.`,
 				}
 			} else {
 				eval = assurance.ClaimEvaluation{
-					ID:           "eval-unknown",
+					ID:           fmt.Sprintf("eval-unknown-%s", ctrl.ID),
 					Subject:      sub,
 					Control:      ctrl,
 					State:        assurance.AssuranceStateUnknown,
-					Epoch:        assurance.AssuranceEpoch{},
+					Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(sub.URI())},
 					Evidence:     nil,
-					EvidenceRoot: "none",
+					EvidenceRoot: "",
 					EvaluatedAt:  time.Now().UTC(),
 				}
 			}
@@ -438,28 +446,57 @@ and projects defensible results into standard OSCAL artifacts.`,
 			if subURI == "" {
 				subURI = "k8s://prod/payments/Deployment/payments-api"
 			}
-			sub := assurance.SubjectRef{Scheme: "k8s", ID: subURI}
-			epoch := assurance.AssuranceEpoch{
-				SubjectDigest:        "sha256:sub",
-				ImplementationDigest: "sha256:imp",
-				PolicyDigest:         "sha256:pol",
-				AuthorityDigest:      "sha256:auth",
-				EnvironmentDigest:    "sha256:env",
+			sub := parseSubjectURI(subURI)
+			ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+
+			var envelopes []assurance.EvidenceEnvelope
+			if evidenceDir != "" {
+				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
 			}
-			eval := assurance.ClaimEvaluation{
-				ID:      "eval-01",
-				Subject: sub,
-				Control: assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-				State:   assurance.AssuranceStateAssured,
-				Epoch:   epoch,
-				Evidence: []assurance.EvidenceRef{
-					{URI: "s3://evidence/ev-01", Digest: "sha256:ev01", MediaType: "application/json"},
-				},
-				Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 1},
-				EvidenceRoot: "sha256:root123",
-				EvaluatedAt:  time.Now().UTC(),
-				ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
+
+			var eval assurance.ClaimEvaluation
+			if len(envelopes) > 0 {
+				var evRefs []assurance.EvidenceRef
+				for _, env := range envelopes {
+					evRefs = append(evRefs, env.Artifact)
+				}
+				evRoot := receipts.ComputeEvidenceRoot(evRefs)
+				policyDigest := assurance.ComputeStringDigest(sub.URI() + ":" + evRoot)
+
+				eval = assurance.ClaimEvaluation{
+					ID:      fmt.Sprintf("eval-%s", ctrl.ID),
+					Subject: sub,
+					Control: ctrl,
+					State:   assurance.AssuranceStateAssured,
+					Epoch: assurance.AssuranceEpoch{
+						SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
+						ImplementationDigest: assurance.ComputeStringDigest("kubernetes:admission-policy"),
+						PolicyDigest:         policyDigest,
+						AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/operator"),
+						EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
+					},
+					Evidence:     evRefs,
+					Completeness: assurance.EvidenceCompleteness{Required: len(evRefs), Verified: len(evRefs)},
+					EvidenceRoot: evRoot,
+					EvaluatedAt:  time.Now().UTC(),
+					ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
+				}
+			} else {
+				// Honest reporting when no evidence is present (Invariant I-02)
+				eval = assurance.ClaimEvaluation{
+					ID:           fmt.Sprintf("eval-unknown-%s", ctrl.ID),
+					Subject:      sub,
+					Control:      ctrl,
+					State:        assurance.AssuranceStateUnknown,
+					Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(sub.URI())},
+					Evidence:     nil,
+					Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 0},
+					EvidenceRoot: "",
+					EvaluatedAt:  time.Now().UTC(),
+					ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
+				}
 			}
+
 			projector := oscal.NewProjector()
 			data, err := projector.ProjectAssessmentResults(context.Background(), sub, []assurance.ClaimEvaluation{eval}, nil)
 			if err != nil {
@@ -479,16 +516,49 @@ and projects defensible results into standard OSCAL artifacts.`,
 			if compName == "" {
 				compName = "payments-api"
 			}
-			eval := assurance.ClaimEvaluation{
-				ID:      "eval-01",
-				Subject: assurance.SubjectRef{Scheme: "k8s", ID: "payments/payments-api"},
-				Control: assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-				State:   assurance.AssuranceStateAssured,
-				Epoch: assurance.AssuranceEpoch{
-					SubjectDigest: "sha256:sub",
-				},
-				EvidenceRoot: "sha256:root123",
+			sub := assurance.SubjectRef{Scheme: "k8s", ID: fmt.Sprintf("components/%s", compName)}
+			ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+
+			var envelopes []assurance.EvidenceEnvelope
+			if evidenceDir != "" {
+				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
 			}
+
+			var eval assurance.ClaimEvaluation
+			if len(envelopes) > 0 {
+				var evRefs []assurance.EvidenceRef
+				for _, env := range envelopes {
+					evRefs = append(evRefs, env.Artifact)
+				}
+				evRoot := receipts.ComputeEvidenceRoot(evRefs)
+				eval = assurance.ClaimEvaluation{
+					ID:      fmt.Sprintf("eval-%s", ctrl.ID),
+					Subject: sub,
+					Control: ctrl,
+					State:   assurance.AssuranceStateAssured,
+					Epoch: assurance.AssuranceEpoch{
+						SubjectDigest: assurance.ComputeStringDigest(sub.URI()),
+					},
+					Evidence:     evRefs,
+					EvidenceRoot: evRoot,
+					EvaluatedAt:  time.Now().UTC(),
+					ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
+				}
+			} else {
+				eval = assurance.ClaimEvaluation{
+					ID:      fmt.Sprintf("eval-unknown-%s", ctrl.ID),
+					Subject: sub,
+					Control: ctrl,
+					State:   assurance.AssuranceStateUnknown,
+					Epoch: assurance.AssuranceEpoch{
+						SubjectDigest: assurance.ComputeStringDigest(sub.URI()),
+					},
+					Evidence:     nil,
+					EvidenceRoot: "",
+					EvaluatedAt:  time.Now().UTC(),
+				}
+			}
+
 			projector := oscal.NewProjector()
 			data, err := projector.ProjectComponentDefinition(context.Background(), compName, []assurance.ClaimEvaluation{eval})
 			if err != nil {
@@ -508,11 +578,11 @@ and projects defensible results into standard OSCAL artifacts.`,
 			if subURI == "" {
 				subURI = "k8s://prod/payments/Deployment/payments-api"
 			}
-			sub := assurance.SubjectRef{Scheme: "k8s", ID: subURI}
+			sub := parseSubjectURI(subURI)
 			contract := assurance.EvidenceContract{
-				ID: "contract-01",
+				ID: fmt.Sprintf("contract-%s", sub.ID),
 				Requirements: []assurance.EvidenceRequirement{
-					{ID: "req-1", EvidenceType: "admission", MaxAge: 5 * time.Minute},
+					{ID: "req-1", EvidenceType: "admission", Required: true, MaxAge: 5 * time.Minute},
 				},
 			}
 			controls := []assurance.ControlRef{
@@ -537,18 +607,9 @@ and projects defensible results into standard OSCAL artifacts.`,
 			if subURI == "" {
 				subURI = "k8s://prod/payments/Deployment/payments-api"
 			}
-			sub := assurance.SubjectRef{Scheme: "k8s", ID: subURI}
-			findings := []assurance.Finding{
-				{
-					ID:           "find-01",
-					Subject:      sub,
-					Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-					Severity:     "HIGH",
-					Title:        "Remediation required for privileged container",
-					Description:  "Pod security admission denied root execution",
-					DiscoveredAt: time.Now().UTC(),
-				},
-			}
+			sub := parseSubjectURI(subURI)
+			// Truthfully report only observed findings (never fabricate fake violations)
+			var findings []assurance.Finding
 			projector := oscal.NewProjector()
 			data, err := projector.ProjectPOAM(context.Background(), sub, findings)
 			if err != nil {

@@ -74,7 +74,7 @@ func TestControllerReconciliationHarness(t *testing.T) {
 		Client:         fakeClient,
 		Scheme:         scheme,
 		Log:            ctrl.Log.WithName("test-controller"),
-		ClaimEvaluator: &reconcile.DefaultMockEvaluator{},
+		ClaimEvaluator: &reconcile.ContractEvaluator{},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -158,8 +158,8 @@ func TestAssuranceStateReconcilerHarness(t *testing.T) {
 	}
 }
 
-func TestMockEvaluatorAssuranceContract(t *testing.T) {
-	evaluator := &reconcile.DefaultMockEvaluator{}
+func TestContractEvaluatorHonestAssurance(t *testing.T) {
+	evaluator := &reconcile.ContractEvaluator{}
 	claim := assurance.Claim{
 		ID:      "claim-01",
 		Subject: assurance.SubjectRef{Scheme: "k8s", ID: "payments/Deployment/payments-api"},
@@ -172,7 +172,7 @@ func TestMockEvaluatorAssuranceContract(t *testing.T) {
 		},
 		OnMissingRequiredState: assurance.AssuranceStateUnknown,
 	}
-	epoch := assurance.AssuranceEpoch{SubjectDigest: "sha256:test"}
+	epoch := assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest("payments/Deployment/payments-api")}
 
 	eval, err := evaluator.Evaluate(context.Background(), claim, contract, epoch)
 	if err != nil {

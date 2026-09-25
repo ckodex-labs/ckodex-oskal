@@ -64,7 +64,7 @@ func TestSpireAuthorityAuthenticationAndAuthorization(t *testing.T) {
 				Type:       "workload.runtime.process",
 				CapturedAt: time.Now(),
 				Producer:   validTetragon.Canonical(),
-				Digest:     "sha256:tetragon123",
+				Digest:     assurance.ComputeStringDigest("tetragon-event"),
 				Verified:   true,
 			},
 		},
@@ -72,7 +72,7 @@ func TestSpireAuthorityAuthenticationAndAuthorization(t *testing.T) {
 		Freshness:      "current",
 		Authority:      "verified (" + validTetragon.Canonical() + ")",
 		AssuranceState: assurance.AssuranceStateAssured,
-		EvidenceRoot:   "sha256:root",
+		EvidenceRoot:   assurance.ComputeStringDigest("spire-root"),
 	}
 
 	rendered := graph.RenderText()

@@ -19,7 +19,7 @@ func TestProperty_MissingMandatoryEvidenceCannotProduceAssured(t *testing.T) {
 		OnMissingRequiredState: AssuranceStateUnknown,
 	}
 
-	epoch := AssuranceEpoch{SubjectDigest: "sha256:sub", ImplementationDigest: "sha256:imp"}
+	epoch := AssuranceEpoch{SubjectDigest: ComputeStringDigest("subject-01"), ImplementationDigest: ComputeStringDigest("impl-01")}
 	now := time.Now()
 
 	// Only 1 of 2 required evidence items provided
@@ -57,7 +57,7 @@ func TestProperty_ExpiredEvidenceCannotProduceFreshAssurance(t *testing.T) {
 		OnMissingRequiredState: AssuranceStateUnknown,
 	}
 
-	epoch := AssuranceEpoch{SubjectDigest: "sha256:sub"}
+	epoch := AssuranceEpoch{SubjectDigest: ComputeStringDigest("subject-01")}
 	now := time.Now()
 
 	// Evidence is 10 minutes old (exceeds 5m maxAge)
@@ -79,15 +79,15 @@ func TestProperty_ExpiredEvidenceCannotProduceFreshAssurance(t *testing.T) {
 // Section 65 Property 3: Changing policy digest invalidates matching epoch.
 func TestProperty_ChangingPolicyDigestInvalidatesEpoch(t *testing.T) {
 	epochInitial := AssuranceEpoch{
-		SubjectDigest:        "sha256:sub1",
-		ImplementationDigest: "sha256:imp1",
-		PolicyDigest:         "sha256:policyV1",
-		AuthorityDigest:      "sha256:auth1",
-		EnvironmentDigest:    "sha256:env1",
+		SubjectDigest:        ComputeStringDigest("sub1"),
+		ImplementationDigest: ComputeStringDigest("imp1"),
+		PolicyDigest:         ComputeStringDigest("policyV1"),
+		AuthorityDigest:      ComputeStringDigest("auth1"),
+		EnvironmentDigest:    ComputeStringDigest("env1"),
 	}
 
 	epochUpdatedPolicy := epochInitial
-	epochUpdatedPolicy.PolicyDigest = "sha256:policyV2"
+	epochUpdatedPolicy.PolicyDigest = ComputeStringDigest("policyV2")
 
 	if epochInitial.Matches(epochUpdatedPolicy) {
 		t.Fatalf("Property violation: Divergent policy digest matched initial epoch")
@@ -187,7 +187,7 @@ func TestProperty_ForgedProducerAuthorityRejection(t *testing.T) {
 		OnMissingRequiredState: AssuranceStateUnknown,
 	}
 
-	epoch := AssuranceEpoch{SubjectDigest: "sha256:sub"}
+	epoch := AssuranceEpoch{SubjectDigest: ComputeStringDigest("subject-01")}
 	now := time.Now()
 
 	// Attacker tries to submit evidence with untrusted SPIFFE ID

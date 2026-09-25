@@ -25,12 +25,12 @@ func TestSigstoreSupplyChainVerificationAndContinuity(t *testing.T) {
 		Digest:       "sha256:d8a57e3f2b4c10a112233445566778899aabbccddeeff0011223344556677889",
 		SignatureRef: "oci://registry.example/payments/payments-api:sha256-d8a57e.sig",
 		Signer:       "spiffe://prod/ns/ci/sa/dagger-builder",
-		SBOMDigest:   "sha256:sbom12345",
+		SBOMDigest:   assurance.ComputeStringDigest("sbom-v1"),
 		SLSACommit:   "git-commit-abc1234",
 	}
 
 	epoch := assurance.AssuranceEpoch{
-		SubjectDigest: "sha256:sub",
+		SubjectDigest: assurance.ComputeStringDigest("subject-01"),
 	}
 
 	// 1. Generate evidence envelopes
@@ -83,7 +83,7 @@ func TestSigstoreSupplyChainVerificationAndContinuity(t *testing.T) {
 	}
 
 	// Check divergence detection (anti-substitution)
-	divergedRunning := "sha256:tamperedDigest"
+	divergedRunning := assurance.ComputeStringDigest("tampered-digest")
 	okDiverged, msg := VerifyArtifactContinuity(divergedRunning, admittedImageDigest, signedImageDigest)
 	if okDiverged {
 		t.Fatalf("M7 Failure: Divergent running digest was accepted as continuous!")
@@ -95,7 +95,7 @@ func TestUntrustedSignerRejection(t *testing.T) {
 	verifier := NewSigstoreVerifier(nil)
 	untrustedArtifact := ArtifactMetadata{
 		ImageURI: "registry.example/evil",
-		Digest:   "sha256:112233",
+		Digest:   assurance.ComputeStringDigest("untrusted-image"),
 		Signer:   "attacker@evil.com",
 	}
 

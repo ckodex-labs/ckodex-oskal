@@ -92,7 +92,7 @@ func TestShieldAIModelAssuranceEvaluation(t *testing.T) {
 		Epoch:        epoch,
 		Evidence:     []assurance.EvidenceRef{evidences[0].Artifact, evidences[1].Artifact},
 		Completeness: evalResult.Completeness,
-		EvidenceRoot: "sha256:aiEvidenceRoot",
+		EvidenceRoot: assurance.ComputeStringDigest("ai-evidence-root"),
 		EvaluatedAt:  now,
 		ValidUntil:   now.Add(24 * time.Hour),
 	}
@@ -120,7 +120,7 @@ func TestShieldAIModelAssuranceEvaluation(t *testing.T) {
 }
 
 func TestAgentSubjectConstruction(t *testing.T) {
-	agentSub := BuildAgentSubjectRef("research-agent", "v3", "sha256:prompt123")
+	agentSub := BuildAgentSubjectRef("research-agent", "v3", assurance.ComputeStringDigest("prompt-template-v1"))
 	if agentSub.URI() != "agent://research-agent:v3" {
 		t.Fatalf("unexpected agent URI: %s", agentSub.URI())
 	}

@@ -32,11 +32,11 @@ func TestNativeCELAdmissionEvidenceSatisfiesContract(t *testing.T) {
 	}
 
 	epoch := assurance.AssuranceEpoch{
-		SubjectDigest:        "sha256:sub123",
-		ImplementationDigest: "sha256:imp123",
+		SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
+		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:validating-admission-policy"),
 		PolicyDigest:         policyDigest,
-		AuthorityDigest:      "sha256:auth123",
-		EnvironmentDigest:    "sha256:env123",
+		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/cel-admission"),
+		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
 	}
 
 	now := time.Now()

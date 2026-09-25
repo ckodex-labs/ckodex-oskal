@@ -137,7 +137,7 @@ func TestEvaluateSubject(t *testing.T) {
 				Id:     "default/pod-secure",
 			},
 			Evidence: []*evidencev1.EvidenceRef{
-				{Uri: "evidence://cel/admission", Digest: "sha256:cel123", MediaType: "application/json"},
+				{Uri: "evidence://cel/admission", Digest: assurance.ComputeStringDigest("cel-evidence-01"), MediaType: "application/json"},
 			},
 			ObservedAt: timestamppb.Now(),
 		},
@@ -211,7 +211,7 @@ func TestExplainClaim(t *testing.T) {
 				Id:     "payments/payments-api",
 			},
 			Evidence: []*evidencev1.EvidenceRef{
-				{Uri: "evidence://cel/admission", Digest: "sha256:cel123", MediaType: "application/json"},
+				{Uri: "evidence://cel/admission", Digest: assurance.ComputeStringDigest("cel-evidence-01"), MediaType: "application/json"},
 			},
 			ObservedAt: timestamppb.Now(),
 		},
@@ -279,7 +279,7 @@ func TestGetAssuranceState(t *testing.T) {
 				Id:     "payments/payments-api",
 			},
 			Evidence: []*evidencev1.EvidenceRef{
-				{Uri: "evidence://cel/admission", Digest: "sha256:pay123", MediaType: "application/json"},
+				{Uri: "evidence://cel/admission", Digest: assurance.ComputeStringDigest("payment-evidence-01"), MediaType: "application/json"},
 			},
 			ObservedAt: timestamppb.Now(),
 		},
@@ -322,14 +322,14 @@ func TestSubmitReceipt(t *testing.T) {
 	sub := assurance.SubjectRef{Scheme: "k8s", ID: "payments/api"}
 	ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
 	epoch := assurance.AssuranceEpoch{
-		SubjectDigest:        "sha256:sub",
-		ImplementationDigest: "sha256:imp",
-		PolicyDigest:         "sha256:pol",
-		AuthorityDigest:      "sha256:auth",
-		EnvironmentDigest:    "sha256:env",
+		SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
+		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload"),
+		PolicyDigest:         assurance.ComputeStringDigest("policy:nist-ac6"),
+		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
 	}
 	evs := []assurance.EvidenceRef{
-		{Digest: "sha256:ev1"},
+		{Digest: assurance.ComputeStringDigest("evidence-content-1")},
 	}
 	now := time.Now().UTC()
 
@@ -378,7 +378,7 @@ func TestSubmitReceipt(t *testing.T) {
 
 	// 2. Submit tampered receipt
 	tamperedReceipt := proto.Clone(protoReceipt).(*receiptv1.ControlReceipt)
-	tamperedReceipt.EvidenceRoot = "sha256:tampered"
+	tamperedReceipt.EvidenceRoot = assurance.ComputeStringDigest("tampered-root")
 
 	respTampered, err := client.SubmitReceipt(ctx, &servicesv1.SubmitReceiptRequest{
 		Receipt: tamperedReceipt,

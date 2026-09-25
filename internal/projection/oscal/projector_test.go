@@ -20,14 +20,14 @@ func TestProjectAssessmentResultsExposesSourceEvidenceReference(t *testing.T) {
 	}
 
 	epoch := assurance.AssuranceEpoch{
-		SubjectDigest:        "sha256:sub123",
-		ImplementationDigest: "sha256:imp123",
-		PolicyDigest:         "sha256:pol123",
-		AuthorityDigest:      "sha256:auth123",
-		EnvironmentDigest:    "sha256:env123",
+		SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
+		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload"),
+		PolicyDigest:         assurance.ComputeStringDigest("cel:policy:restricted-containers"),
+		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
 	}
 
-	evidenceDigest := "sha256:evPayload123456789"
+	evidenceDigest := assurance.ComputeStringDigest("payload-json-content-01")
 	evidenceURI := "s3://evidence/payments/ev-01.json"
 
 	eval := assurance.ClaimEvaluation{
@@ -44,7 +44,7 @@ func TestProjectAssessmentResultsExposesSourceEvidenceReference(t *testing.T) {
 			},
 		},
 		Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 1},
-		EvidenceRoot: "sha256:merkleRoot123",
+		EvidenceRoot: assurance.ComputeStringDigest("merkle-root-123"),
 		EvaluatedAt:  now,
 		ValidUntil:   now.Add(5 * time.Minute),
 	}
@@ -120,7 +120,7 @@ func TestProjectComponentDefinitionAndSSP(t *testing.T) {
 	projector := NewProjector()
 	now := time.Now().UTC()
 	sub := assurance.SubjectRef{Scheme: "k8s", ID: "payments/payments-api"}
-	epoch := assurance.AssuranceEpoch{SubjectDigest: "sha256:sub"}
+	epoch := assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest("subject-01")}
 
 	eval := assurance.ClaimEvaluation{
 		ID:           "eval-01",
@@ -128,7 +128,7 @@ func TestProjectComponentDefinitionAndSSP(t *testing.T) {
 		Subject:      sub,
 		State:        assurance.AssuranceStateAssured,
 		Epoch:        epoch,
-		EvidenceRoot: "sha256:root",
+		EvidenceRoot: assurance.ComputeStringDigest("root-evidence"),
 		EvaluatedAt:  now,
 		ValidUntil:   now.Add(5 * time.Minute),
 	}

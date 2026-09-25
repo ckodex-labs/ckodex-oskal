@@ -23,15 +23,15 @@ func TestReceiptManagerLifecycle(t *testing.T) {
 	sub := SubjectRef{Scheme: "k8s", ID: "prod/api"}
 	ctrl := ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
 	epoch := AssuranceEpoch{
-		SubjectDigest:        "sha256:sub",
-		ImplementationDigest: "sha256:imp",
-		PolicyDigest:         "sha256:pol",
-		AuthorityDigest:      "sha256:auth",
-		EnvironmentDigest:    "sha256:env",
+		SubjectDigest:        ComputeStringDigest(sub.ID),
+		ImplementationDigest: ComputeStringDigest("kubernetes:workload"),
+		PolicyDigest:         ComputeStringDigest("policy:nist-ac6"),
+		AuthorityDigest:      ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+		EnvironmentDigest:    ComputeStringDigest("cluster:local"),
 	}
 	evidences := []EvidenceRef{
-		{Digest: "sha256:ev01"},
-		{Digest: "sha256:ev02"},
+		{Digest: ComputeStringDigest("evidence-payload-01")},
+		{Digest: ComputeStringDigest("evidence-payload-02")},
 	}
 	now := time.Now().UTC()
 
@@ -55,7 +55,7 @@ func TestReceiptManagerLifecycle(t *testing.T) {
 
 	// 4. Tamper with evidence root
 	tamperedRoot := rcpt
-	tamperedRoot.EvidenceRoot = "sha256:tamperedRoot"
+	tamperedRoot.EvidenceRoot = ComputeStringDigest("tampered-root")
 	if mgr.VerifyReceipt(tamperedRoot) {
 		t.Fatal("expected tampered root receipt verification to fail, got true")
 	}

@@ -93,11 +93,11 @@ func TestEvidenceRequirementFreshnessAndProducer(t *testing.T) {
 func TestEvidenceContractEvaluation(t *testing.T) {
 	now := time.Now()
 	epoch := AssuranceEpoch{
-		SubjectDigest:        "sha256:sub",
-		ImplementationDigest: "sha256:imp",
-		PolicyDigest:         "sha256:pol",
-		AuthorityDigest:      "sha256:auth",
-		EnvironmentDigest:    "sha256:env",
+		SubjectDigest:        ComputeStringDigest("workload://payments-api"),
+		ImplementationDigest: ComputeStringDigest("kubernetes:workload-specification"),
+		PolicyDigest:         ComputeStringDigest("policy:restricted-containers"),
+		AuthorityDigest:      ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+		EnvironmentDigest:    ComputeStringDigest("cluster:local"),
 	}
 
 	contract := EvidenceContract{
@@ -131,8 +131,8 @@ func TestEvidenceContractEvaluation(t *testing.T) {
 		ObservationType: "kubernetes.admission",
 		CapturedAt:      now.Add(-1 * time.Minute),
 		Producer:        AuthorityRef{Scheme: "spiffe", Subject: "prod/ns/oskal/sa/admission-observer"},
-		Artifact:        EvidenceRef{URI: "s3://evidence/ev-01", Digest: "sha256:abc", MediaType: "application/json"},
-		IntegrityDigest: "sha256:int1",
+		Artifact:        EvidenceRef{URI: "s3://evidence/ev-01", Digest: ComputeStringDigest("ev-01-artifact"), MediaType: "application/json"},
+		IntegrityDigest: ComputeStringDigest("int-01"),
 		Epoch:           epoch,
 	}
 
@@ -143,8 +143,8 @@ func TestEvidenceContractEvaluation(t *testing.T) {
 		ObservationType: "workload.runtime.process",
 		CapturedAt:      now.Add(-2 * time.Minute),
 		Producer:        AuthorityRef{Scheme: "spiffe", Subject: "prod/ns/oskal/sa/tetragon-collector"},
-		Artifact:        EvidenceRef{URI: "s3://evidence/ev-02", Digest: "sha256:def", MediaType: "application/json"},
-		IntegrityDigest: "sha256:int2",
+		Artifact:        EvidenceRef{URI: "s3://evidence/ev-02", Digest: ComputeStringDigest("ev-02-artifact"), MediaType: "application/json"},
+		IntegrityDigest: ComputeStringDigest("int-02"),
 		Epoch:           epoch,
 	}
 
@@ -176,7 +176,7 @@ func TestEvidenceContractEvaluation(t *testing.T) {
 
 	// 4. Epoch divergence -> STALE
 	divergedEpoch := epoch
-	divergedEpoch.PolicyDigest = "sha256:newpolicy"
+	divergedEpoch.PolicyDigest = ComputeStringDigest("new-policy-v2")
 	resEpochDiverged := contract.Evaluate([]EvidenceEnvelope{evAdmission, evRuntime}, divergedEpoch, now)
 	if resEpochDiverged.State != AssuranceStateStale {
 		t.Fatalf("expected state STALE on epoch mismatch, got %s", resEpochDiverged.State)

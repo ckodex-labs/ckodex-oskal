@@ -69,14 +69,14 @@ func TestCLIHonestStateReporting(t *testing.T) {
 		ObservationType: "admission",
 		CapturedAt:      time.Now().UTC(),
 		Producer:        assurance.AuthorityRef{Scheme: "spiffe", Subject: "prod/ns/ckodex/sa/cel"},
-		Artifact:        assurance.EvidenceRef{URI: "evidence://cel/admission", Digest: "sha256:adm111", MediaType: "application/json"},
-		IntegrityDigest: "sha256:int111",
+		Artifact:        assurance.EvidenceRef{URI: "evidence://cel/admission", Digest: assurance.ComputeStringDigest("admission-digest"), MediaType: "application/json"},
+		IntegrityDigest: assurance.ComputeStringDigest("ev-admission-01-integrity"),
 		Epoch: assurance.AssuranceEpoch{
-			SubjectDigest:        "sha256:sub",
-			ImplementationDigest: "sha256:imp",
-			PolicyDigest:         "sha256:pol",
-			AuthorityDigest:      "sha256:auth",
-			EnvironmentDigest:    "sha256:env",
+			SubjectDigest:        assurance.ComputeStringDigest("payments/payments-api"),
+			ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload"),
+			PolicyDigest:         assurance.ComputeStringDigest("cel:policy:restricted-containers"),
+			AuthorityDigest:      assurance.ComputeStringDigest("spiffe://cluster.local/ns/ckodex/sa/cel"),
+			EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
 		},
 	}
 	envData, err := json.MarshalIndent(env1, "", "  ")
