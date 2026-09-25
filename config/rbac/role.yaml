@@ -12,6 +12,7 @@ rules:
       - assurancepolicies
       - controlexceptions
       - assurancestates
+      - capabilityleases
     verbs:
       - get
       - list
@@ -28,6 +29,7 @@ rules:
       - assurancepolicies/status
       - controlexceptions/status
       - assurancestates/status
+      - capabilityleases/status
     verbs:
       - get
       - update
