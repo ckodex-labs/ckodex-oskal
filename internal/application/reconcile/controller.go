@@ -15,6 +15,8 @@ import (
 	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
+	"github.com/ckodex-labs/ckodex-oskal/internal/telemetry"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // ControlBindingReconciler reconciles ControlBinding objects and updates AssuranceState projections.
@@ -38,6 +40,12 @@ type ControlBindingReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods;namespaces;serviceaccounts,verbs=get;list;watch
 
 func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	ctx, span := telemetry.StartEvaluationSpan(ctx, req.Name, req.Namespace)
+	defer span.End()
+
+	timer := prometheus.NewTimer(telemetry.EvaluationDurationSeconds.WithLabelValues(req.Name))
+	defer timer.ObserveDuration()
+
 	log := r.Log.WithValues("controlbinding", req.NamespacedName)
 
 	var binding assurancev1alpha1.ControlBinding
@@ -51,6 +59,11 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	log.Info("Reconciling ControlBinding", "controlsCount", len(binding.Spec.Controls), "requirementsCount", len(binding.Spec.Requirements))
+
+	// Detect generation drift if object was updated
+	if binding.Status.ObservedGeneration != 0 && binding.Status.ObservedGeneration != binding.Generation {
+		telemetry.RecordDriftInvalidation(binding.Name, "generation_drift")
+	}
 
 	// Reconcile status conditions
 	binding.Status.ObservedGeneration = binding.Generation
@@ -79,6 +92,10 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		log.Error(err, "unable to update ControlBinding status")
 		return ctrl.Result{}, err
 	}
+
+	// Emit telemetry metrics
+	telemetry.RecordAssuranceState(binding.Namespace, binding.Name, "ASSURED", fmt.Sprintf("%d", binding.Generation), true)
+	telemetry.RecordReceiptIssued(binding.Name, "VALID")
 
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
@@ -109,6 +126,7 @@ func (r *AssuranceStateReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	log.Info("Observed AssuranceState projection", "subject", state.Spec.SubjectRef.Name, "state", state.Status.State)
+	telemetry.RecordAssuranceState(state.Namespace, state.Name, string(state.Status.State), fmt.Sprintf("%d", state.Generation), true)
 	return ctrl.Result{}, nil
 }
 
