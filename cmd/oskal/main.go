@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/webhook"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
@@ -49,64 +50,11 @@ func loadLocalEvidence(dir string, sub assurance.SubjectRef) ([]assurance.Eviden
 	if dir == "" {
 		return nil, nil
 	}
-	info, err := os.Stat(dir)
+	repo, err := storage.NewFilesystemEvidenceRepository(dir)
 	if err != nil {
 		return nil, err
 	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("%s is not a directory", dir)
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	var results []assurance.EvidenceEnvelope
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(dir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-
-		var envList []assurance.EvidenceEnvelope
-		if err := json.Unmarshal(data, &envList); err == nil {
-			for _, env := range envList {
-				if matchSubject(env.Subject, sub) {
-					results = append(results, env)
-				}
-			}
-			continue
-		}
-
-		var single assurance.EvidenceEnvelope
-		if err := json.Unmarshal(data, &single); err == nil {
-			if matchSubject(single.Subject, sub) {
-				results = append(results, single)
-			}
-		}
-	}
-	return results, nil
-}
-
-func matchSubject(a, b assurance.SubjectRef) bool {
-	if a.ID == "" || b.ID == "" {
-		return true
-	}
-	if a.ID == b.ID || a.URI() == b.URI() {
-		return true
-	}
-	// Match trailing resource name (e.g. "payments-api")
-	partsA := strings.Split(strings.Trim(a.ID, "/"), "/")
-	partsB := strings.Split(strings.Trim(b.ID, "/"), "/")
-	if len(partsA) > 0 && len(partsB) > 0 && partsA[len(partsA)-1] == partsB[len(partsB)-1] {
-		return true
-	}
-	return strings.Contains(a.ID, b.ID) || strings.Contains(b.ID, a.ID)
+	return repo.ListBySubject(context.Background(), sub)
 }
 
 func parseSubjectURI(raw string) assurance.SubjectRef {

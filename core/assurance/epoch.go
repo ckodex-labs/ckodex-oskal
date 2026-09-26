@@ -42,13 +42,25 @@ func (e AssuranceEpoch) CompositeDigest() string {
 	return "sha256:" + hex.EncodeToString(h[:])
 }
 
-// Matches checks whether this epoch is byte-for-byte identical to another epoch.
+// Matches checks whether this epoch satisfies the constraints of the target epoch.
+// Any non-empty dimension in other must be identical to this epoch's dimension.
 func (e AssuranceEpoch) Matches(other AssuranceEpoch) bool {
-	return e.SubjectDigest == other.SubjectDigest &&
-		e.ImplementationDigest == other.ImplementationDigest &&
-		e.PolicyDigest == other.PolicyDigest &&
-		e.AuthorityDigest == other.AuthorityDigest &&
-		e.EnvironmentDigest == other.EnvironmentDigest
+	if other.SubjectDigest != "" && e.SubjectDigest != other.SubjectDigest {
+		return false
+	}
+	if other.ImplementationDigest != "" && e.ImplementationDigest != other.ImplementationDigest {
+		return false
+	}
+	if other.PolicyDigest != "" && e.PolicyDigest != other.PolicyDigest {
+		return false
+	}
+	if other.AuthorityDigest != "" && e.AuthorityDigest != other.AuthorityDigest {
+		return false
+	}
+	if other.EnvironmentDigest != "" && e.EnvironmentDigest != other.EnvironmentDigest {
+		return false
+	}
+	return true
 }
 
 // Diff returns all dimensions where this epoch diverges from the target epoch.

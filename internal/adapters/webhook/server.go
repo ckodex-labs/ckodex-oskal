@@ -186,18 +186,25 @@ func (s *AdmissionWebhookServer) validateRequest(req *admissionv1.AdmissionReque
 	}
 
 	now := time.Now().UTC()
+	podName := req.Name
+	if podName == "" && pod.Name != "" {
+		podName = pod.Name
+	}
+	if podName == "" && pod.GenerateName != "" {
+		podName = fmt.Sprintf("%s%s", pod.GenerateName, string(req.UID))
+	}
+	if podName == "" {
+		podName = string(req.UID)
+	}
+
 	sub := assurance.SubjectRef{
 		Scheme: "k8s",
-		ID:     fmt.Sprintf("%s/Pod/%s", req.Namespace, req.Name),
+		ID:     fmt.Sprintf("%s/Pod/%s", req.Namespace, podName),
 		Attributes: map[string]string{
 			"namespace": req.Namespace,
-			"name":      req.Name,
+			"name":      podName,
 			"uid":       string(req.UID),
 		},
-	}
-	if sub.Attributes["name"] == "" && pod.Name != "" {
-		sub.Attributes["name"] = pod.Name
-		sub.ID = fmt.Sprintf("%s/Pod/%s", req.Namespace, pod.Name)
 	}
 
 	epoch := assurance.AssuranceEpoch{

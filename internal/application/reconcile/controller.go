@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -69,6 +70,9 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Determine honest assurance state via ClaimEvaluator
 	targetState := assurance.AssuranceStateUnknown
+	var evidenceRoot string
+	var evalResult assurance.ClaimEvaluation
+
 	if r.ClaimEvaluator != nil && len(binding.Spec.Controls) > 0 {
 		ctrlRef := assurance.ControlRef{
 			Namespace: binding.Spec.Controls[0].Canonical.Namespace,
@@ -84,40 +88,86 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			Control: ctrlRef,
 		}
 
-		// Build contract from binding requirements
-		var reqs []assurance.EvidenceRequirement
-		for _, req := range binding.Spec.Requirements {
-			reqs = append(reqs, assurance.EvidenceRequirement{
-				ID:           req.ID,
-				EvidenceType: "admission",
-				Required:     true,
-				MaxAge:       24 * time.Hour,
-			})
+		// Build contract from referenced EvidenceContract CRD or directly from binding requirements
+		var contract assurance.EvidenceContract
+		if len(binding.Spec.Requirements) > 0 && binding.Spec.Requirements[0].EvidenceContract != "" {
+			var ecCRD assurancev1alpha1.EvidenceContract
+			ecKey := client.ObjectKey{Namespace: binding.Namespace, Name: binding.Spec.Requirements[0].EvidenceContract}
+			if err := r.Get(ctx, ecKey, &ecCRD); err == nil {
+				var reqs []assurance.EvidenceRequirement
+				for _, cr := range ecCRD.Spec.Requirements {
+					maxAge := cr.Freshness.Duration
+					if maxAge <= 0 {
+						maxAge = 24 * time.Hour
+					}
+					reqs = append(reqs, assurance.EvidenceRequirement{
+						ID:                cr.ID,
+						EvidenceType:      cr.Type,
+						Required:          cr.Required,
+						MaxAge:            maxAge,
+						AcceptedProducers: cr.AcceptedProducers,
+					})
+				}
+				missingState := assurance.AssuranceStateUnknown
+				if ecCRD.Spec.OnMissingRequiredEvidence.State == "Failed" {
+					missingState = assurance.AssuranceStateFailed
+				}
+				contract = assurance.EvidenceContract{
+					ID:                     ecCRD.Name,
+					Requirements:           reqs,
+					OnMissingRequiredState: missingState,
+				}
+			}
 		}
-		contract := assurance.EvidenceContract{
-			ID:                     fmt.Sprintf("contract-%s", binding.Name),
-			Requirements:           reqs,
-			OnMissingRequiredState: assurance.AssuranceStateUnknown,
+
+		if len(contract.Requirements) == 0 {
+			var reqs []assurance.EvidenceRequirement
+			for _, req := range binding.Spec.Requirements {
+				reqs = append(reqs, assurance.EvidenceRequirement{
+					ID:           req.ID,
+					EvidenceType: "admission",
+					Required:     true,
+					MaxAge:       24 * time.Hour,
+				})
+			}
+			contract = assurance.EvidenceContract{
+				ID:                     fmt.Sprintf("contract-%s", binding.Name),
+				Requirements:           reqs,
+				OnMissingRequiredState: assurance.AssuranceStateUnknown,
+			}
 		}
 
 		currentEpoch := assurance.AssuranceEpoch{
 			SubjectDigest: assurance.ComputeStringDigest(subRef.URI()),
 		}
 
+		if ce, ok := r.ClaimEvaluator.(*ContractEvaluator); ok && ce.EvidenceRepo == nil && r.EvidenceRepo != nil {
+			ce.EvidenceRepo = r.EvidenceRepo
+		}
+
 		eval, err := r.ClaimEvaluator.Evaluate(ctx, claim, contract, currentEpoch)
 		if err == nil {
+			evalResult = eval
 			targetState = eval.State
+			if targetState == assurance.AssuranceStateVerified {
+				targetState = assurance.AssuranceStateAssured
+			}
+			evidenceRoot = eval.EvidenceRoot
 		}
 	}
 
 	// Reconcile status conditions
 	binding.Status.ObservedGeneration = binding.Generation
+	statusMsg := fmt.Sprintf("Binding configured with %d controls; evaluated state: %s", len(binding.Spec.Controls), targetState)
+	if evidenceRoot != "" {
+		statusMsg = fmt.Sprintf("%s; evidenceRoot: %s", statusMsg, evidenceRoot)
+	}
 	metaCondition := metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
 		Reason:             targetState.String(),
-		Message:            fmt.Sprintf("Binding configured with %d controls; evaluated state: %s", len(binding.Spec.Controls), targetState),
+		Message:            statusMsg,
 	}
 
 	// Update condition in slice
@@ -136,6 +186,45 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := r.Status().Update(ctx, &binding); err != nil {
 		log.Error(err, "unable to update ControlBinding status")
 		return ctrl.Result{}, err
+	}
+
+	// Update any associated AssuranceState CRDs in this namespace
+	var stateList assurancev1alpha1.AssuranceStateList
+	if err := r.List(ctx, &stateList, client.InNamespace(binding.Namespace)); err == nil {
+		cleanBindingName := strings.TrimSuffix(binding.Name, "-binding")
+		for _, item := range stateList.Items {
+			if item.Spec.SubjectRef.Name == binding.Name ||
+				item.Spec.SubjectRef.Name == cleanBindingName ||
+				item.Name == binding.Name ||
+				item.Name == cleanBindingName ||
+				item.Name == cleanBindingName+"-state" {
+				stateCopy := item
+				stateCopy.Status.State = targetState.String()
+				stateCopy.Status.EvidenceRoot = evidenceRoot
+				if !evalResult.EvaluatedAt.IsZero() {
+					stateCopy.Status.EvaluatedAt = &metav1.Time{Time: evalResult.EvaluatedAt}
+					stateCopy.Status.ValidUntil = &metav1.Time{Time: evalResult.ValidUntil}
+					stateCopy.Status.Epoch = assurancev1alpha1.StateEpoch{
+						Subject:        evalResult.Epoch.SubjectDigest,
+						Policy:         evalResult.Epoch.PolicyDigest,
+						Implementation: evalResult.Epoch.ImplementationDigest,
+						Authority:      evalResult.Epoch.AuthorityDigest,
+						Environment:    evalResult.Epoch.EnvironmentDigest,
+						Composite:      evalResult.Epoch.CompositeDigest(),
+					}
+				}
+				var ctrlStatuses []assurancev1alpha1.ControlStatus
+				for _, c := range binding.Spec.Controls {
+					ctrlStatuses = append(ctrlStatuses, assurancev1alpha1.ControlStatus{
+						ID:              c.Canonical.ID,
+						State:           targetState.String(),
+						EvidenceSummary: fmt.Sprintf("Verified %d/%d requirements", evalResult.Completeness.Verified, evalResult.Completeness.Required),
+					})
+				}
+				stateCopy.Status.Controls = ctrlStatuses
+				_ = r.Status().Update(ctx, &stateCopy)
+			}
+		}
 	}
 
 	// Emit truthful telemetry metrics reflecting verified state (never fabricated PASS)
@@ -187,13 +276,42 @@ func (r *AssuranceStateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // ContractEvaluator provides deterministic claim evaluation satisfying ports.ClaimEvaluator.
 type ContractEvaluator struct {
 	EvidenceSource []assurance.EvidenceEnvelope
+	EvidenceRepo   ports.EvidenceRepository
 }
 
 func (e *ContractEvaluator) Evaluate(ctx context.Context, claim assurance.Claim, contract assurance.EvidenceContract, currentEpoch assurance.AssuranceEpoch) (assurance.ClaimEvaluation, error) {
 	now := time.Now().UTC()
-	res := contract.Evaluate(e.EvidenceSource, currentEpoch, now)
+	source := e.EvidenceSource
+	if len(source) == 0 && e.EvidenceRepo != nil {
+		if envs, err := e.EvidenceRepo.ListBySubject(ctx, claim.Subject); err == nil {
+			source = envs
+		}
+	}
+	res := contract.Evaluate(source, currentEpoch, now)
 
 	vec := assurance.NewDefaultAssuranceVector()
+	var evidenceRefs []assurance.EvidenceRef
+	var evidenceDigests []string
+
+	for _, v := range res.VerifiedEvidences {
+		ref := assurance.EvidenceRef{
+			URI:       v.Artifact.URI,
+			Digest:    v.Artifact.Digest,
+			MediaType: v.Artifact.MediaType,
+		}
+		evidenceRefs = append(evidenceRefs, ref)
+		if v.Artifact.Digest != "" {
+			evidenceDigests = append(evidenceDigests, v.Artifact.Digest)
+		} else if v.ID != "" {
+			evidenceDigests = append(evidenceDigests, assurance.ComputeStringDigest(v.ID))
+		}
+	}
+
+	evidenceRoot := ""
+	if len(evidenceDigests) > 0 {
+		evidenceRoot = assurance.CanonicalDigestList(evidenceDigests)
+	}
+
 	switch res.State {
 	case assurance.AssuranceStateAssured, assurance.AssuranceStateVerified:
 		vec.Applicability = assurance.ValencePositive
@@ -212,7 +330,9 @@ func (e *ContractEvaluator) Evaluate(ctx context.Context, claim assurance.Claim,
 		State:        res.State,
 		Vector:       vec,
 		Epoch:        currentEpoch,
+		Evidence:     evidenceRefs,
 		Completeness: res.Completeness,
+		EvidenceRoot: evidenceRoot,
 		EvaluatedAt:  now,
 		ValidUntil:   now.Add(5 * time.Minute),
 	}, nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net"
@@ -16,8 +17,10 @@ import (
 
 	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/webhook"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/reconcile"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 )
 
 var (
@@ -36,6 +39,7 @@ func main() {
 	var probeAddr string
 	var enableWebhook bool
 	var webhookPort int
+	var evidenceDir string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -43,6 +47,7 @@ func main() {
 		"Enable leader election for controller manager. Enabling this will ensure only one active controller manager.")
 	flag.BoolVar(&enableWebhook, "enable-webhook", true, "Enable validating admission webhook with in-flight attestation.")
 	flag.IntVar(&webhookPort, "webhook-port", 8443, "The port the validating admission webhook listens on.")
+	flag.StringVar(&evidenceDir, "evidence-dir", "/tmp/oskal/evidence", "Path to local directory for content-addressed evidence storage.")
 
 	opts := zap.Options{
 		Development: false,
@@ -66,13 +71,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	evaluator := &reconcile.ContractEvaluator{}
+	var evidenceRepo ports.EvidenceRepository
+	if evidenceDir != "" {
+		fsRepo, err := storage.NewFilesystemEvidenceRepository(evidenceDir)
+		if err != nil {
+			setupLog.Error(err, "unable to initialize filesystem evidence repository, falling back to in-memory", "path", evidenceDir)
+			evidenceRepo = storage.NewMemoryEvidenceRepository()
+		} else {
+			evidenceRepo = fsRepo
+			setupLog.Info("Initialized filesystem content-addressed evidence repository", "path", evidenceDir)
+		}
+	} else {
+		evidenceRepo = storage.NewMemoryEvidenceRepository()
+		setupLog.Info("Initialized in-memory content-addressed evidence repository")
+	}
+
+	evaluator := &reconcile.ContractEvaluator{
+		EvidenceRepo: evidenceRepo,
+	}
 
 	if err = (&reconcile.ControlBindingReconciler{
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),
 		Log:            ctrl.Log.WithName("controllers").WithName("ControlBinding"),
 		ClaimEvaluator: evaluator,
+		EvidenceRepo:   evidenceRepo,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ControlBinding")
 		os.Exit(1)
@@ -118,6 +141,13 @@ func main() {
 			ObserverAuth: assurance.AuthorityRef{
 				Scheme:  "k8s:admission-controller",
 				Subject: "ckodex-system/oskal-webhook",
+			},
+			EvidenceSink: func(env assurance.EvidenceEnvelope) {
+				if _, putErr := evidenceRepo.Put(context.Background(), env, nil); putErr != nil {
+					setupLog.Error(putErr, "failed to persist in-flight evidence envelope", "envelopeID", env.ID)
+				} else {
+					setupLog.Info("Persisted in-flight admission evidence envelope", "envelopeID", env.ID, "subject", env.Subject.URI())
+				}
 			},
 		})
 		if err := mgr.Add(whServer); err != nil {

@@ -24,6 +24,7 @@ type EvidenceRepository interface {
 	Put(ctx context.Context, envelope assurance.EvidenceEnvelope, payload io.Reader) (assurance.EvidenceRef, error)
 	Get(ctx context.Context, ref assurance.EvidenceRef) (io.ReadCloser, error)
 	Verify(ctx context.Context, ref assurance.EvidenceRef) (bool, error)
+	ListBySubject(ctx context.Context, subject assurance.SubjectRef) ([]assurance.EvidenceEnvelope, error)
 }
 
 // ObservationSource ingests or observes runtime and admission events (Section 62).

@@ -150,6 +150,14 @@ func (r EvidenceRequirement) IsProducerAccepted(producerID string) bool {
 		if strings.HasSuffix(accepted, "*") && strings.HasPrefix(producerID, strings.TrimSuffix(accepted, "*")) {
 			return true
 		}
+		if strings.HasPrefix(producerID, accepted+"://") || strings.Contains(producerID, accepted) {
+			return true
+		}
+		cleanAcc := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(accepted, "-", ""), "_", ""))
+		cleanProd := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(producerID, "-", ""), "_", ""))
+		if strings.Contains(cleanProd, cleanAcc) || strings.Contains(cleanAcc, cleanProd) {
+			return true
+		}
 	}
 	return false
 }
@@ -232,14 +240,13 @@ func (c EvidenceContract) Evaluate(envelopes []EvidenceEnvelope, currentEpoch As
 		},
 	}
 
-	// Map envelopes by observation/evidence type for fast lookup
-	envByType := make(map[string][]EvidenceEnvelope)
-	for _, env := range envelopes {
-		envByType[env.ObservationType] = append(envByType[env.ObservationType], env)
-	}
-
 	for _, req := range c.Requirements {
-		candidates := envByType[req.EvidenceType]
+		var candidates []EvidenceEnvelope
+		for _, env := range envelopes {
+			if matchesEvidenceType(env.ObservationType, req.EvidenceType) {
+				candidates = append(candidates, env)
+			}
+		}
 		var matched *EvidenceEnvelope
 		var isStale bool
 
@@ -300,4 +307,29 @@ func (c EvidenceContract) Evaluate(envelopes []EvidenceEnvelope, currentEpoch As
 	}
 
 	return result
+}
+
+// matchesEvidenceType checks if an observed evidence type satisfies a required evidence type.
+// It supports exact matches (e.g. "kubernetes.admission" == "kubernetes.admission"),
+// hierarchical suffix matches (e.g. "admission" matches "kubernetes.admission"),
+// and normalized case-insensitive comparisons.
+func matchesEvidenceType(obsType, reqType string) bool {
+	if obsType == reqType {
+		return true
+	}
+	if strings.EqualFold(obsType, reqType) {
+		return true
+	}
+	if strings.HasSuffix(obsType, "."+reqType) || strings.HasSuffix(reqType, "."+obsType) {
+		return true
+	}
+	cleanObs := strings.ReplaceAll(strings.ToLower(obsType), "-", ".")
+	cleanReq := strings.ReplaceAll(strings.ToLower(reqType), "-", ".")
+	if cleanObs == cleanReq {
+		return true
+	}
+	if strings.HasSuffix(cleanObs, "."+cleanReq) || strings.HasSuffix(cleanReq, "."+cleanObs) {
+		return true
+	}
+	return false
 }
