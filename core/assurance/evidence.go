@@ -130,8 +130,8 @@ func (r EvidenceRequirement) IsFresh(capturedAt time.Time, now time.Time) bool {
 	if r.MaxAge <= 0 {
 		return true
 	}
-	if capturedAt.After(now) {
-		// Future timestamp is invalid / clock skew
+	if capturedAt.After(now.Add(1 * time.Minute)) {
+		// Future timestamp beyond reasonable clock skew (1m) is invalid
 		return false
 	}
 	return now.Sub(capturedAt) <= r.MaxAge
