@@ -59,3 +59,18 @@ resources:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+webhook:
+  enabled: true
+  port: 8443
+  service:
+    type: ClusterIP
+    port: 443
+    targetPort: 8443
+  failurePolicy: Fail
+  namespaceSelector:
+    matchExpressions:
+      - key: ckodex.io/assurance-enforced
+        operator: In
+        values: ["true"]
+

@@ -40,6 +40,10 @@ spec:
             - --leader-elect={{ .Values.leaderElection.enabled }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             - --health-probe-bind-address=:{{ .Values.probes.port }}
+            {{- if .Values.webhook.enabled }}
+            - --enable-webhook=true
+            - --webhook-port={{ .Values.webhook.port }}
+            {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
@@ -49,6 +53,11 @@ spec:
             - name: probes
               containerPort: {{ .Values.probes.port }}
               protocol: TCP
+            {{- if .Values.webhook.enabled }}
+            - name: webhook
+              containerPort: {{ .Values.webhook.port }}
+              protocol: TCP
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

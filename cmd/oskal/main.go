@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/webhook"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
@@ -736,8 +738,95 @@ and projects defensible results into standard OSCAL artifacts.`,
 	}
 	serveCmd.Flags().IntVar(&port, "port", 9090, "Port for gRPC service to listen on")
 
+	// 8. oscal webhook
+	var (
+		webhookListenAddr  string
+		webhookTLSCertFile string
+		webhookTLSKeyFile  string
+		webhookSelfSigned  bool
+		webhookServiceName string
+		webhookNamespace   string
+		webhookEvidenceDir string
+	)
+	webhookCmd := &cobra.Command{
+		Use:   "webhook",
+		Short: "Start the Kubernetes Validating Admission Webhook with in-flight attestation",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := webhook.ServerConfig{
+				ListenAddr:  webhookListenAddr,
+				TLSCertPath: webhookTLSCertFile,
+				TLSKeyPath:  webhookTLSKeyFile,
+				ObserverAuth: assurance.AuthorityRef{
+					Scheme:  "k8s:admission-controller",
+					Subject: fmt.Sprintf("%s/%s", webhookNamespace, webhookServiceName),
+				},
+			}
+
+			if webhookEvidenceDir != "" {
+				if err := os.MkdirAll(webhookEvidenceDir, 0755); err != nil {
+					return fmt.Errorf("failed to create evidence directory: %w", err)
+				}
+				cfg.EvidenceSink = func(env assurance.EvidenceEnvelope) {
+					data, err := json.MarshalIndent(env, "", "  ")
+					if err != nil {
+						return
+					}
+					filename := filepath.Join(webhookEvidenceDir, fmt.Sprintf("%s.json", env.ID))
+					_ = os.WriteFile(filename, data, 0644)
+				}
+			}
+
+			if webhookSelfSigned && (webhookTLSCertFile == "" || webhookTLSKeyFile == "") {
+				dnsNames := []string{
+					webhookServiceName,
+					fmt.Sprintf("%s.%s", webhookServiceName, webhookNamespace),
+					fmt.Sprintf("%s.%s.svc", webhookServiceName, webhookNamespace),
+					fmt.Sprintf("%s.%s.svc.cluster.local", webhookServiceName, webhookNamespace),
+					"localhost",
+				}
+				ips := []net.IP{net.ParseIP("127.0.0.1")}
+				certPEM, keyPEM, err := webhook.GenerateSelfSignedCert(webhookServiceName, dnsNames, ips)
+				if err != nil {
+					return fmt.Errorf("failed to generate self-signed cert: %w", err)
+				}
+				cfg.TLSCertBytes = certPEM
+				cfg.TLSKeyBytes = keyPEM
+			}
+
+			server := webhook.NewAdmissionWebhookServer(cfg)
+			fmt.Printf("OSKAL Validating Admission Webhook listening on %s (TLS enabled)\n", webhookListenAddr)
+
+			stopCh := make(chan os.Signal, 1)
+			signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
+
+			errCh := make(chan error, 1)
+			go func() {
+				if err := server.Start(context.Background()); err != nil && err != http.ErrServerClosed {
+					errCh <- err
+				}
+			}()
+
+			select {
+			case <-stopCh:
+				fmt.Println("Shutting down OSKAL Validating Admission Webhook...")
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				return server.Shutdown(shutdownCtx)
+			case err := <-errCh:
+				return fmt.Errorf("webhook server error: %w", err)
+			}
+		},
+	}
+	webhookCmd.Flags().StringVar(&webhookListenAddr, "listen", ":8443", "Address and port for webhook to listen on")
+	webhookCmd.Flags().StringVar(&webhookTLSCertFile, "tls-cert-file", "", "Path to TLS certificate file")
+	webhookCmd.Flags().StringVar(&webhookTLSKeyFile, "tls-key-file", "", "Path to TLS private key file")
+	webhookCmd.Flags().BoolVar(&webhookSelfSigned, "self-signed", true, "Generate self-signed TLS certificate if files not provided")
+	webhookCmd.Flags().StringVar(&webhookServiceName, "service-name", "oskal-webhook", "Kubernetes Service name for TLS SANs")
+	webhookCmd.Flags().StringVar(&webhookNamespace, "namespace", "ckodex-system", "Kubernetes Namespace for TLS SANs")
+	webhookCmd.Flags().StringVar(&webhookEvidenceDir, "evidence-dir", "", "Directory to record admitted in-flight evidence envelopes")
+
 	assuranceCmd.AddCommand(stateCmd, explainCmd, evidenceCmd, driftCmd)
-	rootCmd.AddCommand(assuranceCmd, exportCmd, importCmd, serveCmd)
+	rootCmd.AddCommand(assuranceCmd, exportCmd, importCmd, serveCmd, webhookCmd)
 	return rootCmd
 }
 

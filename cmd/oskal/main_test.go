@@ -83,3 +83,19 @@ func TestCLI_ParseSubjectURI(t *testing.T) {
 		t.Fatalf("unexpected parsed subject: %+v", sub2)
 	}
 }
+
+func TestCLI_WebhookHelp(t *testing.T) {
+	cmd := NewRootCommand()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"webhook", "--help"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error executing webhook --help: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Start the Kubernetes Validating Admission Webhook") {
+		t.Fatalf("unexpected webhook help output: %s", out)
+	}
+}
