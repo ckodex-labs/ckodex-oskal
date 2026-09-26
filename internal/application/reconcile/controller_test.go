@@ -15,6 +15,7 @@ import (
 
 	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/spire"
 )
 
 func TestContractEvaluator_Unit(t *testing.T) {
@@ -201,5 +202,64 @@ func TestAssuranceStateReconciler_Reconcile(t *testing.T) {
 	_, errNotFound := reconciler.Reconcile(context.Background(), notFoundReq)
 	if errNotFound != nil {
 		t.Fatalf("expected nil error on missing object, got: %v", errNotFound)
+	}
+}
+
+func TestControlBindingReconciler_WithSVIDValidator(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = assurancev1alpha1.AddToScheme(scheme)
+
+	binding := &assurancev1alpha1.ControlBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "identity-binding",
+			Namespace:  "payments",
+			Generation: 1,
+		},
+		Spec: assurancev1alpha1.ControlBindingSpec{
+			Controls: []assurancev1alpha1.ControlBindingItem{
+				{
+					Canonical: assurancev1alpha1.CanonicalControlRef{
+						Namespace: "nist-sp-800-53",
+						ID:        "IA-2",
+					},
+				},
+			},
+			Requirements: []assurancev1alpha1.RequirementBinding{
+				{
+					ID:               "req-identity",
+					EvidenceContract: "contract-identity",
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(binding).
+		WithStatusSubresource(binding).
+		Build()
+
+	bundle := spire.NewTrustBundle()
+	validator := spire.NewSVIDValidator(bundle, assurance.AuthorityRef{
+		Scheme:  "spiffe",
+		Subject: "prod/ns/security/sa/reconciler",
+	})
+
+	reconciler := &ControlBindingReconciler{
+		Client:         fakeClient,
+		Scheme:         scheme,
+		Log:            logr.Discard(),
+		ClaimEvaluator: &ContractEvaluator{},
+		SVIDValidator:  validator,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "payments", Name: "identity-binding"}}
+	res, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+	if res.RequeueAfter != 5*time.Minute {
+		t.Fatalf("expected requeue after 5m, got: %v", res.RequeueAfter)
 	}
 }

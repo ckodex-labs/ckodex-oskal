@@ -22,5 +22,14 @@ jobs:
         with:
           version: "v0.21.9"
 
-      - name: Dagger SSDLC All (Lint, ProtoCheck, Test, Scan, Build)
+      - name: Dagger SSDLC All (Lint, ProtoCheck, Test, Scan, Build, Attest)
         run: dagger call all --source=.
+
+      - name: Export SSDLC Evidence Bundle
+        run: dagger call evidence --source=. export --path=./dist-evidence
+
+      - name: Upload SSDLC Evidence Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssdlc-evidence-bundle
+          path: ./dist-evidence/

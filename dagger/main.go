@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	golangVersion    = "1.27"
-	golangciVersion  = "v2.13.2"
-	syftImage        = "anchore/syft:v1.52.0"
-	grypeImage       = "anchore/grype:v0.119.0"
-	bufImage         = "bufbuild/buf:1.50.0"
+	golangVersion   = "1.24"
+	golangciVersion = "v2.14.0"
+	syftImage       = "anchore/syft:v1.52.0"
+	grypeImage      = "anchore/grype:v0.119.0"
+	bufImage        = "bufbuild/buf:1.50.0"
+	cosignImage     = "gcr.io/projectsigstore/cosign:v2.4.1"
 )
 
 // Oskal represents the automated CI/CD assurance pipeline for OSKAL.
@@ -106,6 +107,66 @@ func (m *Oskal) Build(ctx context.Context, source *dagger.Directory) (*dagger.Di
 	return builder.Directory("/out/bin"), nil
 }
 
+// Attest generates SLSA provenance, in-toto statement, and Cosign signatures for compiled artifacts.
+func (m *Oskal) Attest(ctx context.Context, source *dagger.Directory) (*dagger.Directory, error) {
+	binDir, err := m.Build(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+
+	attestContainer := dag.Container().
+		From(cosignImage).
+		WithMountedDirectory("/out/bin", binDir).
+		WithWorkdir("/out/attestations").
+		WithEnvVariable("COSIGN_PASSWORD", "").
+		WithExec([]string{"cosign", "generate-key-pair"}).
+		WithExec([]string{"sh", "-c", `
+OSKAL_HASH=$(sha256sum /out/bin/oskal | awk '{print $1}')
+CTRL_HASH=$(sha256sum /out/bin/oskal-controller | awk '{print $1}')
+
+cat <<EOF > /out/attestations/provenance.json
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {
+      "name": "oskal",
+      "digest": {
+        "sha256": "${OSKAL_HASH}"
+      }
+    },
+    {
+      "name": "oskal-controller",
+      "digest": {
+        "sha256": "${CTRL_HASH}"
+      }
+    }
+  ],
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "predicate": {
+    "buildDefinition": {
+      "buildType": "https://dagger.io/module/ckodex/oskal@v1",
+      "externalParameters": {
+        "repository": "https://github.com/ckodex-labs/ckodex-oskal"
+      }
+    },
+    "runDetails": {
+      "builder": {
+        "id": "https://dagger.io/engine"
+      }
+    }
+  }
+}
+EOF
+`}).
+		WithExec([]string{"cosign", "sign-blob", "--yes", "--key", "cosign.key", "--output-signature", "oskal.sig", "/out/bin/oskal"}).
+		WithExec([]string{"cosign", "sign-blob", "--yes", "--key", "cosign.key", "--output-signature", "oskal-controller.sig", "/out/bin/oskal-controller"}).
+		WithExec([]string{"cosign", "attest-blob", "--yes", "--key", "cosign.key", "--predicate", "provenance.json", "--type", "slsaprovenance1", "--output-attestation", "in-toto-attestation.json", "/out/bin/oskal"}).
+		WithExec([]string{"cosign", "verify-blob", "--key", "cosign.pub", "--signature", "oskal.sig", "/out/bin/oskal"}).
+		WithExec([]string{"cosign", "verify-blob", "--key", "cosign.pub", "--signature", "oskal-controller.sig", "/out/bin/oskal-controller"})
+
+	return attestContainer.Directory("/out/attestations"), nil
+}
+
 // Evidence assembles an immutable SSDLC evidence bundle directory.
 func (m *Oskal) Evidence(ctx context.Context, source *dagger.Directory) (*dagger.Directory, error) {
 	binDir, err := m.Build(ctx, source)
@@ -118,9 +179,15 @@ func (m *Oskal) Evidence(ctx context.Context, source *dagger.Directory) (*dagger
 		return nil, err
 	}
 
+	attestDir, err := m.Attest(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+
 	evidenceDir := dag.Directory().
 		WithDirectory("bin", binDir).
-		WithFile("sbom.cdx.json", sbomFile)
+		WithFile("sbom.cdx.json", sbomFile).
+		WithDirectory("attestations", attestDir)
 
 	return evidenceDir, nil
 }

@@ -14,6 +14,7 @@ import (
 
 	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/spire"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/telemetry"
 	"github.com/prometheus/client_golang/prometheus"
@@ -29,6 +30,7 @@ type ControlBindingReconciler struct {
 	ClaimEvaluator  ports.ClaimEvaluator
 	EvidenceRepo    ports.EvidenceRepository
 	ReceiptSigner   ports.ReceiptSigner
+	SVIDValidator   *spire.SVIDValidator
 }
 
 // +kubebuilder:rbac:groups=assurance.ckodex.io,resources=controlbindings,verbs=get;list;watch;create;update;patch;delete
