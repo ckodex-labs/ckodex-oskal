@@ -1,6 +1,7 @@
 package receipts
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,7 +11,10 @@ import (
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 )
+
+var _ ports.ReceiptSigner = (*ReceiptManager)(nil)
 
 // ReceiptManager handles creation, signing, and verification of ControlReceipts (Section 41 & 42).
 type ReceiptManager struct {
@@ -88,6 +92,25 @@ func (m *ReceiptManager) IssueReceipt(
 	receipt.Signature = hex.EncodeToString(sig)
 
 	return receipt, nil
+}
+
+// SignReceipt signs an existing ControlReceipt using the manager's private key (implements ports.ReceiptSigner).
+func (m *ReceiptManager) SignReceipt(ctx context.Context, receipt assurance.ControlReceipt) (assurance.ControlReceipt, error) {
+	if receipt.Evaluator.Scheme == "" {
+		receipt.Evaluator = m.evaluator
+	}
+	if receipt.EvaluatedAt.IsZero() {
+		receipt.EvaluatedAt = time.Now().UTC()
+	}
+	canonicalBytes := receipt.CanonicalBytes()
+	sig := ed25519.Sign(m.privateKey, canonicalBytes)
+	receipt.Signature = hex.EncodeToString(sig)
+	return receipt, nil
+}
+
+// VerifyReceipt verifies a ControlReceipt signature using the manager's public key (implements ports.ReceiptSigner).
+func (m *ReceiptManager) VerifyReceipt(ctx context.Context, receipt assurance.ControlReceipt) (bool, error) {
+	return VerifyIndependentReceipt(receipt, hex.EncodeToString(m.publicKey))
 }
 
 // VerifyIndependentReceipt allows any independent process to verify the signature of a receipt.

@@ -17,10 +17,12 @@ import (
 
 	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/kubernetes"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/webhook"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/reconcile"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
+	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 )
 
 var (
@@ -90,12 +92,28 @@ func main() {
 		EvidenceRepo: evidenceRepo,
 	}
 
+	receiptMgr, err := receipts.NewReceiptManager(assurance.AuthorityRef{
+		Scheme:      "spiffe",
+		Subject:     "prod/ns/ckodex-system/sa/oskal-controller",
+		TrustDomain: "prod",
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to initialize receipt manager")
+		os.Exit(1)
+	}
+
+	subjectResolver := kubernetes.NewSubjectResolver(mgr.GetClient())
+	controlResolver := kubernetes.NewControlResolver(mgr.GetClient())
+
 	if err = (&reconcile.ControlBindingReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		Log:            ctrl.Log.WithName("controllers").WithName("ControlBinding"),
-		ClaimEvaluator: evaluator,
-		EvidenceRepo:   evidenceRepo,
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		Log:             ctrl.Log.WithName("controllers").WithName("ControlBinding"),
+		ClaimEvaluator:  evaluator,
+		EvidenceRepo:    evidenceRepo,
+		SubjectResolver: subjectResolver,
+		ControlResolver: controlResolver,
+		ReceiptSigner:   receiptMgr,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ControlBinding")
 		os.Exit(1)

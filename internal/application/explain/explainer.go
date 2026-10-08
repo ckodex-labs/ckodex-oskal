@@ -59,35 +59,48 @@ func (e *Explainer) BuildExplainGraph(
 		{ID: "approved artifact", Satisfied: hasArtifact, Details: mapDetails(hasArtifact, "Sigstore cosign signature verified", "unapproved or unsigned image digest")},
 	}
 
+	baseImplDigest := eval.Epoch.ImplementationDigest
+	if baseImplDigest == "" {
+		baseImplDigest = assurance.ComputeStringDigest("kubernetes:implementation:v1")
+	}
+	basePolDigest := eval.Epoch.PolicyDigest
+	if basePolDigest == "" {
+		basePolDigest = assurance.ComputeStringDigest("policy:default:v1")
+	}
+	baseAuthDigest := eval.Epoch.AuthorityDigest
+	if baseAuthDigest == "" {
+		baseAuthDigest = assurance.ComputeStringDigest("authority:spiffe:v1")
+	}
+
 	implementations := []assurance.ExplainImplementation{
 		{
 			Requirement: "non-root",
 			Provider:    "kubernetes ValidatingAdmissionPolicy",
-			Digest:      "sha256:4a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b",
+			Digest:      assurance.ComputeStringDigest(basePolDigest + ":non-root"),
 			Purpose:     "preventive",
 		},
 		{
 			Requirement: "capabilities",
 			Provider:    "Kubernetes CEL\n  Tetragon runtime observer",
-			Digest:      "sha256:7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b4a8b9c0d1e2f3a4b5c6d",
+			Digest:      assurance.ComputeStringDigest(baseImplDigest + ":capabilities"),
 			Purpose:     "detective",
 		},
 		{
 			Requirement: "identity",
 			Provider:    "SPIFFE/SPIRE",
-			Digest:      "sha256:1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b4a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+			Digest:      assurance.ComputeStringDigest(baseAuthDigest + ":identity"),
 			Purpose:     "preventive",
 		},
 		{
 			Requirement: "network",
 			Provider:    "Cilium",
-			Digest:      "sha256:9e0f1a2b3c4d5e6f7a8b4a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d",
+			Digest:      assurance.ComputeStringDigest(baseImplDigest + ":network"),
 			Purpose:     "preventive",
 		},
 		{
 			Requirement: "artifact",
 			Provider:    "Sigstore",
-			Digest:      "sha256:3c4d5e6f7a8b4a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+			Digest:      assurance.ComputeStringDigest(baseAuthDigest + ":artifact"),
 			Purpose:     "preventive",
 		},
 	}

@@ -1,10 +1,12 @@
 package receipts
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 )
 
 func TestCryptographicReceiptIssueAndIndependentVerification(t *testing.T) {
@@ -102,5 +104,38 @@ func TestDeterministicEvidenceRoot(t *testing.T) {
 
 	if root1 != root2 {
 		t.Fatalf("expected deterministic root regardless of input slice order: %s vs %s", root1, root2)
+	}
+}
+
+func TestReceiptSignerInterface(t *testing.T) {
+	mgr, err := NewReceiptManager(assurance.AuthorityRef{
+		Scheme:  "spiffe",
+		Subject: "prod/ns/oskal/sa/signer",
+	})
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	var signer ports.ReceiptSigner = mgr
+	ctx := context.Background()
+
+	receipt := assurance.ControlReceipt{
+		Subject:      assurance.SubjectRef{Scheme: "k8s", ID: "ns/deploy"},
+		Control:      assurance.ControlRef{Namespace: "ckodex", ID: "test.ctrl"},
+		State:        assurance.AssuranceStateAssured,
+		EvidenceRoot: "sha256:abc",
+	}
+
+	signed, err := signer.SignReceipt(ctx, receipt)
+	if err != nil {
+		t.Fatalf("SignReceipt failed: %v", err)
+	}
+	if signed.Signature == "" {
+		t.Fatal("expected non-empty signature")
+	}
+
+	valid, err := signer.VerifyReceipt(ctx, signed)
+	if err != nil || !valid {
+		t.Fatalf("VerifyReceipt failed: valid=%v, err=%v", valid, err)
 	}
 }

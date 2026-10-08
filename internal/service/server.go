@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -11,7 +12,9 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	assessmentv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/assessment/v1"
 	commonv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
@@ -27,12 +30,13 @@ type Server struct {
 	mu           sync.RWMutex
 	explainer    *explain.Explainer
 	receiptMgr   *receipts.ReceiptManager
+	evidenceRepo ports.EvidenceRepository
 	observations map[string][]*evidencev1.Observation
 	receipts     map[string]*receiptv1.ControlReceipt
 }
 
 // NewServer creates a new AssuranceService gRPC server.
-func NewServer(receiptMgr *receipts.ReceiptManager) *Server {
+func NewServer(receiptMgr *receipts.ReceiptManager, evidenceRepos ...ports.EvidenceRepository) *Server {
 	if receiptMgr == nil {
 		mgr, _ := receipts.NewReceiptManager(assurance.AuthorityRef{
 			Scheme:  "spiffe",
@@ -40,9 +44,16 @@ func NewServer(receiptMgr *receipts.ReceiptManager) *Server {
 		})
 		receiptMgr = mgr
 	}
+	var repo ports.EvidenceRepository
+	if len(evidenceRepos) > 0 && evidenceRepos[0] != nil {
+		repo = evidenceRepos[0]
+	} else {
+		repo = storage.NewMemoryEvidenceRepository()
+	}
 	return &Server{
 		explainer:    explain.NewExplainer(),
 		receiptMgr:   receiptMgr,
+		evidenceRepo: repo,
 		observations: make(map[string][]*evidencev1.Observation),
 		receipts:     make(map[string]*receiptv1.ControlReceipt),
 	}
@@ -68,6 +79,44 @@ func (s *Server) SubmitObservation(ctx context.Context, req *servicesv1.SubmitOb
 	s.observations[subKey] = append(s.observations[subKey], obs)
 	s.mu.Unlock()
 
+	// Ingest evidence envelopes into the content-addressed EvidenceRepository
+	subRef := assurance.SubjectRef{
+		Scheme: obs.Subject.Scheme,
+		ID:     obs.Subject.Id,
+	}
+	obsTime := time.Now().UTC()
+	if obs.ObservedAt != nil {
+		obsTime = obs.ObservedAt.AsTime()
+	}
+	for i, ev := range obs.Evidence {
+		env := assurance.EvidenceEnvelope{
+			ID:              fmt.Sprintf("env-%s-%d", obs.Id, i),
+			ObservationType: obs.Type,
+			Subject:         subRef,
+			CapturedAt:      obsTime,
+			Artifact: assurance.EvidenceRef{
+				URI:       ev.Uri,
+				Digest:    ev.Digest,
+				MediaType: ev.MediaType,
+			},
+			Epoch: assurance.AssuranceEpoch{
+				SubjectDigest:        assurance.ComputeStringDigest(subRef.URI()),
+				ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload-specification"),
+				PolicyDigest:         assurance.ComputeStringDigest(subKey + ":policy"),
+				AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+				EnvironmentDigest:    assurance.ComputeStringDigest("cluster:kubernetes"),
+			},
+		}
+		if obs.Observer != nil {
+			env.Producer = assurance.AuthorityRef{
+				Scheme:      obs.Observer.Scheme,
+				Subject:     obs.Observer.Subject,
+				TrustDomain: obs.Observer.TrustDomain,
+			}
+		}
+		_, _ = s.evidenceRepo.Put(ctx, env, bytes.NewReader([]byte(ev.Digest)))
+	}
+
 	return &servicesv1.SubmitObservationResponse{
 		ObservationId: obs.Id,
 		Accepted:      true,
@@ -83,39 +132,95 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 
 	now := time.Now().UTC()
 	subKey := req.Subject.Scheme + "://" + req.Subject.Id
+	subRef := assurance.SubjectRef{
+		Scheme: req.Subject.Scheme,
+		ID:     req.Subject.Id,
+	}
 
-	s.mu.RLock()
-	obsList := s.observations[subKey]
-	s.mu.RUnlock()
-
-	hasEvidence := len(obsList) > 0
-	targetState := commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN
-	valence := commonv1.Valence_VALENCE_UNRESOLVED
-	var evCompleteness *evidencev1.EvidenceCompleteness
-	var evRoot string
-
-	if hasEvidence {
-		targetState = commonv1.AssuranceState_ASSURANCE_STATE_ASSURED
-		valence = commonv1.Valence_VALENCE_POSITIVE
-		evCompleteness = &evidencev1.EvidenceCompleteness{
-			Required: 1,
-			Present:  int32(len(obsList)),
-			Verified: int32(len(obsList)),
-		}
-		var evRefs []assurance.EvidenceRef
+	envelopes, _ := s.evidenceRepo.ListBySubject(ctx, subRef)
+	if len(envelopes) == 0 {
+		s.mu.RLock()
+		obsList := s.observations[subKey]
+		s.mu.RUnlock()
 		for _, obs := range obsList {
-			for _, ev := range obs.Evidence {
-				evRefs = append(evRefs, assurance.EvidenceRef{Digest: ev.Digest})
+			obsTime := now
+			if obs.ObservedAt != nil {
+				obsTime = obs.ObservedAt.AsTime()
+			}
+			for i, ev := range obs.Evidence {
+				envelopes = append(envelopes, assurance.EvidenceEnvelope{
+					ID:              fmt.Sprintf("env-%s-%d", obs.Id, i),
+					ObservationType: obs.Type,
+					Subject:         subRef,
+					CapturedAt:      obsTime,
+					Artifact: assurance.EvidenceRef{
+						URI:       ev.Uri,
+						Digest:    ev.Digest,
+						MediaType: ev.MediaType,
+					},
+					Epoch: assurance.AssuranceEpoch{
+						SubjectDigest: assurance.ComputeStringDigest(subRef.URI()),
+					},
+				})
 			}
 		}
-		evRoot = receipts.ComputeEvidenceRoot(evRefs)
-	} else {
-		evCompleteness = &evidencev1.EvidenceCompleteness{
-			Required: 1,
-			Present:  0,
-			Verified: 0,
-			Missing:  1,
-		}
+	}
+
+	currentEpoch := assurance.AssuranceEpoch{
+		SubjectDigest:        assurance.ComputeStringDigest(subRef.URI()),
+		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload-specification"),
+		PolicyDigest:         assurance.ComputeStringDigest(subKey + ":policy"),
+		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:kubernetes"),
+	}
+
+	contract := assurance.EvidenceContract{
+		ID:   "contract-default",
+		Name: "Default Assurance Contract",
+		Requirements: []assurance.EvidenceRequirement{
+			{
+				ID:           "admission-or-runtime",
+				EvidenceType: "admission",
+				Required:     true,
+				MaxAge:       24 * time.Hour,
+			},
+		},
+		OnMissingRequiredState: assurance.AssuranceStateUnknown,
+	}
+
+	contractResult := contract.Evaluate(envelopes, currentEpoch, now)
+
+	var targetState commonv1.AssuranceState
+	var valence commonv1.Valence
+	switch contractResult.State {
+	case assurance.AssuranceStateVerified, assurance.AssuranceStateAssured:
+		targetState = commonv1.AssuranceState_ASSURANCE_STATE_ASSURED
+		valence = commonv1.Valence_VALENCE_POSITIVE
+	case assurance.AssuranceStateFailed:
+		targetState = commonv1.AssuranceState_ASSURANCE_STATE_FAILED
+		valence = commonv1.Valence_VALENCE_NEGATIVE
+	case assurance.AssuranceStateStale:
+		targetState = commonv1.AssuranceState_ASSURANCE_STATE_STALE
+		valence = commonv1.Valence_VALENCE_MIXED
+	default:
+		targetState = commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN
+		valence = commonv1.Valence_VALENCE_UNRESOLVED
+	}
+
+	var evRefs []assurance.EvidenceRef
+	for _, env := range envelopes {
+		evRefs = append(evRefs, env.Artifact)
+	}
+	evRoot := receipts.ComputeEvidenceRoot(evRefs)
+	if targetState != commonv1.AssuranceState_ASSURANCE_STATE_ASSURED {
+		evRoot = ""
+	}
+
+	evCompleteness := &evidencev1.EvidenceCompleteness{
+		Required: int32(contractResult.Completeness.Required),
+		Present:  int32(contractResult.Completeness.Present),
+		Verified: int32(contractResult.Completeness.Verified),
+		Missing:  int32(contractResult.Completeness.Missing),
 	}
 
 	impDigest := ""
@@ -123,11 +228,11 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 	authDigest := ""
 	envDigest := ""
 
-	if hasEvidence {
-		impDigest = assurance.ComputeStringDigest("kubernetes:workload-specification")
-		polDigest = assurance.ComputeStringDigest(subKey + ":" + evRoot)
-		authDigest = assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server")
-		envDigest = assurance.ComputeStringDigest("cluster:kubernetes")
+	if targetState == commonv1.AssuranceState_ASSURANCE_STATE_ASSURED {
+		impDigest = currentEpoch.ImplementationDigest
+		polDigest = currentEpoch.PolicyDigest
+		authDigest = currentEpoch.AuthorityDigest
+		envDigest = currentEpoch.EnvironmentDigest
 	}
 
 	var evaluations []*assessmentv1.ClaimEvaluation

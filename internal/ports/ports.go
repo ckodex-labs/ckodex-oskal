@@ -57,9 +57,11 @@ type ReceiptSigner interface {
 
 // OscalProjector projects internal assurance claim evaluations into standard OSCAL artifacts (ADR-005, Section 43-47).
 type OscalProjector interface {
-	ProjectComponentDefinition(ctx context.Context, evaluations []assurance.ClaimEvaluation) ([]byte, error)
-	ProjectAssessmentResults(ctx context.Context, evaluations []assurance.ClaimEvaluation) ([]byte, error)
-	ProjectSSP(ctx context.Context, subject assurance.SubjectRef, evaluations []assurance.ClaimEvaluation) ([]byte, error)
+	ProjectAssessmentResults(ctx context.Context, subject assurance.SubjectRef, evaluations []assurance.ClaimEvaluation, findings []assurance.Finding) ([]byte, error)
+	ProjectComponentDefinition(ctx context.Context, componentName string, evaluations []assurance.ClaimEvaluation) ([]byte, error)
+	ProjectSSP(ctx context.Context, systemName string, evaluations []assurance.ClaimEvaluation) ([]byte, error)
+	ProjectAssessmentPlan(ctx context.Context, subject assurance.SubjectRef, contract assurance.EvidenceContract, controls []assurance.ControlRef) ([]byte, error)
+	ProjectPOAM(ctx context.Context, subject assurance.SubjectRef, findings []assurance.Finding) ([]byte, error)
 }
 
 // AuthorityResolver checks if an evidence producer is authorized to assert a claim (Section 25, Section 62).

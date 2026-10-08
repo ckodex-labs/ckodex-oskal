@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 )
 
 // OSCAL v1.2.3 JSON schema data structures for projection (ADR-005).
@@ -208,6 +209,8 @@ type POAMWrapper struct {
 		POAMItems []OscalPOAMItem `json:"poam-items"`
 	} `json:"plan-of-action-and-milestones"`
 }
+
+var _ ports.OscalProjector = (*Projector)(nil)
 
 // Projector converts continuous assurance evaluations into OSCAL v1.2.3 artifacts.
 type Projector struct{}

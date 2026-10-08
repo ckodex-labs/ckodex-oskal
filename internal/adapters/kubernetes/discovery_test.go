@@ -121,3 +121,27 @@ func TestMatchesSelector(t *testing.T) {
 		t.Fatalf("expected deploy not to match non-matching label selector")
 	}
 }
+
+func TestSubjectResolver(t *testing.T) {
+	resolver := NewSubjectResolver(nil)
+	ctx := t.Context()
+
+	sub, err := resolver.ResolveSubject(ctx, "k8s://production/payments/Deployment/payments-api")
+	if err != nil {
+		t.Fatalf("ResolveSubject failed: %v", err)
+	}
+	if sub.Scheme != "k8s" {
+		t.Fatalf("expected scheme k8s, got %s", sub.Scheme)
+	}
+	if sub.Attributes["namespace"] != "payments" || sub.Attributes["name"] != "payments-api" {
+		t.Fatalf("unexpected attributes: %+v", sub.Attributes)
+	}
+
+	digest, err := resolver.ComputeSubjectDigest(ctx, sub)
+	if err != nil {
+		t.Fatalf("ComputeSubjectDigest failed: %v", err)
+	}
+	if digest == "" {
+		t.Fatal("expected non-empty digest")
+	}
+}

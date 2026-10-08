@@ -72,16 +72,44 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	targetState := assurance.AssuranceStateUnknown
 	var evidenceRoot string
 	var evalResult assurance.ClaimEvaluation
+	var ctrlRef assurance.ControlRef
+	var subRef assurance.SubjectRef
 
 	if r.ClaimEvaluator != nil && len(binding.Spec.Controls) > 0 {
-		ctrlRef := assurance.ControlRef{
+		ctrlRef = assurance.ControlRef{
 			Namespace: binding.Spec.Controls[0].Canonical.Namespace,
 			ID:        binding.Spec.Controls[0].Canonical.ID,
 		}
-		subRef := assurance.SubjectRef{
+		subRef = assurance.SubjectRef{
 			Scheme: "k8s",
 			ID:     fmt.Sprintf("%s/%s", binding.Namespace, binding.Name),
+			Attributes: map[string]string{
+				"namespace": binding.Namespace,
+				"name":      binding.Name,
+			},
 		}
+
+		var subjectDigest string
+		if r.SubjectResolver != nil {
+			targetKind := "Deployment"
+			if len(binding.Spec.Subjects.Kinds) > 0 && binding.Spec.Subjects.Kinds[0] != "*" {
+				targetKind = binding.Spec.Subjects.Kinds[0]
+			}
+			targetName := strings.TrimSuffix(binding.Name, "-binding")
+			uri := fmt.Sprintf("k8s://%s/%s/%s", binding.Namespace, targetKind, targetName)
+			resolved, err := r.SubjectResolver.ResolveSubject(ctx, uri)
+			if err == nil {
+				subRef = resolved
+				dig, dErr := r.SubjectResolver.ComputeSubjectDigest(ctx, resolved)
+				if dErr == nil {
+					subjectDigest = dig
+				}
+			}
+		}
+		if subjectDigest == "" {
+			subjectDigest = assurance.ComputeStringDigest(subRef.URI())
+		}
+
 		claim := assurance.Claim{
 			ID:      fmt.Sprintf("claim-%s", binding.Name),
 			Subject: subRef,
@@ -138,7 +166,7 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 
 		currentEpoch := assurance.AssuranceEpoch{
-			SubjectDigest: assurance.ComputeStringDigest(subRef.URI()),
+			SubjectDigest: subjectDigest,
 		}
 
 		if ce, ok := r.ClaimEvaluator.(*ContractEvaluator); ok && ce.EvidenceRepo == nil && r.EvidenceRepo != nil {
@@ -231,7 +259,20 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	telemetry.RecordAssuranceState(binding.Namespace, binding.Name, targetState.String(), fmt.Sprintf("%d", binding.Generation), true)
 
 	if r.ReceiptSigner != nil && targetState == assurance.AssuranceStateAssured {
-		telemetry.RecordReceiptIssued(binding.Name, "VALID")
+		receipt := assurance.ControlReceipt{
+			Subject:      subRef,
+			Control:      ctrlRef,
+			State:        targetState,
+			Epoch:        evalResult.Epoch,
+			EvidenceRoot: evidenceRoot,
+			EvaluatedAt:  evalResult.EvaluatedAt,
+		}
+		signedReceipt, err := r.ReceiptSigner.SignReceipt(ctx, receipt)
+		if err == nil && signedReceipt.Signature != "" {
+			telemetry.RecordReceiptIssued(binding.Name, "VALID")
+		} else {
+			telemetry.RecordReceiptIssued(binding.Name, "FAILED")
+		}
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
