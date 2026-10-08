@@ -72,14 +72,10 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	targetState := assurance.AssuranceStateUnknown
 	var evidenceRoot string
 	var evalResult assurance.ClaimEvaluation
-	var ctrlRef assurance.ControlRef
 	var subRef assurance.SubjectRef
+	var allEvaluations []assurance.ClaimEvaluation
 
 	if r.ClaimEvaluator != nil && len(binding.Spec.Controls) > 0 {
-		ctrlRef = assurance.ControlRef{
-			Namespace: binding.Spec.Controls[0].Canonical.Namespace,
-			ID:        binding.Spec.Controls[0].Canonical.ID,
-		}
 		subRef = assurance.SubjectRef{
 			Scheme: "k8s",
 			ID:     fmt.Sprintf("%s/%s", binding.Namespace, binding.Name),
@@ -103,17 +99,15 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				dig, dErr := r.SubjectResolver.ComputeSubjectDigest(ctx, resolved)
 				if dErr == nil {
 					subjectDigest = dig
+				} else {
+					log.V(1).Info("SubjectResolver unable to compute digest, using fallback", "err", dErr)
 				}
+			} else {
+				log.V(1).Info("SubjectResolver unable to resolve subject, using fallback", "uri", uri, "err", err)
 			}
 		}
 		if subjectDigest == "" {
 			subjectDigest = assurance.ComputeStringDigest(subRef.URI())
-		}
-
-		claim := assurance.Claim{
-			ID:      fmt.Sprintf("claim-%s", binding.Name),
-			Subject: subRef,
-			Control: ctrlRef,
 		}
 
 		// Build contract from referenced EvidenceContract CRD or directly from binding requirements
@@ -121,7 +115,9 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if len(binding.Spec.Requirements) > 0 && binding.Spec.Requirements[0].EvidenceContract != "" {
 			var ecCRD assurancev1alpha1.EvidenceContract
 			ecKey := client.ObjectKey{Namespace: binding.Namespace, Name: binding.Spec.Requirements[0].EvidenceContract}
-			if err := r.Get(ctx, ecKey, &ecCRD); err == nil {
+			if err := r.Get(ctx, ecKey, &ecCRD); err != nil {
+				log.V(1).Info("unable to fetch referenced EvidenceContract CRD, using inline fallback", "contract", binding.Spec.Requirements[0].EvidenceContract, "err", err)
+			} else {
 				var reqs []assurance.EvidenceRequirement
 				for _, cr := range ecCRD.Spec.Requirements {
 					maxAge := cr.Freshness.Duration
@@ -173,15 +169,52 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			ce.EvidenceRepo = r.EvidenceRepo
 		}
 
-		eval, err := r.ClaimEvaluator.Evaluate(ctx, claim, contract, currentEpoch)
-		if err == nil {
-			evalResult = eval
-			targetState = eval.State
-			if targetState == assurance.AssuranceStateVerified {
-				targetState = assurance.AssuranceStateAssured
+		if r.ControlResolver != nil {
+			if applicable, err := r.ControlResolver.ResolveControls(ctx, subRef); err != nil {
+				log.V(1).Info("ControlResolver unable to resolve controls for subject", "subject", subRef.URI(), "err", err)
+			} else {
+				log.V(1).Info("ControlResolver verified applicable controls", "subject", subRef.URI(), "count", len(applicable))
 			}
-			evidenceRoot = eval.EvidenceRoot
 		}
+
+		overallState := assurance.AssuranceStateAssured
+		for _, c := range binding.Spec.Controls {
+			cRef := assurance.ControlRef{
+				Namespace: c.Canonical.Namespace,
+				ID:        c.Canonical.ID,
+			}
+
+			claim := assurance.Claim{
+				ID:      fmt.Sprintf("claim-%s-%s", binding.Name, cRef.ID),
+				Subject: subRef,
+				Control: cRef,
+			}
+
+			eval, err := r.ClaimEvaluator.Evaluate(ctx, claim, contract, currentEpoch)
+			if err != nil {
+				log.Error(err, "claim evaluation error", "control", cRef.Canonical())
+				overallState = assurance.AssuranceStateFailed
+				break
+			}
+
+			evalResult = eval
+			evidenceRoot = eval.EvidenceRoot
+			allEvaluations = append(allEvaluations, eval)
+
+			evalState := eval.State
+			if evalState == assurance.AssuranceStateVerified {
+				evalState = assurance.AssuranceStateAssured
+			}
+
+			if evalState == assurance.AssuranceStateFailed {
+				overallState = assurance.AssuranceStateFailed
+			} else if evalState == assurance.AssuranceStateUnknown && overallState != assurance.AssuranceStateFailed {
+				overallState = assurance.AssuranceStateUnknown
+			} else if evalState == assurance.AssuranceStateStale && overallState != assurance.AssuranceStateFailed && overallState != assurance.AssuranceStateUnknown {
+				overallState = assurance.AssuranceStateStale
+			}
+		}
+		targetState = overallState
 	}
 
 	// Reconcile status conditions
@@ -242,15 +275,27 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 					}
 				}
 				var ctrlStatuses []assurancev1alpha1.ControlStatus
-				for _, c := range binding.Spec.Controls {
+				for i, c := range binding.Spec.Controls {
+					cState := targetState.String()
+					summary := fmt.Sprintf("Verified %d/%d requirements", evalResult.Completeness.Verified, evalResult.Completeness.Required)
+					if i < len(allEvaluations) {
+						cStateVal := allEvaluations[i].State
+						if cStateVal == assurance.AssuranceStateVerified {
+							cStateVal = assurance.AssuranceStateAssured
+						}
+						cState = cStateVal.String()
+						summary = fmt.Sprintf("Verified %d/%d requirements", allEvaluations[i].Completeness.Verified, allEvaluations[i].Completeness.Required)
+					}
 					ctrlStatuses = append(ctrlStatuses, assurancev1alpha1.ControlStatus{
 						ID:              c.Canonical.ID,
-						State:           targetState.String(),
-						EvidenceSummary: fmt.Sprintf("Verified %d/%d requirements", evalResult.Completeness.Verified, evalResult.Completeness.Required),
+						State:           cState,
+						EvidenceSummary: summary,
 					})
 				}
 				stateCopy.Status.Controls = ctrlStatuses
-				_ = r.Status().Update(ctx, &stateCopy)
+				if err := r.Status().Update(ctx, &stateCopy); err != nil {
+					log.Error(err, "unable to update AssuranceState status", "state", stateCopy.Name)
+				}
 			}
 		}
 	}
@@ -259,19 +304,24 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	telemetry.RecordAssuranceState(binding.Namespace, binding.Name, targetState.String(), fmt.Sprintf("%d", binding.Generation), true)
 
 	if r.ReceiptSigner != nil && targetState == assurance.AssuranceStateAssured {
-		receipt := assurance.ControlReceipt{
-			Subject:      subRef,
-			Control:      ctrlRef,
-			State:        targetState,
-			Epoch:        evalResult.Epoch,
-			EvidenceRoot: evidenceRoot,
-			EvaluatedAt:  evalResult.EvaluatedAt,
-		}
-		signedReceipt, err := r.ReceiptSigner.SignReceipt(ctx, receipt)
-		if err == nil && signedReceipt.Signature != "" {
-			telemetry.RecordReceiptIssued(binding.Name, "VALID")
-		} else {
-			telemetry.RecordReceiptIssued(binding.Name, "FAILED")
+		for _, eval := range allEvaluations {
+			if eval.State != assurance.AssuranceStateAssured && eval.State != assurance.AssuranceStateVerified {
+				continue
+			}
+			receipt := assurance.ControlReceipt{
+				Subject:      subRef,
+				Control:      eval.Control,
+				State:        assurance.AssuranceStateAssured,
+				Epoch:        eval.Epoch,
+				EvidenceRoot: eval.EvidenceRoot,
+				EvaluatedAt:  eval.EvaluatedAt,
+			}
+			signedReceipt, err := r.ReceiptSigner.SignReceipt(ctx, receipt)
+			if err == nil && signedReceipt.Signature != "" {
+				telemetry.RecordReceiptIssued(binding.Name, "VALID")
+			} else {
+				telemetry.RecordReceiptIssued(binding.Name, "FAILED")
+			}
 		}
 	}
 

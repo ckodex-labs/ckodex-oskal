@@ -41,7 +41,7 @@ func TestEvidenceVerifier(t *testing.T) {
 	}
 
 	// Sign envelope digest
-	raw := env.Digest()
+	raw := env.SigningDigest()
 	sig := ed25519.Sign(priv, []byte(raw))
 	env.SignatureRef = hex.EncodeToString(sig)
 

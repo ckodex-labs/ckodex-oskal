@@ -37,12 +37,15 @@ type AirgapBundle struct {
 
 // ComputeManifestDigest calculates a deterministic hash of the bundle contents.
 func (b *AirgapBundle) ComputeManifestDigest() string {
-	digests := make([]string, 0, len(b.Envelopes)+len(b.Receipts))
+	digests := make([]string, 0, len(b.Envelopes)+len(b.Receipts)+len(b.Evaluations))
+	for _, ev := range b.Evaluations {
+		digests = append(digests, "eval:"+ev.Digest())
+	}
 	for _, env := range b.Envelopes {
-		digests = append(digests, env.Digest())
+		digests = append(digests, "env:"+env.Digest())
 	}
 	for _, r := range b.Receipts {
-		digests = append(digests, r.EvidenceRoot+":"+r.Signature)
+		digests = append(digests, "receipt:"+r.EvidenceRoot+":"+r.Signature)
 	}
 	for digest, content := range b.Blobs {
 		hContent := sha256.Sum256([]byte(content))
@@ -50,10 +53,12 @@ func (b *AirgapBundle) ComputeManifestDigest() string {
 	}
 	sort.Strings(digests)
 
-	raw := fmt.Sprintf("%s|%s|%s|%s",
+	raw := fmt.Sprintf("%s|%s|%s|%s|%d|%s",
 		b.Metadata.BundleID,
 		b.Metadata.SubjectURI,
 		b.Metadata.EpochComposite,
+		b.Metadata.Generator,
+		b.Metadata.ExportedAt.UnixNano(),
 		strings.Join(digests, "\n"),
 	)
 	h := sha256.Sum256([]byte(raw))

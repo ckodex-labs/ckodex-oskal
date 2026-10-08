@@ -150,10 +150,15 @@ type ComponentDefinitionWrapper struct {
 }
 
 // 3. System Security Plan Document
+type ImportProfile struct {
+	Href string `json:"href"`
+}
+
 type SSPWrapper struct {
 	SystemSecurityPlan struct {
 		UUID                  string        `json:"uuid"`
 		Metadata              OscalMetadata `json:"metadata"`
+		ImportProfile         ImportProfile `json:"import-profile"`
 		SystemCharacteristics struct {
 			SystemName      string `json:"system-name"`
 			DeploymentModel string `json:"deployment-model"`
@@ -202,10 +207,16 @@ type OscalPOAMItem struct {
 	Props       []Property `json:"props,omitempty"`
 }
 
+type POAMSystemID struct {
+	IDType string `json:"id-type,omitempty"`
+	ID     string `json:"id"`
+}
+
 type POAMWrapper struct {
 	PlanOfActionAndMilestones struct {
 		UUID      string          `json:"uuid"`
 		Metadata  OscalMetadata   `json:"metadata"`
+		SystemID  *POAMSystemID   `json:"system-id,omitempty"`
 		POAMItems []OscalPOAMItem `json:"poam-items"`
 	} `json:"plan-of-action-and-milestones"`
 }
@@ -243,13 +254,25 @@ func (p *Projector) ProjectAssessmentResults(
 		Href: "assessment-plan.json",
 	}
 
+	var epochDigest string
+	var startTime, endTime time.Time
+	if len(evaluations) > 0 {
+		epochDigest = evaluations[0].Epoch.CompositeDigest()
+		startTime = evaluations[0].EvaluatedAt
+		endTime = evaluations[0].ValidUntil
+	} else {
+		epochDigest = "empty"
+		startTime = time.Now().UTC()
+		endTime = startTime
+	}
+
 	resultUUID := uuid.NewString()
 	res := OscalResult{
 		UUID:        resultUUID,
 		Title:       fmt.Sprintf("Continuous Assurance Result for %s", subject.URI()),
-		Description: fmt.Sprintf("Evaluated under composite epoch %s", evaluations[0].Epoch.CompositeDigest()),
-		Start:       evaluations[0].EvaluatedAt,
-		End:         evaluations[0].ValidUntil,
+		Description: fmt.Sprintf("Evaluated under composite epoch %s", epochDigest),
+		Start:       startTime,
+		End:         endTime,
 		ReviewedControls: OscalReviewedControls{
 			ControlSelections: []OscalControlSelection{
 				{
@@ -308,6 +331,15 @@ func (p *Projector) ProjectAssessmentResults(
 
 	for _, f := range findings {
 		findUUID := uuid.NewString()
+		var relObs []string
+		for _, obs := range res.Observations {
+			if strings.Contains(obs.Title, f.Control.Canonical()) || strings.Contains(obs.Title, f.Control.ID) {
+				relObs = append(relObs, obs.UUID)
+			}
+		}
+		if len(relObs) == 0 && len(res.Observations) > 0 {
+			relObs = []string{res.Observations[0].UUID}
+		}
 		res.Findings = append(res.Findings, OscalFinding{
 			UUID:        findUUID,
 			Title:       f.Title,
@@ -317,6 +349,7 @@ func (p *Projector) ProjectAssessmentResults(
 				IdRef:  f.Control.ID,
 				Status: "not-satisfied",
 			},
+			RelatedObservations: relObs,
 		})
 	}
 
@@ -406,6 +439,10 @@ func (p *Projector) ProjectSSP(
 		LastModified: now,
 		Version:      "1.0.0",
 		OscalVersion: "1.2.3",
+	}
+
+	ssp.ImportProfile = ImportProfile{
+		Href: "profiles/nist-sp-800-53-rev5.json",
 	}
 
 	ssp.SystemCharacteristics.SystemName = systemName
@@ -498,6 +535,11 @@ func (p *Projector) ProjectPOAM(
 		LastModified: now,
 		Version:      "1.0.0",
 		OscalVersion: "1.2.3",
+	}
+
+	poam.SystemID = &POAMSystemID{
+		IDType: "uri",
+		ID:     subject.URI(),
 	}
 
 	for _, f := range findings {

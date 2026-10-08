@@ -212,7 +212,11 @@ type VectorResolutionPolicy struct {
 // Resolve derives top-level AssuranceState from the vector (Rule 22: Hard invariants dominate scores).
 func (v AssuranceVector) Resolve(policy VectorResolutionPolicy) AssuranceState {
 	// Rule 16: Anti / Negative invariant violation dominates
-	if v.Conformance == ValenceNegative || v.Integrity == ValenceNegative || v.Authority == ValenceNegative {
+	if v.Conformance == ValenceNegative ||
+		v.Integrity == ValenceNegative ||
+		v.Authority == ValenceNegative ||
+		v.Identity == ValenceNegative ||
+		v.Runtime == ValenceNegative {
 		return AssuranceStateFailed
 	}
 
@@ -233,6 +237,7 @@ func (v AssuranceVector) Resolve(policy VectorResolutionPolicy) AssuranceState {
 		v.Integrity == ValenceUnresolved ||
 		v.Authority == ValenceUnresolved ||
 		v.Identity == ValenceUnresolved ||
+		v.Runtime == ValenceUnresolved ||
 		v.Freshness == ValenceUnresolved ||
 		v.Completeness == ValenceUnresolved
 
@@ -258,6 +263,7 @@ func (v AssuranceVector) Resolve(policy VectorResolutionPolicy) AssuranceState {
 		v.Integrity == ValencePositive &&
 		v.Authority == ValencePositive &&
 		v.Identity == ValencePositive &&
+		v.Runtime == ValencePositive &&
 		v.Freshness == ValencePositive &&
 		v.Completeness == ValencePositive {
 		return AssuranceStateAssured

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -150,12 +151,10 @@ func (r EvidenceRequirement) IsProducerAccepted(producerID string) bool {
 		if strings.HasSuffix(accepted, "*") && strings.HasPrefix(producerID, strings.TrimSuffix(accepted, "*")) {
 			return true
 		}
-		if strings.HasPrefix(producerID, accepted+"://") || strings.Contains(producerID, accepted) {
+		if strings.HasPrefix(producerID, accepted+"://") {
 			return true
 		}
-		cleanAcc := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(accepted, "-", ""), "_", ""))
-		cleanProd := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(producerID, "-", ""), "_", ""))
-		if strings.Contains(cleanProd, cleanAcc) || strings.Contains(cleanAcc, cleanProd) {
+		if strings.EqualFold(producerID, accepted) {
 			return true
 		}
 	}
@@ -179,7 +178,12 @@ type EvidenceEnvelope struct {
 
 // Digest computes the deterministic envelope digest.
 func (e EvidenceEnvelope) Digest() string {
-	raw := fmt.Sprintf("%s|%s|%s|%s|%d|%s|%s|%s|%s",
+	controlRefStrs := make([]string, len(e.ControlRefs))
+	for i, c := range e.ControlRefs {
+		controlRefStrs[i] = c.Canonical()
+	}
+	sort.Strings(controlRefStrs)
+	raw := fmt.Sprintf("%s|%s|%s|%s|%d|%s|%s|%s|%s|%s|%s",
 		e.Schema,
 		e.ID,
 		e.Subject.URI(),
@@ -188,10 +192,19 @@ func (e EvidenceEnvelope) Digest() string {
 		e.Producer.Canonical(),
 		e.Artifact.Digest,
 		e.IntegrityDigest,
+		e.SignatureRef,
 		e.Epoch.CompositeDigest(),
+		strings.Join(controlRefStrs, ","),
 	)
 	h := sha256.Sum256([]byte(raw))
 	return "sha256:" + hex.EncodeToString(h[:])
+}
+
+// SigningDigest computes the canonical digest to be signed (excluding SignatureRef).
+func (e EvidenceEnvelope) SigningDigest() string {
+	unsigned := e
+	unsigned.SignatureRef = ""
+	return unsigned.Digest()
 }
 
 // EvidenceCompleteness tracks coverage of required evidence.
@@ -233,10 +246,17 @@ type EvidenceContract struct {
 
 // Evaluate checks candidate evidence envelopes against this contract at time `now`.
 func (c EvidenceContract) Evaluate(envelopes []EvidenceEnvelope, currentEpoch AssuranceEpoch, now time.Time) ContractEvaluationResult {
+	requiredCount := 0
+	for _, req := range c.Requirements {
+		if req.Required {
+			requiredCount++
+		}
+	}
+
 	result := ContractEvaluationResult{
 		ContractID: c.ID,
 		Completeness: EvidenceCompleteness{
-			Required: len(c.Requirements),
+			Required: requiredCount,
 		},
 	}
 
@@ -280,12 +300,18 @@ func (c EvidenceContract) Evaluate(envelopes []EvidenceEnvelope, currentEpoch As
 		if matched != nil {
 			result.VerifiedEvidences = append(result.VerifiedEvidences, *matched)
 			result.Completeness.Present++
-			result.Completeness.Verified++
+			if req.Required {
+				result.Completeness.Verified++
+			}
 		} else {
 			if isStale {
-				result.Completeness.Stale++
+				if req.Required {
+					result.Completeness.Stale++
+				}
 			} else {
-				result.Completeness.Missing++
+				if req.Required {
+					result.Completeness.Missing++
+				}
 			}
 			if req.Required {
 				result.MissingRequirements = append(result.MissingRequirements, req)

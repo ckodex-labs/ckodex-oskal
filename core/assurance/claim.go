@@ -32,6 +32,21 @@ type ClaimEvaluation struct {
 	Trace        []string             `json:"trace,omitempty"`
 }
 
+// Digest computes a deterministic cryptographic hash of the claim evaluation.
+func (e ClaimEvaluation) Digest() string {
+	raw := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d",
+		e.ID,
+		e.Subject.URI(),
+		e.Control.Canonical(),
+		e.State.String(),
+		e.Epoch.CompositeDigest(),
+		e.EvidenceRoot,
+		e.EvaluatedAt.UnixNano(),
+	)
+	h := sha256.Sum256([]byte(raw))
+	return "sha256:" + hex.EncodeToString(h[:])
+}
+
 // Finding represents a confirmed, material non-conformance or vulnerability.
 type Finding struct {
 	ID           string        `json:"id"`

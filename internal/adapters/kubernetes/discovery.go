@@ -131,13 +131,28 @@ func (r *SubjectResolver) ComputeSubjectDigest(ctx context.Context, subject assu
 	return "sha256:" + hex.EncodeToString(h[:]), nil
 }
 
-// BuildPodSubjectRef creates a canonical SubjectRef for a Kubernetes Pod.
-func BuildPodSubjectRef(pod *corev1.Pod) assurance.SubjectRef {
-	images := make([]string, 0, len(pod.Spec.Containers))
-	for _, c := range pod.Spec.Containers {
+// extractPodImages collects and sorts all container images from Containers, InitContainers, and EphemeralContainers.
+func extractPodImages(spec *corev1.PodSpec) []string {
+	if spec == nil {
+		return nil
+	}
+	images := make([]string, 0, len(spec.Containers)+len(spec.InitContainers)+len(spec.EphemeralContainers))
+	for _, c := range spec.Containers {
+		images = append(images, c.Image)
+	}
+	for _, c := range spec.InitContainers {
+		images = append(images, c.Image)
+	}
+	for _, c := range spec.EphemeralContainers {
 		images = append(images, c.Image)
 	}
 	sort.Strings(images)
+	return images
+}
+
+// BuildPodSubjectRef creates a canonical SubjectRef for a Kubernetes Pod.
+func BuildPodSubjectRef(pod *corev1.Pod) assurance.SubjectRef {
+	images := extractPodImages(&pod.Spec)
 
 	return assurance.SubjectRef{
 		Scheme: "k8s",
@@ -157,11 +172,7 @@ func BuildPodSubjectRef(pod *corev1.Pod) assurance.SubjectRef {
 
 // ComputePodDigest computes the cryptographic digest for a Pod across namespace, name, UID, and container images.
 func ComputePodDigest(pod *corev1.Pod) string {
-	images := make([]string, 0, len(pod.Spec.Containers))
-	for _, c := range pod.Spec.Containers {
-		images = append(images, c.Image)
-	}
-	sort.Strings(images)
+	images := extractPodImages(&pod.Spec)
 
 	raw := fmt.Sprintf("pod|%s|%s|%s|%s",
 		pod.Namespace,
@@ -175,11 +186,7 @@ func ComputePodDigest(pod *corev1.Pod) string {
 
 // BuildSubjectRef creates a canonical SubjectRef for a Kubernetes Deployment.
 func BuildDeploymentSubjectRef(deploy *appsv1.Deployment) assurance.SubjectRef {
-	images := make([]string, 0, len(deploy.Spec.Template.Spec.Containers))
-	for _, c := range deploy.Spec.Template.Spec.Containers {
-		images = append(images, c.Image)
-	}
-	sort.Strings(images)
+	images := extractPodImages(&deploy.Spec.Template.Spec)
 
 	return assurance.SubjectRef{
 		Scheme: "k8s",
@@ -199,11 +206,7 @@ func BuildDeploymentSubjectRef(deploy *appsv1.Deployment) assurance.SubjectRef {
 
 // ComputeSubjectDigest computes the cryptographic digest across spec, generation, UID, and container images.
 func ComputeDeploymentDigest(deploy *appsv1.Deployment) string {
-	images := make([]string, 0, len(deploy.Spec.Template.Spec.Containers))
-	for _, c := range deploy.Spec.Template.Spec.Containers {
-		images = append(images, c.Image)
-	}
-	sort.Strings(images)
+	images := extractPodImages(&deploy.Spec.Template.Spec)
 
 	raw := fmt.Sprintf("deploy|%s|%s|%s|%d|%s",
 		deploy.Namespace,

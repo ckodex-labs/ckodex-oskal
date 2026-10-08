@@ -278,3 +278,102 @@ func TestAdmissionWebhook_HealthEndpoints(t *testing.T) {
 		t.Fatalf("unexpected readyz response: %d, %s", wReady.Code, wReady.Body.String())
 	}
 }
+
+func TestAdmissionWebhook_InitContainerViolation(t *testing.T) {
+	server := NewAdmissionWebhookServer(ServerConfig{})
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "app-with-bad-init", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: ptrBool(true),
+			},
+			InitContainers: []corev1.Container{
+				{
+					Name:  "setup",
+					Image: "busybox:latest",
+					SecurityContext: &corev1.SecurityContext{
+						Privileged: ptrBool(true), // Prohibited
+					},
+				},
+			},
+			Containers: []corev1.Container{
+				{
+					Name:  "app",
+					Image: "app:v1",
+					SecurityContext: &corev1.SecurityContext{
+						RunAsNonRoot: ptrBool(true),
+					},
+				},
+			},
+		},
+	}
+
+	podRaw, _ := json.Marshal(pod)
+	review := admissionv1.AdmissionReview{
+		Request: &admissionv1.AdmissionRequest{
+			UID:    "req-init-violation",
+			Kind:   metav1.GroupVersionKind{Kind: "Pod", Version: "v1"},
+			Object: runtime.RawExtension{Raw: podRaw},
+		},
+	}
+	body, _ := json.Marshal(review)
+
+	req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	var resp admissionv1.AdmissionReview
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp.Response == nil || resp.Response.Allowed {
+		t.Fatal("expected pod with privileged init container to be denied")
+	}
+	if !strings.Contains(resp.Response.Result.Message, "requests privileged mode") {
+		t.Fatalf("expected privileged violation message, got %s", resp.Response.Result.Message)
+	}
+}
+
+func TestAdmissionWebhook_PartialSecurityContextWithoutRunAsNonRoot(t *testing.T) {
+	server := NewAdmissionWebhookServer(ServerConfig{})
+
+	// Pod lacks runAsNonRoot, and container defines securityContext without runAsNonRoot
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "app-partial-sec", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "app",
+					Image: "app:v1",
+					SecurityContext: &corev1.SecurityContext{
+						ReadOnlyRootFilesystem: ptrBool(true), // partial context, lacks runAsNonRoot!
+					},
+				},
+			},
+		},
+	}
+
+	podRaw, _ := json.Marshal(pod)
+	review := admissionv1.AdmissionReview{
+		Request: &admissionv1.AdmissionRequest{
+			UID:    "req-partial-sec",
+			Kind:   metav1.GroupVersionKind{Kind: "Pod", Version: "v1"},
+			Object: runtime.RawExtension{Raw: podRaw},
+		},
+	}
+	body, _ := json.Marshal(review)
+
+	req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	var resp admissionv1.AdmissionReview
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp.Response == nil || resp.Response.Allowed {
+		t.Fatal("expected pod with partial container securityContext lacking runAsNonRoot to be denied")
+	}
+	if !strings.Contains(resp.Response.Result.Message, "does not specify runAsNonRoot") {
+		t.Fatalf("expected runAsNonRoot violation message, got %s", resp.Response.Result.Message)
+	}
+}

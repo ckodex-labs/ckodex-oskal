@@ -181,4 +181,76 @@ func TestEvidenceContractEvaluation(t *testing.T) {
 	if resEpochDiverged.State != AssuranceStateStale {
 		t.Fatalf("expected state STALE on epoch mismatch, got %s", resEpochDiverged.State)
 	}
+
+	// 5. Optional requirement missing does not break completeness
+	contractWithOptional := contract
+	contractWithOptional.Requirements = append(contractWithOptional.Requirements, EvidenceRequirement{
+		ID:           "optional-telemetry",
+		EvidenceType: "telemetry.trace",
+		Required:     false,
+		MaxAge:       10 * time.Minute,
+	})
+	resOptional := contractWithOptional.Evaluate([]EvidenceEnvelope{evAdmission, evRuntime}, epoch, now)
+	if resOptional.State != AssuranceStateVerified {
+		t.Fatalf("expected state VERIFIED when optional requirement is missing, got %s", resOptional.State)
+	}
+	if !resOptional.Completeness.IsComplete() {
+		t.Fatalf("expected completeness to remain complete with missing optional requirement: %s", resOptional.Completeness.Summary())
+	}
+}
+
+func TestProducerAntiSpoofing(t *testing.T) {
+	req := EvidenceRequirement{
+		ID:           "test-req",
+		EvidenceType: "test.type",
+		Required:     true,
+		AcceptedProducers: []string{
+			"spiffe://prod/ns/oskal/sa/admission-observer",
+		},
+	}
+
+	// Substrings or fragments MUST NOT be accepted
+	if req.IsProducerAccepted("sa") {
+		t.Fatalf("reverse substring 'sa' must be rejected")
+	}
+	if req.IsProducerAccepted("admission") {
+		t.Fatalf("substring 'admission' must be rejected")
+	}
+	if req.IsProducerAccepted("spiffe://prod") {
+		t.Fatalf("unmatching prefix must be rejected")
+	}
+	if !req.IsProducerAccepted("spiffe://prod/ns/oskal/sa/admission-observer") {
+		t.Fatalf("exact match must be accepted")
+	}
+}
+
+func TestEnvelopeDigestSensitivity(t *testing.T) {
+	now := time.Now()
+	env := EvidenceEnvelope{
+		Schema:          "test/v1",
+		ID:              "env-1",
+		ObservationType: "obs.type",
+		CapturedAt:      now,
+		Producer:        AuthorityRef{Scheme: "spiffe", Subject: "author"},
+		Artifact:        EvidenceRef{Digest: "sha256:art1"},
+		IntegrityDigest: "sha256:int1",
+	}
+
+	d1 := env.Digest()
+
+	// Modify SignatureRef
+	envWithSig := env
+	envWithSig.SignatureRef = "sig-12345"
+	d2 := envWithSig.Digest()
+	if d1 == d2 {
+		t.Fatalf("digest must change when SignatureRef is added")
+	}
+
+	// Modify ControlRefs
+	envWithCtrl := env
+	envWithCtrl.ControlRefs = []ControlRef{{Namespace: "ckodex", ID: "AC-6"}}
+	d3 := envWithCtrl.Digest()
+	if d1 == d3 {
+		t.Fatalf("digest must change when ControlRefs is added")
+	}
 }

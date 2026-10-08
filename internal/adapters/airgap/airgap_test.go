@@ -2,6 +2,7 @@ package airgap
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -116,4 +117,40 @@ func TestAirGapAcceptanceWithoutPublicNetwork(t *testing.T) {
 	}
 
 	t.Logf("Air-gap acceptance test successful: Complete lifecycle executed without external dependencies.")
+}
+
+func TestAirgapBundleTampering(t *testing.T) {
+	now := time.Now().UTC()
+	sub := assurance.SubjectRef{Scheme: "k8s", ID: "ns/app"}
+	ctrl := assurance.ControlRef{Namespace: "ckodex", ID: "AC-6"}
+	epoch := assurance.AssuranceEpoch{SubjectDigest: "sha256:test"}
+	eval := assurance.ClaimEvaluation{
+		ID:          "eval-1",
+		Subject:     sub,
+		Control:     ctrl,
+		State:       assurance.AssuranceStateAssured,
+		Epoch:       epoch,
+		EvaluatedAt: now,
+		ValidUntil:  now.Add(time.Hour),
+	}
+
+	bundle, data, err := ExportBundle(context.Background(), sub, []assurance.ClaimEvaluation{eval}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("failed to export bundle: %v", err)
+	}
+
+	// Valid import succeeds
+	_, err = ImportBundle(context.Background(), data, nil, nil)
+	if err != nil {
+		t.Fatalf("expected valid bundle import to succeed, got: %v", err)
+	}
+
+	// Tamper with evaluation state
+	bundle.Evaluations[0].State = assurance.AssuranceStateFailed
+	tamperedData, _ := json.Marshal(bundle)
+
+	_, err = ImportBundle(context.Background(), tamperedData, nil, nil)
+	if err == nil {
+		t.Fatal("expected tampered evaluation in bundle to fail manifest verification")
+	}
 }

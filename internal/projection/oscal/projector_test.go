@@ -98,6 +98,10 @@ func TestProjectAssessmentResultsExposesSourceEvidenceReference(t *testing.T) {
 		t.Fatalf("M10 Exit Failure: Back-matter contains no resources")
 	}
 
+	if len(res.Findings) == 0 || len(res.Findings[0].RelatedObservations) == 0 {
+		t.Fatalf("Finding must link RelatedObservations")
+	}
+
 	foundResource := false
 	for _, r := range parsed.AssessmentResults.BackMatter.Resources {
 		if r.UUID == resourceUUID {
@@ -111,6 +115,15 @@ func TestProjectAssessmentResultsExposesSourceEvidenceReference(t *testing.T) {
 	}
 	if !foundResource {
 		t.Fatalf("M10 Exit Failure: Back-matter does not contain matching resource %s for evidence digest %s", resourceUUID, evidenceDigest)
+	}
+
+	// Empty evaluations must not panic and must produce valid JSON
+	emptyData, err := projector.ProjectAssessmentResults(context.Background(), sub, nil, nil)
+	if err != nil {
+		t.Fatalf("failed to project empty assessment results: %v", err)
+	}
+	if !strings.Contains(string(emptyData), "assessment-results") {
+		t.Fatalf("unexpected empty assessment results output: %s", string(emptyData))
 	}
 
 	t.Logf("Projected OSCAL Assessment Results:\n%s", string(data[:400])+"...")
@@ -149,6 +162,9 @@ func TestProjectComponentDefinitionAndSSP(t *testing.T) {
 	}
 	if !strings.Contains(string(sspBytes), "system-security-plan") || !strings.Contains(string(sspBytes), "Payments System") {
 		t.Fatalf("unexpected SSP output: %s", string(sspBytes))
+	}
+	if !strings.Contains(string(sspBytes), "import-profile") {
+		t.Fatalf("expected SSP to include import-profile: %s", string(sspBytes))
 	}
 }
 
@@ -192,5 +208,8 @@ func TestProjectAssessmentPlanAndPOAM(t *testing.T) {
 	}
 	if !strings.Contains(string(poamBytes), "plan-of-action-and-milestones") || !strings.Contains(string(poamBytes), "Remediation required") {
 		t.Fatalf("unexpected poam output: %s", string(poamBytes))
+	}
+	if !strings.Contains(string(poamBytes), "system-id") {
+		t.Fatalf("expected POAM to include system-id: %s", string(poamBytes))
 	}
 }

@@ -45,7 +45,7 @@ func (v *DefaultEvidenceVerifier) VerifySignature(ctx context.Context, envelope 
 		return false, nil
 	}
 
-	raw := envelope.Digest()
+	raw := envelope.SigningDigest()
 	return ed25519.Verify(pubKey, []byte(raw), sigBytes), nil
 }
 

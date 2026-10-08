@@ -267,6 +267,14 @@ func (s *AdmissionWebhookServer) validateRequest(req *admissionv1.AdmissionReque
 }
 
 // checkNonRootCompliance validates that container executes as non-root.
+func allContainers(pod *corev1.Pod) []corev1.Container {
+	total := len(pod.Spec.Containers) + len(pod.Spec.InitContainers)
+	all := make([]corev1.Container, 0, total)
+	all = append(all, pod.Spec.Containers...)
+	all = append(all, pod.Spec.InitContainers...)
+	return all
+}
+
 func checkNonRootCompliance(pod *corev1.Pod) []string {
 	var violations []string
 
@@ -277,13 +285,16 @@ func checkNonRootCompliance(pod *corev1.Pod) []string {
 		violations = append(violations, "pod SecurityContext defines runAsUser=0 (root)")
 	}
 
-	for _, c := range pod.Spec.Containers {
+	for _, c := range allContainers(pod) {
 		if c.SecurityContext != nil {
 			if c.SecurityContext.RunAsUser != nil && *c.SecurityContext.RunAsUser == 0 {
 				violations = append(violations, fmt.Sprintf("container %s defines runAsUser=0 (root)", c.Name))
 			}
 			if c.SecurityContext.RunAsNonRoot != nil && !*c.SecurityContext.RunAsNonRoot {
 				violations = append(violations, fmt.Sprintf("container %s explicitly sets runAsNonRoot=false", c.Name))
+			}
+			if c.SecurityContext.RunAsNonRoot == nil && !podNonRoot {
+				violations = append(violations, fmt.Sprintf("container %s does not specify runAsNonRoot and pod default is not enforced", c.Name))
 			}
 		} else if !podNonRoot {
 			violations = append(violations, fmt.Sprintf("container %s does not specify runAsNonRoot and pod default is not enforced", c.Name))
@@ -297,7 +308,7 @@ func checkNonRootCompliance(pod *corev1.Pod) []string {
 func checkCapabilityCompliance(pod *corev1.Pod) []string {
 	var violations []string
 
-	for _, c := range pod.Spec.Containers {
+	for _, c := range allContainers(pod) {
 		if c.SecurityContext != nil {
 			if c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged {
 				violations = append(violations, fmt.Sprintf("container %s requests privileged mode", c.Name))

@@ -133,6 +133,13 @@ func TestVectorStateResolution(t *testing.T) {
 		t.Fatalf("expected negative conformance to dominate and resolve to FAILED, got %s", s)
 	}
 
+	// Hard Invariant: Anti/Negative runtime dominates -> FAILED
+	vAntiRuntime := vAllPositive
+	vAntiRuntime.Runtime = ValenceNegative
+	if s := vAntiRuntime.Resolve(policy); s != AssuranceStateFailed {
+		t.Fatalf("expected negative runtime to dominate and resolve to FAILED, got %s", s)
+	}
+
 	// Hard Invariant: Decoherence -> FAILED
 	vDecoherent := vAllPositive
 	vDecoherent.Coherence = CoherenceDecoherent
