@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/santhosh-tekuri/jsonschema/v5"
 )
 
 func TestProjectAssessmentResultsExposesSourceEvidenceReference(t *testing.T) {
@@ -211,5 +212,165 @@ func TestProjectAssessmentPlanAndPOAM(t *testing.T) {
 	}
 	if !strings.Contains(string(poamBytes), "system-id") {
 		t.Fatalf("expected POAM to include system-id: %s", string(poamBytes))
+	}
+}
+
+func TestStrictNISTOscalV123SchemaConformance(t *testing.T) {
+	compiler := jsonschema.NewCompiler()
+	compiler.Draft = jsonschema.Draft7
+
+	// 1. Assessment Results Schema
+	arSchema, err := compiler.Compile("testdata/schemas/oscal_assessment-results_schema.json")
+	if err != nil {
+		t.Fatalf("failed to compile Assessment Results schema: %v", err)
+	}
+
+	// 2. Component Definition Schema
+	cdSchema, err := compiler.Compile("testdata/schemas/oscal_component_schema.json")
+	if err != nil {
+		t.Fatalf("failed to compile Component Definition schema: %v", err)
+	}
+
+	// 3. System Security Plan Schema
+	sspSchema, err := compiler.Compile("testdata/schemas/oscal_ssp_schema.json")
+	if err != nil {
+		t.Fatalf("failed to compile SSP schema: %v", err)
+	}
+
+	// 4. Assessment Plan Schema
+	apSchema, err := compiler.Compile("testdata/schemas/oscal_assessment-plan_schema.json")
+	if err != nil {
+		t.Fatalf("failed to compile Assessment Plan schema: %v", err)
+	}
+
+	// 5. POAM Schema
+	poamSchema, err := compiler.Compile("testdata/schemas/oscal_poam_schema.json")
+	if err != nil {
+		t.Fatalf("failed to compile POAM schema: %v", err)
+	}
+
+	projector := NewProjector()
+	sub := assurance.SubjectRef{Scheme: "k8s", ID: "payments/payments-api/Deployment/payments-api"}
+	now := time.Now().UTC()
+	epoch := assurance.AssuranceEpoch{
+		SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
+		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload"),
+		PolicyDigest:         assurance.ComputeStringDigest("cel:policy:restricted-containers"),
+		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
+		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
+	}
+
+	eval := assurance.ClaimEvaluation{
+		ID:      "eval-01",
+		Control: assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
+		Subject: sub,
+		State:   assurance.AssuranceStateAssured,
+		Epoch:   epoch,
+		Evidence: []assurance.EvidenceRef{
+			{
+				URI:       "s3://evidence/payments/ev-01.json",
+				Digest:    assurance.ComputeStringDigest("payload-json-content-01"),
+				MediaType: "application/json",
+			},
+		},
+		Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 1},
+		EvidenceRoot: assurance.ComputeStringDigest("merkle-root-123"),
+		EvaluatedAt:  now,
+		ValidUntil:   now.Add(5 * time.Minute),
+	}
+
+	finding := assurance.Finding{
+		ID:          "find-01",
+		Subject:     sub,
+		Control:     assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
+		Severity:    "HIGH",
+		Title:       "Test finding",
+		Description: "Simulated vulnerability finding",
+	}
+
+	// Validate Assessment Results
+	arBytes, err := projector.ProjectAssessmentResults(context.Background(), sub, []assurance.ClaimEvaluation{eval}, []assurance.Finding{finding})
+	if err != nil {
+		t.Fatalf("failed to project AR: %v", err)
+	}
+	var arVal interface{}
+	if err := json.Unmarshal(arBytes, &arVal); err != nil {
+		t.Fatalf("failed to unmarshal AR JSON: %v", err)
+	}
+	if err := arSchema.Validate(arVal); err != nil {
+		t.Fatalf("Assessment Results failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(arBytes))
+	}
+
+	// Validate Component Definition
+	cdBytes, err := projector.ProjectComponentDefinition(context.Background(), "payments-api", []assurance.ClaimEvaluation{eval})
+	if err != nil {
+		t.Fatalf("failed to project Component Definition: %v", err)
+	}
+	var cdVal interface{}
+	if err := json.Unmarshal(cdBytes, &cdVal); err != nil {
+		t.Fatalf("failed to unmarshal CD JSON: %v", err)
+	}
+	if err := cdSchema.Validate(cdVal); err != nil {
+		t.Fatalf("Component Definition failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(cdBytes))
+	}
+
+	// Validate System Security Plan (SSP)
+	sspBytes, err := projector.ProjectSSP(context.Background(), "payments-system", []assurance.ClaimEvaluation{eval})
+	if err != nil {
+		t.Fatalf("failed to project SSP: %v", err)
+	}
+	var sspVal interface{}
+	if err := json.Unmarshal(sspBytes, &sspVal); err != nil {
+		t.Fatalf("failed to unmarshal SSP JSON: %v", err)
+	}
+	if err := sspSchema.Validate(sspVal); err != nil {
+		t.Fatalf("SSP failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(sspBytes))
+	}
+
+	// Validate Assessment Plan
+	contract := assurance.EvidenceContract{
+		ID: "contract-01",
+		Requirements: []assurance.EvidenceRequirement{
+			{ID: "req-1", EvidenceType: "admission", Required: true, MaxAge: 5 * time.Minute},
+		},
+	}
+	controls := []assurance.ControlRef{
+		{Namespace: "nist-sp-800-53", ID: "AC-6"},
+	}
+	apBytes, err := projector.ProjectAssessmentPlan(context.Background(), sub, contract, controls)
+	if err != nil {
+		t.Fatalf("failed to project Assessment Plan: %v", err)
+	}
+	var apVal interface{}
+	if err := json.Unmarshal(apBytes, &apVal); err != nil {
+		t.Fatalf("failed to unmarshal AP JSON: %v", err)
+	}
+	if err := apSchema.Validate(apVal); err != nil {
+		t.Fatalf("Assessment Plan failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(apBytes))
+	}
+
+	// Validate POAM (with findings and without findings)
+	poamWithFindings, err := projector.ProjectPOAM(context.Background(), sub, []assurance.Finding{finding})
+	if err != nil {
+		t.Fatalf("failed to project POAM: %v", err)
+	}
+	var poamVal1 interface{}
+	if err := json.Unmarshal(poamWithFindings, &poamVal1); err != nil {
+		t.Fatalf("failed to unmarshal POAM JSON: %v", err)
+	}
+	if err := poamSchema.Validate(poamVal1); err != nil {
+		t.Fatalf("POAM (with findings) failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(poamWithFindings))
+	}
+
+	poamWithoutFindings, err := projector.ProjectPOAM(context.Background(), sub, nil)
+	if err != nil {
+		t.Fatalf("failed to project empty POAM: %v", err)
+	}
+	var poamVal2 interface{}
+	if err := json.Unmarshal(poamWithoutFindings, &poamVal2); err != nil {
+		t.Fatalf("failed to unmarshal empty POAM JSON: %v", err)
+	}
+	if err := poamSchema.Validate(poamVal2); err != nil {
+		t.Fatalf("POAM (without findings) failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(poamWithoutFindings))
 	}
 }

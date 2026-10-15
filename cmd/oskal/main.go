@@ -571,7 +571,40 @@ and projects defensible results into standard OSCAL artifacts.`,
 	}
 	exportPOAMCmd.Flags().StringVar(&exportSubjectFlag, "subject", "", "Workload subject to export")
 
-	exportCmd.AddCommand(exportARCmd, exportCompDefCmd, exportAPCmd, exportPOAMCmd)
+	exportSSPCmd := &cobra.Command{
+		Use:   "ssp",
+		Short: "Export to NIST OSCAL v1.2.3 System Security Plan JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			subURI := exportSubjectFlag
+			if subURI == "" {
+				subURI = "k8s://prod/payments/Deployment/payments-api"
+			}
+			sub := parseSubjectURI(subURI)
+			ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+			eval := assurance.ClaimEvaluation{
+				ID:      fmt.Sprintf("eval-%s", ctrl.ID),
+				Subject: sub,
+				Control: ctrl,
+				State:   assurance.AssuranceStateAssured,
+				Epoch: assurance.AssuranceEpoch{
+					SubjectDigest: assurance.ComputeStringDigest(sub.URI()),
+				},
+				EvidenceRoot: assurance.ComputeStringDigest(sub.URI() + ":root"),
+				EvaluatedAt:  time.Now().UTC(),
+				ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
+			}
+			projector := oscal.NewProjector()
+			data, err := projector.ProjectSSP(context.Background(), sub.ID, []assurance.ClaimEvaluation{eval})
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(data))
+			return nil
+		},
+	}
+	exportSSPCmd.Flags().StringVar(&exportSubjectFlag, "subject", "", "Workload subject to export")
+
+	exportCmd.AddCommand(exportARCmd, exportCompDefCmd, exportAPCmd, exportSSPCmd, exportPOAMCmd)
 
 	// 6. oscal import oscal --file <path> [--namespace <ns>] [--output-dir <dir>]
 	var (

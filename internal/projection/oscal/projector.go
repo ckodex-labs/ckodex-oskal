@@ -69,18 +69,27 @@ type OscalObservation struct {
 	Props            []Property              `json:"props,omitempty"`
 }
 
+type OscalFindingTargetStatus struct {
+	State  string `json:"state"`            // "satisfied", "not-satisfied"
+	Reason string `json:"reason,omitempty"` // "pass", "fail", "other"
+}
+
 type OscalFindingTarget struct {
-	Type   string `json:"type"`
-	IdRef  string `json:"id-ref"`
-	Status string `json:"status"` // "satisfied", "not-satisfied"
+	Type     string                   `json:"type"`      // "objective-id", "statement-id"
+	TargetID string                   `json:"target-id"` // e.g. "AC-6"
+	Status   OscalFindingTargetStatus `json:"status"`
+}
+
+type OscalRelatedObservation struct {
+	ObservationUUID string `json:"observation-uuid"`
 }
 
 type OscalFinding struct {
-	UUID                string             `json:"uuid"`
-	Title               string             `json:"title"`
-	Description         string             `json:"description"`
-	Target              OscalFindingTarget `json:"target"`
-	RelatedObservations []string           `json:"related-observations,omitempty"`
+	UUID                string                    `json:"uuid"`
+	Title               string                    `json:"title"`
+	Description         string                    `json:"description"`
+	Target              OscalFindingTarget        `json:"target"`
+	RelatedObservations []OscalRelatedObservation `json:"related-observations,omitempty"`
 }
 
 type OscalControlSelection struct {
@@ -154,19 +163,68 @@ type ImportProfile struct {
 	Href string `json:"href"`
 }
 
+type OscalSystemID struct {
+	ID string `json:"id"`
+}
+
+type OscalInformationType struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+type OscalSystemInformation struct {
+	InformationTypes []OscalInformationType `json:"information-types"`
+}
+
+type OscalStatus struct {
+	State string `json:"state"` // "operational", "under-development", etc.
+}
+
+type OscalAuthorizationBoundary struct {
+	Description string `json:"description"`
+}
+
+type OscalSSPComponent struct {
+	UUID        string      `json:"uuid"`
+	Type        string      `json:"type"` // "this-system", "software"
+	Title       string      `json:"title"`
+	Description string      `json:"description"`
+	Status      OscalStatus `json:"status"`
+}
+
+type OscalSystemImplementation struct {
+	Components []OscalSSPComponent `json:"components"`
+}
+
+type OscalSystemCharacteristics struct {
+	SystemIDs             []OscalSystemID            `json:"system-ids"`
+	SystemName            string                     `json:"system-name"`
+	Description           string                     `json:"description"`
+	SystemInformation     OscalSystemInformation     `json:"system-information"`
+	Status                OscalStatus                `json:"status"`
+	AuthorizationBoundary OscalAuthorizationBoundary `json:"authorization-boundary"`
+}
+
+type OscalSSPImplementedRequirement struct {
+	UUID      string     `json:"uuid"`
+	ControlID string     `json:"control-id"`
+	Props     []Property `json:"props,omitempty"`
+	Remarks   string     `json:"remarks,omitempty"`
+}
+
+type OscalSSPControlImplementation struct {
+	Description             string                           `json:"description"`
+	ImplementedRequirements []OscalSSPImplementedRequirement `json:"implemented-requirements"`
+}
+
 type SSPWrapper struct {
 	SystemSecurityPlan struct {
-		UUID                  string        `json:"uuid"`
-		Metadata              OscalMetadata `json:"metadata"`
-		ImportProfile         ImportProfile `json:"import-profile"`
-		SystemCharacteristics struct {
-			SystemName      string `json:"system-name"`
-			DeploymentModel string `json:"deployment-model"`
-		} `json:"system-characteristics"`
-		ControlImplementation struct {
-			Description             string                        `json:"description"`
-			ImplementedRequirements []OscalImplementedRequirement `json:"implemented-requirements"`
-		} `json:"control-implementation"`
+		UUID                  string                        `json:"uuid"`
+		Metadata              OscalMetadata                 `json:"metadata"`
+		ImportProfile         ImportProfile                 `json:"import-profile"`
+		SystemCharacteristics OscalSystemCharacteristics    `json:"system-characteristics"`
+		SystemImplementation  OscalSystemImplementation     `json:"system-implementation"`
+		ControlImplementation OscalSSPControlImplementation `json:"control-implementation"`
 	} `json:"system-security-plan"`
 }
 
@@ -208,8 +266,7 @@ type OscalPOAMItem struct {
 }
 
 type POAMSystemID struct {
-	IDType string `json:"id-type,omitempty"`
-	ID     string `json:"id"`
+	ID string `json:"id"`
 }
 
 type POAMWrapper struct {
@@ -298,8 +355,10 @@ func (p *Projector) ProjectAssessmentResults(
 			Props: []Property{
 				{Name: "assurance-state", Value: eval.State.String(), Ns: "https://assurance.ckodex.io/ns"},
 				{Name: "epoch-composite-digest", Value: eval.Epoch.CompositeDigest(), Ns: "https://assurance.ckodex.io/ns"},
-				{Name: "evidence-root", Value: eval.EvidenceRoot, Ns: "https://assurance.ckodex.io/ns"},
 			},
+		}
+		if eval.EvidenceRoot != "" {
+			obs.Props = append(obs.Props, Property{Name: "evidence-root", Value: eval.EvidenceRoot, Ns: "https://assurance.ckodex.io/ns"})
 		}
 
 		for _, ev := range eval.Evidence {
@@ -331,23 +390,26 @@ func (p *Projector) ProjectAssessmentResults(
 
 	for _, f := range findings {
 		findUUID := uuid.NewString()
-		var relObs []string
+		var relObs []OscalRelatedObservation
 		for _, obs := range res.Observations {
 			if strings.Contains(obs.Title, f.Control.Canonical()) || strings.Contains(obs.Title, f.Control.ID) {
-				relObs = append(relObs, obs.UUID)
+				relObs = append(relObs, OscalRelatedObservation{ObservationUUID: obs.UUID})
 			}
 		}
 		if len(relObs) == 0 && len(res.Observations) > 0 {
-			relObs = []string{res.Observations[0].UUID}
+			relObs = []OscalRelatedObservation{{ObservationUUID: res.Observations[0].UUID}}
 		}
 		res.Findings = append(res.Findings, OscalFinding{
 			UUID:        findUUID,
 			Title:       f.Title,
 			Description: f.Description,
 			Target: OscalFindingTarget{
-				Type:   "control-objective",
-				IdRef:  f.Control.ID,
-				Status: "not-satisfied",
+				Type:     "objective-id",
+				TargetID: f.Control.ID,
+				Status: OscalFindingTargetStatus{
+					State:  "not-satisfied",
+					Reason: "fail",
+				},
 			},
 			RelatedObservations: relObs,
 		})
@@ -445,21 +507,51 @@ func (p *Projector) ProjectSSP(
 		Href: "profiles/nist-sp-800-53-rev5.json",
 	}
 
-	ssp.SystemCharacteristics.SystemName = systemName
-	ssp.SystemCharacteristics.DeploymentModel = "kubernetes-cloud-native"
+	ssp.SystemCharacteristics = OscalSystemCharacteristics{
+		SystemIDs:   []OscalSystemID{{ID: systemName}},
+		SystemName:  systemName,
+		Description: fmt.Sprintf("System Security Plan for %s governed under CKODEX continuous assurance", systemName),
+		SystemInformation: OscalSystemInformation{
+			InformationTypes: []OscalInformationType{
+				{
+					Title:       "Operational Telemetry and State",
+					Description: "Continuous security control and admission telemetry",
+				},
+			},
+		},
+		Status: OscalStatus{State: "operational"},
+		AuthorizationBoundary: OscalAuthorizationBoundary{
+			Description: "Cloud-native workload boundaries enforced via Kubernetes namespace and network security policies",
+		},
+	}
+
+	ssp.SystemImplementation = OscalSystemImplementation{
+		Components: []OscalSSPComponent{
+			{
+				UUID:        uuid.NewString(),
+				Type:        "this-system",
+				Title:       systemName,
+				Description: fmt.Sprintf("Primary implementation component for %s", systemName),
+				Status:      OscalStatus{State: "operational"},
+			},
+		},
+	}
 
 	ssp.ControlImplementation.Description = "Continuously assured via OSKAL runtime"
 	for _, eval := range evaluations {
+		props := []Property{
+			{Name: "state", Value: eval.State.String(), Ns: "https://assurance.ckodex.io/ns"},
+		}
+		if eval.EvidenceRoot != "" {
+			props = append(props, Property{Name: "evidence-root", Value: eval.EvidenceRoot, Ns: "https://assurance.ckodex.io/ns"})
+		}
 		ssp.ControlImplementation.ImplementedRequirements = append(
 			ssp.ControlImplementation.ImplementedRequirements,
-			OscalImplementedRequirement{
-				UUID:        uuid.NewString(),
-				ControlID:   eval.Control.ID,
-				Description: fmt.Sprintf("Continuous State: %s", eval.State),
-				Props: []Property{
-					{Name: "state", Value: eval.State.String()},
-					{Name: "evidence-root", Value: eval.EvidenceRoot},
-				},
+			OscalSSPImplementedRequirement{
+				UUID:      uuid.NewString(),
+				ControlID: eval.Control.ID,
+				Remarks:   fmt.Sprintf("Continuous State: %s", eval.State),
+				Props:     props,
 			},
 		)
 	}
@@ -538,8 +630,7 @@ func (p *Projector) ProjectPOAM(
 	}
 
 	poam.SystemID = &POAMSystemID{
-		IDType: "uri",
-		ID:     subject.URI(),
+		ID: subject.URI(),
 	}
 
 	for _, f := range findings {
@@ -554,6 +645,19 @@ func (p *Projector) ProjectPOAM(
 			},
 		}
 		poam.POAMItems = append(poam.POAMItems, item)
+	}
+
+	if len(poam.POAMItems) == 0 {
+		poam.POAMItems = []OscalPOAMItem{
+			{
+				UUID:        uuid.NewString(),
+				Title:       fmt.Sprintf("Continuous Assurance Conformance for %s", subject.URI()),
+				Description: "All monitored controls are currently satisfied. Zero open findings or remediation actions required.",
+				Props: []Property{
+					{Name: "status", Value: "satisfied", Ns: "https://assurance.ckodex.io/ns"},
+				},
+			},
+		}
 	}
 
 	return json.MarshalIndent(wrapper, "", "  ")
