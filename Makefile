@@ -1,18 +1,20 @@
 # ckodex-oskal Makefile
 # Pure ASCII build and test definitions
 
-.PHONY: all build test lint fmt clean e2e help
+.PHONY: all build test schema-test check-ascii lint fmt clean e2e help
 
 SHELL := /bin/bash
 BIN_DIR := bin
 GO := go
 
-all: fmt lint test build
+all: fmt check-ascii lint test build
 
 help:
 	@echo "Available targets:"
 	@echo "  build        Compile oskal CLI and oskal-controller binaries"
 	@echo "  test         Run all tests with race detector"
+	@echo "  schema-test  Run strict NIST OSCAL v1.2.3 JSON schema validation suite"
+	@echo "  check-ascii  Verify 100% pure ASCII across source and documentation"
 	@echo "  lint         Run golangci-lint across all packages"
 	@echo "  fmt          Format all Go source files"
 	@echo "  clean        Remove compiled binaries and test artifacts"
@@ -25,6 +27,12 @@ build:
 
 test:
 	$(GO) test -count=1 -race ./...
+
+schema-test:
+	$(GO) test -v ./internal/projection/oscal -run TestStrictNISTOscalV123SchemaConformance
+
+check-ascii:
+	./scripts/check_ascii.py
 
 lint:
 	golangci-lint run ./...

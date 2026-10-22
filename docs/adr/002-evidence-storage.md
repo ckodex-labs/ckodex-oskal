@@ -21,28 +21,28 @@ We mandate that **no raw evidence payloads or detailed observation traces shall 
 Instead, OSKAL implements a multi-tier storage architecture separated by responsibility:
 
 ```text
-┌───────────────────────────────┐
-│        Kubernetes etcd        │ ◄── Current summary state only
-│    (AssuranceState Status)    │     (State enum, epoch, evidenceRoot, conditions)
-└───────────────┬───────────────┘
-                │
-                ▼
-┌───────────────────────────────┐
-│       Evidence Envelope       │ ◄── Standardized metadata envelope
-│     (EvidenceRef Pointer)     │     (ID, subject, digest, URI, mediaType, signature)
-└───────────────┬───────────────┘
-                │
-                ▼
-┌───────────────────────────────┐
-│     Content-Addressed CAS     │ ◄── Immutable evidence artifacts & raw payloads
-│    (S3 / RustFS / OCI / MinIO)│     (Cryptographic verification via digest)
-└───────────────┬───────────────┘
-                │
-                ▼
-┌───────────────────────────────┐
-│  Analytical / Telemetry Store │ ◄── High-volume temporal observations
-│   (ClickHouse / LanceDB)      │     (For continuous correlation and time-series audit)
-└───────────────────────────────┘
++-------------------------------+
+|        Kubernetes etcd        | <--- Current summary state only
+|    (AssuranceState Status)    |     (State enum, epoch, evidenceRoot, conditions)
++---------------+---------------+
+                |
+                v
++-------------------------------+
+|       Evidence Envelope       | <--- Standardized metadata envelope
+|     (EvidenceRef Pointer)     |     (ID, subject, digest, URI, mediaType, signature)
++---------------+---------------+
+                |
+                v
++-------------------------------+
+|     Content-Addressed CAS     | <--- Immutable evidence artifacts & raw payloads
+|    (S3 / RustFS / OCI / MinIO)|     (Cryptographic verification via digest)
++---------------+---------------+
+                |
+                v
++-------------------------------+
+|  Analytical / Telemetry Store | <--- High-volume temporal observations
+|   (ClickHouse / LanceDB)      |     (For continuous correlation and time-series audit)
++-------------------------------+
 ```
 
 ### Core Invariants:

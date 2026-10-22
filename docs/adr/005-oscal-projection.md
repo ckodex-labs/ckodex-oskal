@@ -25,14 +25,14 @@ We establish the principle: **OSCAL Projection Rather Than OSCAL Inheritance**.
 ```text
 CKODEX Assurance Core Graph
 (Claims, Observations, Evidences, Epochs, Vector State)
-                   │
-                   ▼ Projection Layer
-        ┌─────────────────────┐
-        │  XOSCAL Projector   │
-        └──────────┬──────────┘
-                   │
-    ┌──────────────┼──────────────┐
-    ▼              ▼              ▼
+                   |
+                   v Projection Layer
+        +---------------------+
+        |  XOSCAL Projector   |
+        +----------+----------+
+                   |
+    +--------------+--------------+
+    v              v              v
 Component     Assessment         SSP
 Definition     Results       (Snapshot)
   (OSCAL)       (OSCAL)        (OSCAL)

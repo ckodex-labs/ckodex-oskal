@@ -4,10 +4,10 @@
 
 The following table lists the security support status for versions of `ckodex-oskal`:
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.2.x   | :white_check_mark: |
-| < 0.2.0 | :x:                |
+| Version | Supported |
+| ------- | --------- |
+| 0.2.x   | Yes       |
+| < 0.2.0 | No        |
 
 ## Reporting a Vulnerability
 

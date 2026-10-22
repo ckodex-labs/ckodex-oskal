@@ -1,5 +1,5 @@
 # CKX-OSKAL-001
-## OSKAL — Kubernetes Continuous Assurance Architecture
+## OSKAL -- Kubernetes Continuous Assurance Architecture
 
 **Status:** Implementation Candidate  
 **Classification:** CKODEX Architecture / Assurance Runtime  
@@ -8,7 +8,7 @@
 - `ckodex-labs/ckodex-xoscal`
 - `ckodex-labs/ckodex-oscal-cli`
 
-**New capability:** OSKAL — Kubernetes Continuous Assurance Runtime  
+**New capability:** OSKAL -- Kubernetes Continuous Assurance Runtime  
 **Canonical principle:** OSCAL interoperability above; assurance semantics in the center; Kubernetes realization below.
 
 ---
@@ -33,17 +33,17 @@ The core dependency rule is:
 
 ```text
 Kubernetes
-    │
-    ▼
+    |
+    v
 OSKAL adapters
-    │
-    ▼
+    |
+    v
 CKODEX Assurance Core
-    │
-    ▼
+    |
+    v
 XOSCAL projection
-    │
-    ▼
+    |
+    v
 OSCAL
 ```
 
@@ -70,19 +70,19 @@ What OSCAL intentionally does **not** provide is a Kubernetes runtime that conti
 
 ```text
 requirement
-  ↓
+  v
 control objective
-  ↓
+  v
 implementation
-  ↓
+  v
 subject
-  ↓
+  v
 observation
-  ↓
+  v
 evidence
-  ↓
+  v
 claim evaluation
-  ↓
+  v
 assurance state
 ```
 
@@ -129,16 +129,16 @@ These MUST NOT be conflated.
 
 The implementation MUST enforce these invariants.
 
-- **I-01 — Mapping does not establish compliance:** `Control A maps to Control B` does not mean `Control A is implemented`.
-- **I-02 — Absence of evidence is UNKNOWN:** Never `no finding → PASS`. Instead: `insufficient evidence → UNKNOWN`.
-- **I-03 — Evidence is contextual:** Evidence is valid only relative to `subject + implementation + policy revision + authority + epoch + time`.
-- **I-04 — Every assurance claim is explainable:** Every claim MUST be reverse-traceable through `AssuranceState → ClaimEvaluation → EvidenceContract → Evidence → Observation → EvidenceProducer → Subject`.
-- **I-05 — Exceptions are bounded:** Every exception requires subject scope, control scope, justification, approving authority, issue time, expiration, compensating controls where required, evidence, auditability. Permanent `ignore=true` semantics are forbidden.
-- **I-06 — OSCAL export is derived:** Every exported OSCAL assertion MUST be derivable from the assurance graph. OSCAL MUST NOT become a parallel source of runtime truth.
-- **I-07 — Assurance is temporal:** A valid control evaluation can become stale (`ASSURED → STALE`).
-- **I-08 — Enforcement and assessment are separate:** A control can be preventive, detective, corrective, compensating, or informational. Assessment MUST NOT assume that every control is enforceable.
-- **I-09 — Runtime truth outranks declared intent:** Where declared configuration and observed runtime state disagree, the discrepancy becomes evidence and potentially a finding.
-- **I-10 — Authority is explicit:** Every privileged assertion SHOULD identify who or what was authorized to produce it. Prefer workload identities such as SPIFFE IDs.
+- **I-01 -- Mapping does not establish compliance:** `Control A maps to Control B` does not mean `Control A is implemented`.
+- **I-02 -- Absence of evidence is UNKNOWN:** Never `no finding -> PASS`. Instead: `insufficient evidence -> UNKNOWN`.
+- **I-03 -- Evidence is contextual:** Evidence is valid only relative to `subject + implementation + policy revision + authority + epoch + time`.
+- **I-04 -- Every assurance claim is explainable:** Every claim MUST be reverse-traceable through `AssuranceState -> ClaimEvaluation -> EvidenceContract -> Evidence -> Observation -> EvidenceProducer -> Subject`.
+- **I-05 -- Exceptions are bounded:** Every exception requires subject scope, control scope, justification, approving authority, issue time, expiration, compensating controls where required, evidence, auditability. Permanent `ignore=true` semantics are forbidden.
+- **I-06 -- OSCAL export is derived:** Every exported OSCAL assertion MUST be derivable from the assurance graph. OSCAL MUST NOT become a parallel source of runtime truth.
+- **I-07 -- Assurance is temporal:** A valid control evaluation can become stale (`ASSURED -> STALE`).
+- **I-08 -- Enforcement and assessment are separate:** A control can be preventive, detective, corrective, compensating, or informational. Assessment MUST NOT assume that every control is enforceable.
+- **I-09 -- Runtime truth outranks declared intent:** Where declared configuration and observed runtime state disagree, the discrepancy becomes evidence and potentially a finding.
+- **I-10 -- Authority is explicit:** Every privileged assertion SHOULD identify who or what was authorized to produce it. Prefer workload identities such as SPIFFE IDs.
 
 ---
 
@@ -155,58 +155,58 @@ There SHALL be three conceptual bounded contexts:
 # 5. Target Architecture
 
 ```text
-                 ┌──────────────────────────────┐
-                 │    Regulations / Standards   │
-                 │ NIST • ISO • CIS • CMMC ... │
-                 └──────────────┬───────────────┘
-                                │
-                                ▼
-                       ┌─────────────────┐
-                       │      OSCAL      │
-                       └────────┬────────┘
-                                │
+                 +------------------------------+
+                 |    Regulations / Standards   |
+                 | NIST * ISO * CIS * CMMC ... |
+                 +--------------+---------------+
+                                |
+                                v
+                       +-----------------+
+                       |      OSCAL      |
+                       +--------+--------+
+                                |
                          interoperability
-                                │
-                                ▼
-╔══════════════════════════════════════════════════════════════╗
-║                         XOSCAL                               ║
-║                                                             ║
-║ Catalog • Profile • Mapping • Component Definition          ║
-║ SSP • Assessment Plan • Assessment Results • POA&M          ║
-║ Proto • gRPC • validation • import/export                   ║
-╚═══════════════════════════╤══════════════════════════════════╝
-                            │
+                                |
+                                v
++==============================================================+
+|                         XOSCAL                               |
+|                                                             |
+| Catalog * Profile * Mapping * Component Definition          |
+| SSP * Assessment Plan * Assessment Results * POA&M          |
+| Proto * gRPC * validation * import/export                   |
++===========================+==================================+
+                            |
                           projection
-                            │
-                            ▼
-╔══════════════════════════════════════════════════════════════╗
-║                 CKODEX ASSURANCE CORE                        ║
-║                                                             ║
-║ Control                                                     ║
-║   ↓                                                         ║
-║ AtomicControl                                               ║
-║   ↓                                                         ║
-║ ImplementationBinding                                       ║
-║   ↓                                                         ║
-║ EvidenceContract                                            ║
-║   ↓                                                         ║
-║ Observation → Evidence → ClaimEvaluation                    ║
-║                         ↓                                   ║
-║               AssuranceState / Finding                      ║
-║                         ↓                                   ║
-║                       Receipt                               ║
-╚═══════════════════════════╤══════════════════════════════════╝
-                            ▲
-                            │
+                            |
+                            v
++==============================================================+
+|                 CKODEX ASSURANCE CORE                        |
+|                                                             |
+| Control                                                     |
+|   v                                                         |
+| AtomicControl                                               |
+|   v                                                         |
+| ImplementationBinding                                       |
+|   v                                                         |
+| EvidenceContract                                            |
+|   v                                                         |
+| Observation -> Evidence -> ClaimEvaluation                    |
+|                         v                                   |
+|               AssuranceState / Finding                      |
+|                         v                                   |
+|                       Receipt                               |
++===========================+==================================+
+                            ^
+                            |
                           adapters
-                            │
-╔═══════════════════════════╧══════════════════════════════════╗
-║                          OSKAL                               ║
-║                                                             ║
-║ Kubernetes API                                              ║
-║ CEL • admission • Cilium • Tetragon • Falco                ║
-║ Sigstore • SPIRE • scanners • OpenReports                  ║
-╚══════════════════════════════════════════════════════════════╝
+                            |
++===========================+==================================+
+|                          OSKAL                               |
+|                                                             |
+| Kubernetes API                                              |
+| CEL * admission * Cilium * Tetragon * Falco                |
+| Sigstore * SPIRE * scanners * OpenReports                  |
++==============================================================+
 ```
 
 ---
@@ -215,19 +215,19 @@ There SHALL be three conceptual bounded contexts:
 
 ```text
                   evidence
-UNKNOWN ─────────────────────────► OBSERVED
+UNKNOWN --------------------------> OBSERVED
 
-OBSERVED ───── verification ─────► VERIFIED
+OBSERVED ----- verification ------> VERIFIED
 
-VERIFIED ─ policy + authority ───► ASSURED
+VERIFIED - policy + authority ----> ASSURED
 
-ASSURED ─ epoch change ──────────► STALE
+ASSURED - epoch change -----------> STALE
 
-STALE ─ re-evaluation ───────────► OBSERVED
+STALE - re-evaluation ------------> OBSERVED
 
-ANY ─ confirmed violation ───────► FAILED
+ANY - confirmed violation --------> FAILED
 
-ANY ─ evidence invalid ──────────► UNKNOWN
+ANY - evidence invalid -----------> UNKNOWN
 ```
 
 - `FAILED != UNKNOWN`: `FAILED` means sufficient evidence supports nonconformance. `UNKNOWN` means sufficient evidence for a defensible determination is unavailable.

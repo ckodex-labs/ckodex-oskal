@@ -20,17 +20,17 @@ We establish three strictly decoupled bounded contexts with unidirectional depen
 
 ```text
 Kubernetes Runtime / Substrate
-      │
-      ▼
+      |
+      v
 OSKAL Adapters & Controllers
-      │
-      ▼
+      |
+      v
 CKODEX Assurance Core (Pure Domain Semantics)
-      │
-      ▼
+      |
+      v
 XOSCAL Projection (Standards Mapping & Serialization)
-      │
-      ▼
+      |
+      v
 OSCAL v1.2.3 Specification Artifacts
 ```
 

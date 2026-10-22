@@ -22,39 +22,39 @@ At the same time, Kubernetes operators need native declarative mechanisms to exp
 We cap the initial OSKAL Kubernetes CRD surface at exactly **five declarative resources**:
 
 ```text
-┌────────────────────────────────────────────────────────┐
-│                   1. ControlBinding                    │
-│  Binds canonical controls & mappings to k8s subjects   │
-│  and implementation providers                          │
-└───────────────────────────┬────────────────────────────┘
-                            │ references
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│                  2. EvidenceContract                   │
-│  Defines required evidence types, freshness (maxAge),  │
-│  and accepted authorized producers                     │
-└───────────────────────────┬────────────────────────────┘
-                            │ evaluated by
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│                  3. AssurancePolicy                    │
-│  Defines evaluation semantics, required assurance      │
-│  states, violation thresholds, and admission gating    │
-└───────────────────────────┬────────────────────────────┘
-                            │ checked for
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│                  4. ControlException                   │
-│  Time-bounded, authorized risk acceptance & exceptions │
-│  with mandatory compensating controls                  │
-└───────────────────────────┬────────────────────────────┘
-                            │ yields
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│                  5. AssuranceState                     │
-│  Projected operator status summary (state enum, epoch, │
-│  evidenceRoot, conditions, control breakdown)          │
-└────────────────────────────────────────────────────────┘
++--------------------------------------------------------+
+|                   1. ControlBinding                    |
+|  Binds canonical controls & mappings to k8s subjects   |
+|  and implementation providers                          |
++---------------------------+----------------------------+
+                            | references
+                            v
++--------------------------------------------------------+
+|                  2. EvidenceContract                   |
+|  Defines required evidence types, freshness (maxAge),  |
+|  and accepted authorized producers                     |
++---------------------------+----------------------------+
+                            | evaluated by
+                            v
++--------------------------------------------------------+
+|                  3. AssurancePolicy                    |
+|  Defines evaluation semantics, required assurance      |
+|  states, violation thresholds, and admission gating    |
++---------------------------+----------------------------+
+                            | checked for
+                            v
++--------------------------------------------------------+
+|                  4. ControlException                   |
+|  Time-bounded, authorized risk acceptance & exceptions |
+|  with mandatory compensating controls                  |
++---------------------------+----------------------------+
+                            | yields
+                            v
++--------------------------------------------------------+
+|                  5. AssuranceState                     |
+|  Projected operator status summary (state enum, epoch, |
+|  evidenceRoot, conditions, control breakdown)          |
++--------------------------------------------------------+
 ```
 
 ### Detailed Resource Responsibilities:

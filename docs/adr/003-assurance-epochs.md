@@ -51,19 +51,19 @@ Assurance is modeled as an 7-state finite state machine:
 
 ```text
                   evidence ingested
-UNKNOWN ─────────────────────────────────────────► OBSERVED
+UNKNOWN ------------------------------------------> OBSERVED
 
-OBSERVED ───────── verification passed ──────────► VERIFIED
+OBSERVED --------- verification passed -----------> VERIFIED
 
-VERIFIED ───────── policy + authority valid ─────► ASSURED
+VERIFIED --------- policy + authority valid ------> ASSURED
 
-ASSURED ────────── epoch mismatch / timeout ─────► STALE
+ASSURED ---------- epoch mismatch / timeout ------> STALE
 
-STALE ──────────── re-evaluation ────────────────► OBSERVED
+STALE ------------ re-evaluation -----------------> OBSERVED
 
-ANY STATE ──────── confirmed violation ──────────► FAILED
+ANY STATE -------- confirmed violation -----------> FAILED
 
-ANY STATE ──────── evidence invalid/corrupted ───► UNKNOWN
+ANY STATE -------- evidence invalid/corrupted ----> UNKNOWN
 ```
 
 #### State Definitions:
@@ -77,11 +77,11 @@ ANY STATE ──────── evidence invalid/corrupted ───► UNKNO
 ### 2.3 Semantic Drift Detection
 
 Semantic drift occurs when the running reality diverges from the epoch under which assurance was granted:
-- **Resource Drift:** Kubernetes Deployment generation incremented or image digest changed → SubjectDigest changes → Transition to `STALE`.
-- **Policy Drift:** Admin updates admission policy or EvidenceContract freshness → PolicyDigest changes → Transition to `STALE`.
-- **Implementation Drift:** Tetragon tracing policy or Cilium rule modified → ImplementationDigest changes → Transition to `STALE`.
-- **Authority Drift:** SPIFFE CA rotated or Cosign key updated → AuthorityDigest changes → Transition to `STALE`.
-- **Temporal Drift:** `now() > validUntil` → Transition to `STALE`.
+- **Resource Drift:** Kubernetes Deployment generation incremented or image digest changed -> SubjectDigest changes -> Transition to `STALE`.
+- **Policy Drift:** Admin updates admission policy or EvidenceContract freshness -> PolicyDigest changes -> Transition to `STALE`.
+- **Implementation Drift:** Tetragon tracing policy or Cilium rule modified -> ImplementationDigest changes -> Transition to `STALE`.
+- **Authority Drift:** SPIFFE CA rotated or Cosign key updated -> AuthorityDigest changes -> Transition to `STALE`.
+- **Temporal Drift:** `now() > validUntil` -> Transition to `STALE`.
 
 Drift invalidates existing claims immediately and triggers deterministic re-evaluation.
 
