@@ -70,7 +70,7 @@ func (m *Oskal) Scan(ctx context.Context, source *dagger.Directory) (*dagger.Fil
 		From(syftImage).
 		WithMountedDirectory("/src", source).
 		WithWorkdir("/src").
-		WithExec([]string{"syft", "dir:.", "-o", "cyclonedx-json=/tmp/sbom.cdx.json"})
+		WithExec([]string{"/syft", "dir:.", "--exclude", "./dagger", "-o", "cyclonedx-json=/tmp/sbom.cdx.json"})
 
 	return sbomContainer.File("/tmp/sbom.cdx.json"), nil
 }
@@ -85,7 +85,7 @@ func (m *Oskal) VulnCheck(ctx context.Context, source *dagger.Directory) (*dagge
 	return dag.Container().
 		From(grypeImage).
 		WithFile("/tmp/sbom.cdx.json", sbom).
-		WithExec([]string{"grype", "sbom:/tmp/sbom.cdx.json", "--fail-on", "critical"}), nil
+		WithExec([]string{"/grype", "sbom:/tmp/sbom.cdx.json", "--fail-on", "critical"}), nil
 }
 
 // Build compiles both static binaries: oskal CLI and oskal-controller.
@@ -114,8 +114,11 @@ func (m *Oskal) Attest(ctx context.Context, source *dagger.Directory) (*dagger.D
 		return nil, err
 	}
 
+	cosignBin := dag.Container().From(cosignImage).File("/ko-app/cosign")
+
 	attestContainer := dag.Container().
-		From(cosignImage).
+		From("alpine:3.20").
+		WithFile("/usr/local/bin/cosign", cosignBin, dagger.ContainerWithFileOpts{Permissions: 0755}).
 		WithMountedDirectory("/out/bin", binDir).
 		WithWorkdir("/out/attestations").
 		WithEnvVariable("COSIGN_PASSWORD", "").
@@ -126,33 +129,15 @@ CTRL_HASH=$(sha256sum /out/bin/oskal-controller | awk '{print $1}')
 
 cat <<EOF > /out/attestations/provenance.json
 {
-  "_type": "https://in-toto.io/Statement/v1",
-  "subject": [
-    {
-      "name": "oskal",
-      "digest": {
-        "sha256": "${OSKAL_HASH}"
-      }
-    },
-    {
-      "name": "oskal-controller",
-      "digest": {
-        "sha256": "${CTRL_HASH}"
-      }
+  "buildDefinition": {
+    "buildType": "https://dagger.io/module/ckodex/oskal@v1",
+    "externalParameters": {
+      "repository": "https://github.com/ckodex-labs/ckodex-oskal"
     }
-  ],
-  "predicateType": "https://slsa.dev/provenance/v1",
-  "predicate": {
-    "buildDefinition": {
-      "buildType": "https://dagger.io/module/ckodex/oskal@v1",
-      "externalParameters": {
-        "repository": "https://github.com/ckodex-labs/ckodex-oskal"
-      }
-    },
-    "runDetails": {
-      "builder": {
-        "id": "https://dagger.io/engine"
-      }
+  },
+  "runDetails": {
+    "builder": {
+      "id": "https://dagger.io/engine"
     }
   }
 }
