@@ -25,7 +25,7 @@ Every contribution MUST adhere to the following non-negotiable principles:
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.27+
 - `golangci-lint`
 - Docker or Podman
 - (Optional) `kind` for local Kubernetes testbed

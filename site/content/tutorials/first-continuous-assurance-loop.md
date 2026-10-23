@@ -19,7 +19,7 @@ In this tutorial, you will construct a complete, verifiable continuous assurance
 
 ## Prerequisites
 
-- Go 1.24+ installed locally.
+- Go 1.27+ installed locally.
 - OSKAL CLI compiled (`go build -o ./bin/oskal ./cmd/oskal`).
 - A working terminal shell (bash or zsh).
 
