@@ -1,91 +1,102 @@
 <nav id="site-nav" class="ck-shell__nav" role="navigation" aria-label="Documentation Navigation">
-  <div class="ck-nav-scroll-wrap" style="padding: var(--ck-sp-4) var(--ck-sp-3); width: 100%;">
+  <div class="ck-nav-scroll-wrap">
     <!-- Diataxis Sections -->
-    <div style="margin-bottom: var(--ck-sp-4); padding-bottom: var(--ck-sp-2); border-bottom: 1px solid var(--ck-hairline);">
-      <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-fg-mute); margin-bottom: var(--ck-sp-2); letter-spacing: 0.08em;">
+    <div class="ck-nav-group">
+      <div class="ck-nav-section-label">
         DIATAXIS FRAMEWORK
       </div>
       
       <!-- 1. Tutorials -->
       <div style="margin-bottom: var(--ck-sp-3);">
-        <a href="{{ "tutorials/" | relURL }}" class="ck-nav-heading" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 4px 6px;">
+        {{ $tutURL := "tutorials/" | relURL }}
+        <a href="{{ $tutURL }}" class="ck-nav-heading{{ if eq $.RelPermalink $tutURL }} is-active{{ end }}">
           1. TUTORIALS
         </a>
-        <ul class="ck-nav-sublist" style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
-          <li><a href="{{ "tutorials/first-continuous-assurance-loop/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">First Assurance Loop</a></li>
-          <li><a href="{{ "tutorials/inprocess-sdk-integration/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">In-Process SDK Setup</a></li>
+        <ul class="ck-nav-sublist">
+          {{ $l1 := "tutorials/first-continuous-assurance-loop/" | relURL }}
+          <li><a href="{{ $l1 }}" class="ck-nav-link{{ if eq $.RelPermalink $l1 }} is-active{{ end }}">First Assurance Loop</a></li>
+          {{ $l2 := "tutorials/inprocess-sdk-integration/" | relURL }}
+          <li><a href="{{ $l2 }}" class="ck-nav-link{{ if eq $.RelPermalink $l2 }} is-active{{ end }}">In-Process SDK Setup</a></li>
         </ul>
       </div>
 
       <!-- 2. How-To -->
       <div style="margin-bottom: var(--ck-sp-3);">
-        <a href="{{ "how-to/" | relURL }}" class="ck-nav-heading" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 4px 6px;">
+        {{ $howURL := "how-to/" | relURL }}
+        <a href="{{ $howURL }}" class="ck-nav-heading{{ if eq $.RelPermalink $howURL }} is-active{{ end }}">
           2. HOW-TO GUIDES
         </a>
-        <ul class="ck-nav-sublist" style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
-          <li><a href="{{ "how-to/bind-controls-to-cel/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Bind Controls to CEL</a></li>
-          <li><a href="{{ "how-to/configure-spiffe-authority/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">SPIFFE/SPIRE Authority</a></li>
-          <li><a href="{{ "how-to/verify-sigstore-provenance/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Sigstore &amp; AI-BOMs</a></li>
-          <li><a href="{{ "how-to/export-oscal-artifacts/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Export NIST OSCAL 1.2.3</a></li>
-          <li><a href="{{ "how-to/drift-detection-epoch-recovery/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Epoch Drift Recovery</a></li>
-          <li><a href="{{ "how-to/run-dagger-ssdlc-pipeline/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Dagger SSDLC Pipeline</a></li>
+        <ul class="ck-nav-sublist">
+          {{ $h1 := "how-to/bind-controls-to-cel/" | relURL }}
+          <li><a href="{{ $h1 }}" class="ck-nav-link{{ if eq $.RelPermalink $h1 }} is-active{{ end }}">Bind Controls to CEL</a></li>
+          {{ $h2 := "how-to/configure-spiffe-authority/" | relURL }}
+          <li><a href="{{ $h2 }}" class="ck-nav-link{{ if eq $.RelPermalink $h2 }} is-active{{ end }}">SPIFFE/SPIRE Authority</a></li>
+          {{ $h3 := "how-to/verify-sigstore-provenance/" | relURL }}
+          <li><a href="{{ $h3 }}" class="ck-nav-link{{ if eq $.RelPermalink $h3 }} is-active{{ end }}">Sigstore &amp; AI-BOMs</a></li>
+          {{ $h4 := "how-to/export-oscal-artifacts/" | relURL }}
+          <li><a href="{{ $h4 }}" class="ck-nav-link{{ if eq $.RelPermalink $h4 }} is-active{{ end }}">Export NIST OSCAL 1.2.3</a></li>
+          {{ $h5 := "how-to/drift-detection-epoch-recovery/" | relURL }}
+          <li><a href="{{ $h5 }}" class="ck-nav-link{{ if eq $.RelPermalink $h5 }} is-active{{ end }}">Epoch Drift Recovery</a></li>
+          {{ $h6 := "how-to/run-dagger-ssdlc-pipeline/" | relURL }}
+          <li><a href="{{ $h6 }}" class="ck-nav-link{{ if eq $.RelPermalink $h6 }} is-active{{ end }}">Dagger SSDLC Pipeline</a></li>
         </ul>
       </div>
 
       <!-- 3. Reference -->
       <div style="margin-bottom: var(--ck-sp-3);">
-        <a href="{{ "reference/" | relURL }}" class="ck-nav-heading" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 4px 6px;">
+        {{ $refURL := "reference/" | relURL }}
+        <a href="{{ $refURL }}" class="ck-nav-heading{{ if eq $.RelPermalink $refURL }} is-active{{ end }}">
           3. REFERENCE
         </a>
-        <ul class="ck-nav-sublist" style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
-          <li><a href="{{ "reference/cli/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">OSKAL CLI Suite</a></li>
-          <li><a href="{{ "reference/crds/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Kubernetes CRDs (5)</a></li>
-          <li><a href="{{ "reference/go-sdk/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Go SDK (`pkg/oskal`)</a></li>
-          <li><a href="{{ "reference/receipt-merkle-spec/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Receipts &amp; Merkle Root</a></li>
-          <li><a href="{{ "reference/protobuf-services/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">gRPC AssuranceService</a></li>
+        <ul class="ck-nav-sublist">
+          {{ $r1 := "reference/cli/" | relURL }}
+          <li><a href="{{ $r1 }}" class="ck-nav-link{{ if eq $.RelPermalink $r1 }} is-active{{ end }}">OSKAL CLI Suite</a></li>
+          {{ $r2 := "reference/crds/" | relURL }}
+          <li><a href="{{ $r2 }}" class="ck-nav-link{{ if eq $.RelPermalink $r2 }} is-active{{ end }}">Kubernetes CRDs (5)</a></li>
+          {{ $r3 := "reference/go-sdk/" | relURL }}
+          <li><a href="{{ $r3 }}" class="ck-nav-link{{ if eq $.RelPermalink $r3 }} is-active{{ end }}">Go SDK (<code style="font-family: var(--ck-ff-mono); font-size: 11px;">pkg/oskal</code>)</a></li>
+          {{ $r4 := "reference/receipt-merkle-spec/" | relURL }}
+          <li><a href="{{ $r4 }}" class="ck-nav-link{{ if eq $.RelPermalink $r4 }} is-active{{ end }}">Receipts &amp; Merkle Root</a></li>
+          {{ $r5 := "reference/protobuf-services/" | relURL }}
+          <li><a href="{{ $r5 }}" class="ck-nav-link{{ if eq $.RelPermalink $r5 }} is-active{{ end }}">gRPC AssuranceService</a></li>
         </ul>
       </div>
 
       <!-- 4. Explanation -->
       <div style="margin-bottom: var(--ck-sp-3);">
-        <a href="{{ "explanation/" | relURL }}" class="ck-nav-heading" style="display: block; font-family: var(--ck-ff-sans); font-size: 13px; font-weight: 600; text-decoration: none; color: var(--ck-fg-0); padding: 4px 6px;">
+        {{ $expURL := "explanation/" | relURL }}
+        <a href="{{ $expURL }}" class="ck-nav-heading{{ if eq $.RelPermalink $expURL }} is-active{{ end }}">
           4. EXPLANATION
         </a>
-        <ul class="ck-nav-sublist" style="list-style: none; padding-left: var(--ck-sp-3); margin: var(--ck-sp-1) 0;">
-          <li><a href="{{ "explanation/canonical-triad/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">The Canonical Triad</a></li>
-          <li><a href="{{ "explanation/vector-state-vs-booleans/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Vector State S(e,t)</a></li>
-          <li><a href="{{ "explanation/constitutional-invariants/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Invariants I-01 to I-10</a></li>
-          <li><a href="{{ "explanation/airgap-and-defense-in-depth/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-mute); display: block; padding: 4px 0;">Air-Gap Architecture</a></li>
+        <ul class="ck-nav-sublist">
+          {{ $e1 := "explanation/canonical-triad/" | relURL }}
+          <li><a href="{{ $e1 }}" class="ck-nav-link{{ if eq $.RelPermalink $e1 }} is-active{{ end }}">The Canonical Triad</a></li>
+          {{ $e2 := "explanation/vector-state-vs-booleans/" | relURL }}
+          <li><a href="{{ $e2 }}" class="ck-nav-link{{ if eq $.RelPermalink $e2 }} is-active{{ end }}">Vector State S(e,t)</a></li>
+          {{ $e3 := "explanation/constitutional-invariants/" | relURL }}
+          <li><a href="{{ $e3 }}" class="ck-nav-link{{ if eq $.RelPermalink $e3 }} is-active{{ end }}">Invariants I-01 to I-10</a></li>
+          {{ $e4 := "explanation/airgap-and-defense-in-depth/" | relURL }}
+          <li><a href="{{ $e4 }}" class="ck-nav-link{{ if eq $.RelPermalink $e4 }} is-active{{ end }}">Air-Gap Architecture</a></li>
         </ul>
       </div>
     </div>
 
+    <div class="ck-nav-divider"></div>
+
     <!-- Personas -->
-    <div>
-      <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-fg-mute); margin-bottom: var(--ck-sp-2); letter-spacing: 0.08em;">
+    <div class="ck-nav-group">
+      <div class="ck-nav-section-label">
         PERSONA JOURNEYS
       </div>
-      <ul style="list-style: none; padding-left: var(--ck-sp-2); margin: 0;">
-        <li style="margin-bottom: 4px;">
-          <a href="{{ "personas/security-officer-auditor/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 4px 6px;">
-            Auditor &amp; CISO
-          </a>
-        </li>
-        <li style="margin-bottom: 4px;">
-          <a href="{{ "personas/platform-sre/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 4px 6px;">
-            Platform SRE
-          </a>
-        </li>
-        <li style="margin-bottom: 4px;">
-          <a href="{{ "personas/workload-ai-developer/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 4px 6px;">
-            Workload &amp; AI Dev
-          </a>
-        </li>
-        <li style="margin-bottom: 4px;">
-          <a href="{{ "personas/secops-risk-analyst/" | relURL }}" class="ck-nav-link" style="font-size: 12px; text-decoration: none; color: var(--ck-fg-0); font-weight: 500; display: block; padding: 4px 6px;">
-            SecOps &amp; Risk Analyst
-          </a>
-        </li>
+      <ul class="ck-nav-sublist">
+        {{ $p1 := "personas/security-officer-auditor/" | relURL }}
+        <li><a href="{{ $p1 }}" class="ck-nav-link{{ if eq $.RelPermalink $p1 }} is-active{{ end }}">Auditor &amp; CISO</a></li>
+        {{ $p2 := "personas/platform-sre/" | relURL }}
+        <li><a href="{{ $p2 }}" class="ck-nav-link{{ if eq $.RelPermalink $p2 }} is-active{{ end }}">Platform SRE</a></li>
+        {{ $p3 := "personas/workload-ai-developer/" | relURL }}
+        <li><a href="{{ $p3 }}" class="ck-nav-link{{ if eq $.RelPermalink $p3 }} is-active{{ end }}">Workload &amp; AI Dev</a></li>
+        {{ $p4 := "personas/secops-risk-analyst/" | relURL }}
+        <li><a href="{{ $p4 }}" class="ck-nav-link{{ if eq $.RelPermalink $p4 }} is-active{{ end }}">SecOps &amp; Risk Analyst</a></li>
       </ul>
     </div>
   </div>

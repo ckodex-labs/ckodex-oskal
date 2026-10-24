@@ -136,13 +136,14 @@
       display: flex;
       flex-direction: column;
       justify-content: space-between;
-      text-decoration: none;
+      text-decoration: none !important;
+      border-bottom: 1px solid var(--ck-hairline) !important;
       color: inherit;
       transition: border-color var(--ck-t-state) var(--ck-ease);
       min-height: 140px;
     }
     .ck-bento-card:hover {
-      border-color: var(--ck-accent-rust);
+      border-color: var(--ck-accent-rust) !important;
     }
 
     /* Non-colliding, bulletproof receipt layout */

@@ -327,14 +327,52 @@ code, .ck-code, kbd, samp, pre {
   font-variant-ligatures: none;
 }
 
-a, .ck-link {
+a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: none;
+}
+
+/* Editorial & inline links inside markdown / document prose */
+.ck-article-body a,
+.ck-doc-desc a,
+.ck-prose a,
+.ck-reading a,
+.ck-link {
   color: var(--ck-link);
   text-decoration: none;
   border-bottom: 1px solid currentColor;
   text-underline-offset: 3px;
 }
-a:hover, .ck-link:hover { color: var(--ck-link-hov); }
+.ck-article-body a:hover,
+.ck-doc-desc a:hover,
+.ck-prose a:hover,
+.ck-reading a:hover,
+.ck-link:hover {
+  color: var(--ck-link-hov);
+}
 a:focus-visible, .ck-link:focus-visible { outline: none; box-shadow: var(--ck-ring-focus); }
+
+/* Chrome & Navigation resets: Links in headers, navbars, sidebars, buttons, and cards
+   must never carry editorial bottom borders. */
+.ck-shell__header a,
+.ck-shell__nav a,
+.ck-shell__footer a,
+.ck-shell__margin a,
+.ck-nav-heading,
+.ck-nav-link,
+.ck-nav__item,
+.ck-btn,
+.ck-btn a,
+.ck-badge,
+.ck-badge a,
+.ck-bento-card,
+.ck-bento-card a,
+.ck-card,
+.ck-card a {
+  border-bottom: none !important;
+  text-decoration: none !important;
+}
 
 /* ============================================================
  * 6 · GLOBAL RESET
@@ -673,8 +711,111 @@ body {
 .ck-shell__nav {
   grid-area: nav;
   border-right: 1px solid var(--ck-hairline);
-  padding: var(--ck-sp-4) 0;
+  padding: 0;
   min-width: 0;
+  position: sticky;
+  top: 52px;
+  height: calc(100vh - 52px);
+  height: calc(100dvh - 52px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  background: var(--ck-bg-0);
+}
+
+.ck-nav-scroll-wrap {
+  padding: var(--ck-sp-4) var(--ck-sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--ck-sp-4);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.ck-nav-section-label {
+  font-family: var(--ck-ff-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ck-fg-mute);
+  padding: 0 6px;
+  margin-bottom: var(--ck-sp-2);
+}
+
+.ck-nav-group {
+  margin-bottom: var(--ck-sp-3);
+}
+
+.ck-nav-heading {
+  display: flex;
+  align-items: center;
+  font-family: var(--ck-ff-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ck-fg-0);
+  padding: 5px 6px;
+  border-radius: 2px;
+  border-bottom: none !important;
+  text-decoration: none !important;
+  transition: background var(--ck-t-state) var(--ck-ease), color var(--ck-t-state) var(--ck-ease);
+}
+.ck-nav-heading:hover {
+  background: color-mix(in oklab, var(--ck-fg-1) 5%, transparent);
+  color: var(--ck-accent-rust);
+}
+.ck-nav-heading.is-active,
+.ck-nav-heading[aria-current="page"] {
+  color: var(--ck-accent-rust);
+  background: color-mix(in oklab, var(--ck-rust) 8%, transparent);
+}
+
+.ck-nav-sublist {
+  list-style: none;
+  padding: 0;
+  margin: 2px 0 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ck-nav-sublist li {
+  margin: 0;
+  padding: 0;
+}
+
+.ck-nav-link {
+  display: block;
+  font-family: var(--ck-ff-sans);
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--ck-fg-mute);
+  padding: 5px 8px 5px 14px;
+  border-radius: 2px;
+  border-left: 2px solid transparent;
+  border-bottom: none !important;
+  text-decoration: none !important;
+  transition: all var(--ck-t-state) var(--ck-ease);
+  word-break: break-word;
+}
+.ck-nav-link:hover {
+  color: var(--ck-fg-0);
+  background: color-mix(in oklab, var(--ck-fg-1) 4%, transparent);
+}
+.ck-nav-link.is-active,
+.ck-nav-link[aria-current="page"] {
+  color: var(--ck-accent-rust);
+  font-weight: 600;
+  border-left-color: var(--ck-accent-rust);
+  background: color-mix(in oklab, var(--ck-rust) 8%, transparent);
+}
+
+.ck-nav-divider {
+  height: 1px;
+  background: var(--ck-hairline);
+  margin: var(--ck-sp-2) 6px;
 }
 .ck-shell__main {
   grid-area: main;
