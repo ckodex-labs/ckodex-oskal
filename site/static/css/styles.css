@@ -31,6 +31,15 @@
   --ck-violet:       #6D28D9;  /* cryptographic proof exists — attestations only (Seal) */
   --ck-red:          #B91C1C;  /* containment · quarantine · active EP only */
 
+  /* Design system aliases & compatibility variables */
+  --ck-accent-rust:  var(--ck-rust);
+  --ck-proof-violet: var(--ck-violet);
+  --ck-ff-sans:      var(--ck-ff-ui);
+  --ck-ff-serif:     var(--ck-ff-display);
+  --ck-fs-sm:        var(--ck-fs-body-sm);
+  --ck-fg-0:         var(--ck-ink);
+  --ck-fg-mute:      var(--ck-tone);
+
   /* Vault registers (same roles, deep-ink ground) */
   --ck-vault-ground: #0A1322;  /* the legacy deep blue, demoted here */
   --ck-vault-ink:    #EAE5DA;
@@ -128,6 +137,9 @@
   --ck-fg-2:      #C7BFAF;
   --ck-fg-3:      var(--ck-vault-tone);
   --ck-fg-mute:   #6B6457;
+  --ck-fg-0:      var(--ck-vault-ink);
+  --ck-accent-rust:  var(--ck-vault-rust);
+  --ck-proof-violet: var(--ck-vault-violet);
 
   --ck-hairline:        #1D2A40;
   --ck-hairline-strong: #2C3D5A;
@@ -163,6 +175,9 @@
   --ck-fg-2:      #FFFFFF;
   --ck-fg-3:      #E6E6E6;
   --ck-fg-mute:   #CCCCCC;
+  --ck-fg-0:      #FFFFFF;
+  --ck-accent-rust:  #FFD700;
+  --ck-proof-violet: #D8C7FF;
 
   --ck-hairline:        #FFFFFF;
   --ck-hairline-strong: #FFFFFF;

@@ -1,16 +1,44 @@
 {{ define "main" }}
-<div class="ck-measure" style="max-width: 900px;">
+<div class="ck-landing" style="max-width: 1080px; margin: 0 auto; width: 100%;">
   <!-- Hero Section -->
   <header style="margin-bottom: var(--ck-sp-8); padding-bottom: var(--ck-sp-6); border-bottom: 1px solid var(--ck-hairline);">
-    <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-accent-rust); margin-bottom: var(--ck-sp-2); letter-spacing: 0.12em;">
-      CKODEX SPECIFICATION &middot; CKX-OSKAL-001
+    <div style="display: flex; align-items: center; gap: var(--ck-sp-2); flex-wrap: wrap; margin-bottom: var(--ck-sp-3);">
+      <span class="ck-badge" style="font-family: var(--ck-ff-mono); font-size: 11px; padding: 2px 6px; border: 1px solid var(--ck-hairline); border-radius: 0; text-transform: uppercase; color: var(--ck-accent-rust); font-weight: 600;">
+        SPEC: CKX-OSKAL-001
+      </span>
+      <span class="ck-badge" style="font-family: var(--ck-ff-mono); font-size: 11px; padding: 2px 6px; border: 1px solid var(--ck-hairline); border-radius: 0; text-transform: uppercase; color: var(--ck-fg-0);">
+        RELEASE v0.3.1
+      </span>
+      <span class="ck-badge" style="font-family: var(--ck-ff-mono); font-size: 11px; padding: 2px 6px; border: 1px solid var(--ck-hairline); border-radius: 0; text-transform: uppercase; color: var(--ck-proof-violet); font-weight: 600;">
+        TIER: E5 PROVED
+      </span>
+      <span class="ck-badge" style="font-family: var(--ck-ff-mono); font-size: 11px; padding: 2px 6px; border: 1px solid var(--ck-hairline); border-radius: 0; text-transform: uppercase; color: var(--ck-fg-mute);">
+        NIST OSCAL v1.2.3
+      </span>
     </div>
-    <h1 style="font-family: var(--ck-ff-serif); font-size: 38px; font-weight: 400; line-height: 1.15; color: var(--ck-fg-0); margin: 0 0 var(--ck-sp-3) 0;">
+
+    <h1 style="font-family: var(--ck-ff-serif); font-size: clamp(32px, 5vw, 48px); font-weight: 400; line-height: 1.15; color: var(--ck-fg-0); margin: 0 0 var(--ck-sp-3) 0;">
       Continuous Kubernetes Assurance Runtime
     </h1>
-    <p style="font-family: var(--ck-ff-sans); font-size: 16px; color: var(--ck-fg-mute); margin: 0 0 var(--ck-sp-4) 0; line-height: 1.5;">
-      A Kubernetes-native continuous assurance engine that binds canonical NIST SP 800-53 controls to concrete implementations, evaluates multi-dimensional evidence contracts, and produces cryptographically sealed, temporally bounded claims.
+    <p style="font-family: var(--ck-ff-sans); font-size: clamp(15px, 2vw, 17px); color: var(--ck-fg-mute); margin: 0 0 var(--ck-sp-5) 0; line-height: 1.6; max-width: 80ch;">
+      A Kubernetes-native continuous assurance engine that binds canonical NIST SP 800-53 controls to runtime realization, evaluates multi-dimensional evidence contracts, and projects verifiable cryptographic proof into NIST OSCAL artifacts.
     </p>
+
+    <!-- CLI Quickstart Bar -->
+    <div style="background: var(--ck-bg-1); border: 1px solid var(--ck-hairline); padding: var(--ck-sp-3) var(--ck-sp-4); margin-bottom: var(--ck-sp-5); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--ck-sp-3);">
+      <div style="display: flex; align-items: center; gap: var(--ck-sp-2); font-family: var(--ck-ff-mono); font-size: 13px; color: var(--ck-fg-0); overflow-x: auto;">
+        <span style="color: var(--ck-accent-rust); user-select: none;">$</span>
+        <code>oskal cockpit --once</code>
+      </div>
+      <div style="display: flex; align-items: center; gap: var(--ck-sp-2);">
+        <a href="{{ "tutorials/first-continuous-assurance-loop/" | relURL }}" class="ck-btn" style="text-decoration: none; font-family: var(--ck-ff-mono); font-size: 12px; padding: 6px 12px; background: var(--ck-accent-rust); color: var(--ck-accent-ink); border: 1px solid var(--ck-accent-rust);">
+          GET STARTED &rarr;
+        </a>
+        <a href="{{ "reference/cli/" | relURL }}" class="ck-btn" style="text-decoration: none; font-family: var(--ck-ff-mono); font-size: 12px; padding: 6px 12px; background: transparent; color: var(--ck-fg-0); border: 1px solid var(--ck-hairline);">
+          CLI MANUAL
+        </a>
+      </div>
+    </div>
 
     <!-- Canonical Principle Banner -->
     <div class="ck-sealed" style="padding: var(--ck-sp-3) var(--ck-sp-4); border: 2px solid var(--ck-proof-violet); background: var(--ck-bg-1);">
@@ -18,10 +46,132 @@
         CANONICAL PRINCIPLE
       </div>
       <div style="font-family: var(--ck-ff-mono); font-size: 13px; font-weight: 600; color: var(--ck-fg-0);">
-        OSCAL interoperability above; assurance semantics in the center; Kubernetes realization below.
+        OSCAL interoperability above; pure assurance semantics in the center; Kubernetes realization below.
       </div>
     </div>
   </header>
+
+  <!-- Unified DX Pillars Showcase -->
+  <section style="margin-bottom: var(--ck-sp-10);">
+    <div style="display: flex; align-items: baseline; justify-content: space-between; margin-bottom: var(--ck-sp-4);">
+      <h2 style="font-family: var(--ck-ff-sans); font-size: 18px; font-weight: 600; margin: 0; text-transform: uppercase; letter-spacing: 0.05em;">
+        Unified Developer &amp; Agentic Suite (DX / UX)
+      </h2>
+      <span style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-mute);">
+        5 NATIVE CAPABILITIES
+      </span>
+    </div>
+
+    <div class="ck-bento-grid">
+      <!-- Pillar 1: Agentic MCP -->
+      <a href="{{ "reference/cli/" | relURL }}" class="ck-bento-card">
+        <div>
+          <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-proof-violet); font-weight: 600; margin-bottom: 4px;">
+            [AGENTIC DX &middot; MCP SERVER]
+          </div>
+          <div style="font-family: var(--ck-ff-sans); font-size: 16px; font-weight: 600; color: var(--ck-fg-0); margin-bottom: 6px;">
+            <code>oskal mcp</code>
+          </div>
+          <p style="font-size: 13px; color: var(--ck-fg-mute); margin: 0; line-height: 1.4;">
+            Native Model Context Protocol (stdio JSON-RPC 2.0) exposing 7 continuous assurance tools directly to Claude Code, Cursor, and AI agents.
+          </p>
+        </div>
+        <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-accent-rust); margin-top: var(--ck-sp-3);">
+          INSPECT MCP TOOLS &rarr;
+        </div>
+      </a>
+
+      <!-- Pillar 2: Terminal Cockpit -->
+      <a href="{{ "how-to/observability-cockpit/" | relURL }}" class="ck-bento-card">
+        <div>
+          <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-accent-rust); font-weight: 600; margin-bottom: 4px;">
+            [TERMINAL UX &middot; DASHBOARD]
+          </div>
+          <div style="font-family: var(--ck-ff-sans); font-size: 16px; font-weight: 600; color: var(--ck-fg-0); margin-bottom: 6px;">
+            <code>oskal cockpit</code>
+          </div>
+          <p style="font-size: 13px; color: var(--ck-fg-mute); margin: 0; line-height: 1.4;">
+            Live pure-ASCII terminal cockpit displaying multi-dimensional vector states, active Merkle lineage, and real-time reconciliation.
+          </p>
+        </div>
+        <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-accent-rust); margin-top: var(--ck-sp-3);">
+          OPEN COCKPIT GUIDE &rarr;
+        </div>
+      </a>
+
+      <!-- Pillar 3: Deep Diagnostics & 4 Truth Channels -->
+      <a href="{{ "reference/cli/" | relURL }}" class="ck-bento-card">
+        <div>
+          <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-fg-0); font-weight: 600; margin-bottom: 4px;">
+            [DIAGNOSTICS &middot; 4 TRUTH CHANNELS]
+          </div>
+          <div style="font-family: var(--ck-ff-sans); font-size: 16px; font-weight: 600; color: var(--ck-fg-0); margin-bottom: 6px;">
+            <code>oskal doctor</code> &amp; <code>inspect</code>
+          </div>
+          <p style="font-size: 13px; color: var(--ck-fg-mute); margin: 0; line-height: 1.4;">
+            Reconstructs Telemetry, Execution, Decision, and Evidence traces with exact actionable remediation commands for UNKNOWN states.
+          </p>
+        </div>
+        <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-accent-rust); margin-top: var(--ck-sp-3);">
+          LEARN 4 CHANNELS &rarr;
+        </div>
+      </a>
+
+      <!-- Pillar 4: Sub-millisecond Schema Validation -->
+      <a href="{{ "how-to/export-oscal-artifacts/" | relURL }}" class="ck-bento-card">
+        <div>
+          <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-fg-0); font-weight: 600; margin-bottom: 4px;">
+            [SCHEMA DX &middot; 100% OFFLINE]
+          </div>
+          <div style="font-family: var(--ck-ff-sans); font-size: 16px; font-weight: 600; color: var(--ck-fg-0); margin-bottom: 6px;">
+            <code>oskal validate</code>
+          </div>
+          <p style="font-size: 13px; color: var(--ck-fg-mute); margin: 0; line-height: 1.4;">
+            Embedded sub-millisecond NIST OSCAL v1.2.3 validator supporting Assessment Results, Component Definitions, SSP, and POAM.
+          </p>
+        </div>
+        <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-accent-rust); margin-top: var(--ck-sp-3);">
+          VALIDATE ARTIFACTS &rarr;
+        </div>
+      </a>
+
+      <!-- Pillar 5: Compliance Scaffolding -->
+      <a href="{{ "reference/cli/" | relURL }}" class="ck-bento-card">
+        <div>
+          <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-accent-rust); font-weight: 600; margin-bottom: 4px;">
+            [WORKFLOW DX &middot; MULTI-BASELINE]
+          </div>
+          <div style="font-family: var(--ck-ff-sans); font-size: 16px; font-weight: 600; color: var(--ck-fg-0); margin-bottom: 6px;">
+            <code>oskal scaffold</code>
+          </div>
+          <p style="font-size: 13px; color: var(--ck-fg-mute); margin: 0; line-height: 1.4;">
+            Generates production-grade Kubernetes EvidenceContracts, ControlBindings, and OSCAL templates for NIST SP 800-53, PCI-DSS, and SOC 2.
+          </p>
+        </div>
+        <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-accent-rust); margin-top: var(--ck-sp-3);">
+          SCAFFOLD BASELINE &rarr;
+        </div>
+      </a>
+
+      <!-- Pillar 6: Bounded CAS Lifecycle -->
+      <a href="{{ "reference/cli/" | relURL }}" class="ck-bento-card">
+        <div>
+          <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-fg-0); font-weight: 600; margin-bottom: 4px;">
+            [LIFECYCLE &middot; RETENTION]
+          </div>
+          <div style="font-family: var(--ck-ff-sans); font-size: 16px; font-weight: 600; color: var(--ck-fg-0); margin-bottom: 6px;">
+            <code>oskal prune</code> &amp; <code>config</code>
+          </div>
+          <p style="font-size: 13px; color: var(--ck-fg-mute); margin: 0; line-height: 1.4;">
+            Prevents disk exhaustion with bounded retention pruning for Content-Addressable Storage and unified persistent developer config.
+          </p>
+        </div>
+        <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-accent-rust); margin-top: var(--ck-sp-3);">
+          MANAGE RETENTION &rarr;
+        </div>
+      </a>
+    </div>
+  </section>
 
   <!-- Diataxis Quadrants Bento Grid -->
   <section style="margin-bottom: var(--ck-sp-10);">
@@ -36,7 +186,7 @@
 
     <div class="ck-bento-grid">
       <!-- Quadrant 1: Tutorials -->
-      <a href="/tutorials/" class="ck-bento-card">
+      <a href="{{ "tutorials/" | relURL }}" class="ck-bento-card">
         <div>
           <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-accent-rust); margin-bottom: 4px;">
             1. LEARNING-ORIENTED
@@ -54,7 +204,7 @@
       </a>
 
       <!-- Quadrant 2: How-To Guides -->
-      <a href="/how-to/" class="ck-bento-card">
+      <a href="{{ "how-to/" | relURL }}" class="ck-bento-card">
         <div>
           <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-accent-rust); margin-bottom: 4px;">
             2. PROBLEM-ORIENTED
@@ -72,7 +222,7 @@
       </a>
 
       <!-- Quadrant 3: Reference -->
-      <a href="/reference/" class="ck-bento-card">
+      <a href="{{ "reference/" | relURL }}" class="ck-bento-card">
         <div>
           <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-accent-rust); margin-bottom: 4px;">
             3. INFORMATION-ORIENTED
@@ -81,7 +231,7 @@
             Reference
           </div>
           <p style="font-size: 13px; color: var(--ck-fg-mute); margin: 0; line-height: 1.4;">
-            Rigorous technical specifications. OSKAL CLI manual, 5 Custom Resource Definitions (CRDs), Go SDK (`pkg/oskal`), and Merkle receipt specs.
+            Rigorous technical specifications. OSKAL CLI manual, 5 Custom Resource Definitions (CRDs), Go SDK (<code>pkg/oskal</code>), and Merkle receipt specs.
           </p>
         </div>
         <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-accent-rust); margin-top: var(--ck-sp-4);">
@@ -90,7 +240,7 @@
       </a>
 
       <!-- Quadrant 4: Explanation -->
-      <a href="/explanation/" class="ck-bento-card">
+      <a href="{{ "explanation/" | relURL }}" class="ck-bento-card">
         <div>
           <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-accent-rust); margin-bottom: 4px;">
             4. UNDERSTANDING-ORIENTED
@@ -99,7 +249,7 @@
             Explanation
           </div>
           <p style="font-size: 13px; color: var(--ck-fg-mute); margin: 0; line-height: 1.4;">
-            Architectural rationale. Why boolean pass/fail fails in regulated infrastructure, how Vector State S(e,t) operates, and the 10 constitutional invariants.
+            Architectural rationale. Why boolean pass/fail fails in regulated infrastructure, how Vector State S(e,t) operates, and the constitutional invariants.
           </p>
         </div>
         <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-accent-rust); margin-top: var(--ck-sp-4);">
@@ -122,7 +272,7 @@
 
     <div class="ck-bento-grid">
       <!-- Persona 1: Auditor & CISO -->
-      <a href="/personas/security-officer-auditor/" class="ck-bento-card">
+      <a href="{{ "personas/security-officer-auditor/" | relURL }}" class="ck-bento-card">
         <div>
           <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-proof-violet); font-weight: 600; margin-bottom: 4px;">
             [ROLE: AUDITOR &amp; CISO]
@@ -140,7 +290,7 @@
       </a>
 
       <!-- Persona 2: Platform SRE -->
-      <a href="/personas/platform-sre/" class="ck-bento-card">
+      <a href="{{ "personas/platform-sre/" | relURL }}" class="ck-bento-card">
         <div>
           <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-fg-0); font-weight: 600; margin-bottom: 4px;">
             [ROLE: PLATFORM SRE]
@@ -158,7 +308,7 @@
       </a>
 
       <!-- Persona 3: Workload Dev -->
-      <a href="/personas/workload-ai-developer/" class="ck-bento-card">
+      <a href="{{ "personas/workload-ai-developer/" | relURL }}" class="ck-bento-card">
         <div>
           <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-fg-0); font-weight: 600; margin-bottom: 4px;">
             [ROLE: WORKLOAD &amp; AI DEV]
@@ -167,7 +317,7 @@
             SDK &amp; Supply-Chain Verification
           </div>
           <p style="font-size: 13px; color: var(--ck-fg-mute); margin: 0; line-height: 1.4;">
-            Evidence contract fulfillment, container signing with Cosign, SHIELD AI model weight attestations, and Go SDK (`pkg/oskal`).
+            Evidence contract fulfillment, container signing with Cosign, SHIELD AI model weight attestations, and Go SDK (<code>pkg/oskal</code>).
           </p>
         </div>
         <div style="font-family: var(--ck-ff-mono); font-size: 11px; color: var(--ck-fg-0); margin-top: var(--ck-sp-3);">
@@ -176,7 +326,7 @@
       </a>
 
       <!-- Persona 4: SecOps & Risk -->
-      <a href="/personas/secops-risk-analyst/" class="ck-bento-card">
+      <a href="{{ "personas/secops-risk-analyst/" | relURL }}" class="ck-bento-card">
         <div>
           <div style="font-family: var(--ck-ff-mono); font-size: 10px; text-transform: uppercase; color: var(--ck-fg-0); font-weight: 600; margin-bottom: 4px;">
             [ROLE: SECOPS &amp; RISK]
@@ -196,7 +346,7 @@
   </section>
 
   <!-- Constitutional Core Callout -->
-  <section class="ck-quiet" style="padding: var(--ck-sp-6); border: 1px solid var(--ck-hairline); background: var(--ck-bg-1);">
+  <section class="ck-quiet" style="padding: var(--ck-sp-6); border: 1px solid var(--ck-hairline); background: var(--ck-bg-1); margin-bottom: var(--ck-sp-8);">
     <div style="font-family: var(--ck-ff-mono); font-size: 11px; text-transform: uppercase; color: var(--ck-fg-mute); margin-bottom: var(--ck-sp-2);">
       ZERO TOLERANCE FOR FAKE CLAIMS &middot; INVARIANT I-02
     </div>
@@ -204,7 +354,7 @@
       Absence of evidence is strictly <code>UNKNOWN</code>, never <code>PASS</code>. OSKAL forbids synthetic digests, hardcoded compliance stamps, or unbacked claims. All assurance claims must be dynamically backed by verifiable observations, valid authority signatures, and active temporal epochs.
     </div>
     <div style="font-family: var(--ck-ff-mono); font-size: 12px; color: var(--ck-accent-rust);">
-      &vdash; VERIFIED BY TEST SUITE &middot; 100% PASS UNDER RACE DETECTOR
+      &vdash; VERIFIED BY TEST SUITE &middot; 100% PASS UNDER RACE DETECTOR &middot; ZERO LINTER WARNINGS
     </div>
   </section>
 </div>

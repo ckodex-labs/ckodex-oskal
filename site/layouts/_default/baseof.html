@@ -3,13 +3,25 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{ if .Title }}{{ .Title }} &middot; {{ end }}{{ .Site.Title }}</title>
+  <title>{{ if and .Title (not .IsHome) }}{{ .Title }} &middot; {{ end }}{{ .Site.Title }}</title>
   <link rel="stylesheet" href="{{ "css/styles.css" | relURL }}">
   <link rel="icon" type="image/svg+xml" href="{{ "assets/logos/mark-a2-favicon.svg" | relURL }}">
   <style>
     /* ==========================================================================
        RESPONSIVE & TOUCH DESIGN OVERHAUL (CKODEX-DS-3 & CORTAIX-DS-1 Section 10)
        ========================================================================== */
+
+    /* Landing layout overrides */
+    .ck-shell--landing {
+      grid-template-columns: var(--ck-nav-w) minmax(0, 1fr) 0 !important;
+      grid-template-areas:
+        "header header header"
+        "nav    main   main"
+        "footer footer footer" !important;
+    }
+    .ck-shell--landing > .ck-shell__margin {
+      display: none !important;
+    }
 
     /* Fluid typography and measures */
     .ck-doc-header {
@@ -226,7 +238,7 @@
 </head>
 <body>
   <a class="ck-sr" href="#main">Skip to main content</a>
-  <div class="ck-shell ck-shell--console">
+  <div class="ck-shell {{ if .IsHome }}ck-shell--landing{{ else }}ck-shell--console{{ end }}">
     {{ partial "header.html" . }}
     {{ partial "nav.html" . }}
     <main class="ck-shell__main" id="main" role="main">
