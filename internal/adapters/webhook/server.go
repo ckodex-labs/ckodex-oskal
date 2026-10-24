@@ -27,6 +27,18 @@ var (
 // EvidenceSink is a callback to consume in-flight evidence envelopes produced during admission.
 type EvidenceSink func(env assurance.EvidenceEnvelope)
 
+// WebhookMode defines the enforcement behavior of the admission webhook.
+type WebhookMode string
+
+const (
+	// ModeEnforcing blocks admission on invariant violations (default).
+	ModeEnforcing WebhookMode = "enforcing"
+	// ModeAudit permits admission on invariant violations with audit annotations and logs.
+	ModeAudit WebhookMode = "audit"
+	// ModeWarn permits admission on invariant violations with admission warnings and audit annotations.
+	ModeWarn WebhookMode = "warn"
+)
+
 // ServerConfig configures the admission webhook server.
 type ServerConfig struct {
 	ListenAddr   string
@@ -36,6 +48,7 @@ type ServerConfig struct {
 	TLSKeyBytes  []byte
 	ObserverAuth assurance.AuthorityRef
 	EvidenceSink EvidenceSink
+	Mode         WebhookMode
 }
 
 // AdmissionWebhookServer handles Kubernetes ValidatingAdmissionWebhook requests.
@@ -216,26 +229,45 @@ func (s *AdmissionWebhookServer) validateRequest(req *admissionv1.AdmissionReque
 
 	// 1. Invariant Evaluation: Run as non-root
 	nonRootViolations := checkNonRootCompliance(&pod)
-	if len(nonRootViolations) > 0 {
-		return &admissionv1.AdmissionResponse{
-			Allowed: false,
-			Result: &metav1.Status{
-				Status:  "Failure",
-				Message: fmt.Sprintf("Admission denied by policy: %s", strings.Join(nonRootViolations, "; ")),
-			},
-		}
-	}
 
 	// 2. Invariant Evaluation: Dropped capabilities and privilege escalation
 	capViolations := checkCapabilityCompliance(&pod)
-	if len(capViolations) > 0 {
-		return &admissionv1.AdmissionResponse{
-			Allowed: false,
-			Result: &metav1.Status{
-				Status:  "Failure",
-				Message: fmt.Sprintf("Admission denied by policy: %s", strings.Join(capViolations, "; ")),
-			},
+
+	var allViolations []string
+	allViolations = append(allViolations, nonRootViolations...)
+	allViolations = append(allViolations, capViolations...)
+
+	mode := s.config.Mode
+	if mode == "" {
+		mode = ModeEnforcing
+	}
+
+	if len(allViolations) > 0 {
+		if mode == ModeEnforcing {
+			return &admissionv1.AdmissionResponse{
+				Allowed: false,
+				Result: &metav1.Status{
+					Status:  "Failure",
+					Message: fmt.Sprintf("Admission denied by policy: %s", strings.Join(allViolations, "; ")),
+				},
+			}
 		}
+
+		// Degraded mode: ModeAudit or ModeWarn permits admission with full diagnostic audit trail
+		auditAnnotations := map[string]string{
+			"assurance.ckodex.io/admitted-in-degraded-mode": "true",
+			"assurance.ckodex.io/webhook-mode":              string(mode),
+			"assurance.ckodex.io/violations":                strings.Join(allViolations, "; "),
+		}
+
+		resp := &admissionv1.AdmissionResponse{
+			Allowed:          true,
+			AuditAnnotations: auditAnnotations,
+		}
+		if mode == ModeWarn {
+			resp.Warnings = allViolations
+		}
+		return resp
 	}
 
 	// 3. Generate In-Flight Evidence Envelope (Proof before side effect)

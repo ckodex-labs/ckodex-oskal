@@ -76,9 +76,10 @@ type SVIDInfo struct {
 
 // SVIDValidator validates X.509 SVID certificates and produces continuous assurance evidence.
 type SVIDValidator struct {
-	bundle        *TrustBundle
-	verifierAuth  assurance.AuthorityRef
-	clockOverride func() time.Time
+	bundle             *TrustBundle
+	verifierAuth       assurance.AuthorityRef
+	clockOverride      func() time.Time
+	clockSkewTolerance time.Duration
 }
 
 // NewSVIDValidator creates a new SVID validator backed by a TrustBundle.
@@ -93,9 +94,15 @@ func NewSVIDValidator(bundle *TrustBundle, verifierAuth assurance.AuthorityRef) 
 		}
 	}
 	return &SVIDValidator{
-		bundle:       bundle,
-		verifierAuth: verifierAuth,
+		bundle:             bundle,
+		verifierAuth:       verifierAuth,
+		clockSkewTolerance: 30 * time.Second,
 	}
+}
+
+// SetClockSkewTolerance configures clock skew tolerance for distributed/air-gapped nodes.
+func (v *SVIDValidator) SetClockSkewTolerance(d time.Duration) {
+	v.clockSkewTolerance = d
 }
 
 // SetClockOverride allows deterministic unit testing of expiry.
@@ -126,10 +133,11 @@ func (v *SVIDValidator) ValidateSVID(cert *x509.Certificate) (*SVIDInfo, error) 
 	}
 
 	currentTime := v.now()
-	if currentTime.Before(cert.NotBefore) {
+	// Allow clock skew tolerance for distributed and air-gapped nodes
+	if currentTime.Add(v.clockSkewTolerance).Before(cert.NotBefore) {
 		return nil, fmt.Errorf("SVID is not yet valid (notBefore: %s)", cert.NotBefore.UTC().Format(time.RFC3339))
 	}
-	if currentTime.After(cert.NotAfter) {
+	if currentTime.Add(-v.clockSkewTolerance).After(cert.NotAfter) {
 		return nil, fmt.Errorf("SVID is expired (notAfter: %s)", cert.NotAfter.UTC().Format(time.RFC3339))
 	}
 
@@ -158,9 +166,17 @@ func (v *SVIDValidator) ValidateSVID(cert *x509.Certificate) (*SVIDInfo, error) 
 		return nil, fmt.Errorf("untrusted SPIFFE trust domain (no root CA registered): %s", trustDomain)
 	}
 
+	verifyTime := currentTime
+	if verifyTime.Before(cert.NotBefore) {
+		verifyTime = cert.NotBefore.Add(time.Second)
+	}
+	if verifyTime.After(cert.NotAfter) {
+		verifyTime = cert.NotAfter.Add(-time.Second)
+	}
+
 	verifyOpts := x509.VerifyOptions{
 		Roots:       pool,
-		CurrentTime: currentTime,
+		CurrentTime: verifyTime,
 		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 	}
 

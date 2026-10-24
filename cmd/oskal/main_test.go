@@ -159,3 +159,53 @@ func TestCLI_CockpitOnce(t *testing.T) {
 		t.Fatalf("unexpected error executing cockpit --once: %v", err)
 	}
 }
+
+func TestCLI_Config(t *testing.T) {
+	// 1. config view
+	cmdView := NewRootCommand()
+	bufView := new(bytes.Buffer)
+	cmdView.SetOut(bufView)
+	cmdView.SetErr(bufView)
+	cmdView.SetArgs([]string{"config", "view"})
+
+	if err := cmdView.Execute(); err != nil {
+		t.Fatalf("unexpected error executing config view: %v", err)
+	}
+	outView := bufView.String()
+	if !strings.Contains(outView, "CONFIG FILE:") || !strings.Contains(outView, "PROFILE:") {
+		t.Fatalf("unexpected config view output: %s", outView)
+	}
+
+	// 2. config init
+	tmpFile := t.TempDir() + "/.oskal.yaml"
+	cmdInit := NewRootCommand()
+	bufInit := new(bytes.Buffer)
+	cmdInit.SetOut(bufInit)
+	cmdInit.SetErr(bufInit)
+	cmdInit.SetArgs([]string{"config", "init", tmpFile})
+
+	if err := cmdInit.Execute(); err != nil {
+		t.Fatalf("unexpected error executing config init: %v", err)
+	}
+	outInit := bufInit.String()
+	if !strings.Contains(outInit, "Created default configuration file") {
+		t.Fatalf("unexpected config init output: %s", outInit)
+	}
+}
+
+func TestCLI_Prune(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmdPrune := NewRootCommand()
+	bufPrune := new(bytes.Buffer)
+	cmdPrune.SetOut(bufPrune)
+	cmdPrune.SetErr(bufPrune)
+	cmdPrune.SetArgs([]string{"prune", "--evidence-dir", tmpDir, "--dry-run", "--older-than", "1h"})
+
+	if err := cmdPrune.Execute(); err != nil {
+		t.Fatalf("unexpected error executing prune: %v", err)
+	}
+	outPrune := bufPrune.String()
+	if !strings.Contains(outPrune, "DRY-RUN (would prune): 0 envelopes") {
+		t.Fatalf("unexpected prune output: %s", outPrune)
+	}
+}

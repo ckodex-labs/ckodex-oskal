@@ -45,12 +45,14 @@ OSKAL provides a complete suite of developer-first and AI-native capabilities:
 |  [Agentic DX]        oskal mcp          Native JSON-RPC 2.0 stdio       |
 |                                         tools for AI IDEs & Agents      |
 |  [Diagnostic DX]     oskal doctor       Deep preflight diagnostics      |
-|                      oskal inspect      4 Truth Channels reconstructor  |
+|                      oskal inspect      4 Truth Channels & Remediation  |
 |  [Schema DX]         oskal validate     Embedded sub-millisecond        |
 |                                         NIST v1.2.3 validator           |
 |  [Workflow DX]       oskal scaffold     NIST / PCI / SOC2 generators    |
 |                      --output format    table, tree, json, yaml         |
 |  [Terminal UX]       oskal cockpit      Pure ASCII live dashboard       |
+|  [Ops & Lifecycle]   oskal config       Persistent config management    |
+|                      oskal prune        Bounded CAS disk retention      |
 +-------------------------------------------------------------------------+
 ```
 
@@ -105,6 +107,34 @@ A live pure ASCII terminal monitoring dashboard displaying:
 oskal cockpit --refresh 2s
 oskal cockpit --once
 ```
+
+### 6. Configuration Management (`oskal config`)
+Manages persistent developer configuration with strict precedence: `Environment Variables (OSKAL_*) > Config File (.oskal.yaml) > Smart Defaults`. Eliminates repetitive CLI arguments.
+
+```bash
+# View active effective configuration and source file
+oskal config view
+
+# Initialize default .oskal.yaml in project root
+oskal config init
+```
+
+### 7. CAS Retention & Lifecycle Management (`oskal prune`)
+Prevents unbounded disk growth in long-running clusters by safely pruning expired verified evidence envelopes from Content-Addressable Storage (CAS):
+
+```bash
+# Preview envelopes older than 30 days without removing
+oskal prune --older-than 720h --dry-run
+
+# Prune envelopes older than 14 days
+oskal prune --older-than 336h
+```
+
+### 8. Webhook Operating Modes & Degradation Contract
+The admission webhook supports three operating modes via `--mode`:
+- **`enforcing`** (default): Hard block on invariant violations (Invariant I-01).
+- **`audit`**: Permits admission of non-conformant workloads while recording degraded-mode audit annotations (`assurance.ckodex.io/admitted-in-degraded-mode: true`) and generating in-flight violation evidence.
+- **`warn`**: Returns standard Kubernetes admission warnings directly to operators/deployers while preserving full audit and cryptographic records.
 
 ---
 

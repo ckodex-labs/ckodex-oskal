@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
@@ -274,4 +275,64 @@ func matchSubject(envSub assurance.SubjectRef, targetSub assurance.SubjectRef, t
 		return true
 	}
 	return false
+}
+
+// PruneReport contains statistics from a CAS storage prune operation.
+type PruneReport struct {
+	PrunedCount   int           `json:"pruned_count"`
+	PrunedBytes   int64         `json:"pruned_bytes"`
+	RetainedCount int           `json:"retained_count"`
+	Duration      time.Duration `json:"duration_ns"`
+}
+
+// Prune removes evidence envelopes older than the specified maxAge threshold.
+// If dryRun is true, it calculates what would be removed without modifying disk or memory.
+func (r *ContentAddressedEvidenceRepository) Prune(maxAge time.Duration, dryRun bool) (*PruneReport, error) {
+	start := time.Now()
+	cutoff := start.Add(-maxAge)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	report := &PruneReport{}
+	var toDelete []string
+
+	for digest, env := range r.envelopes {
+		if env.CapturedAt.Before(cutoff) {
+			toDelete = append(toDelete, digest)
+			report.PrunedCount++
+			if b, ok := r.blobs[digest]; ok {
+				report.PrunedBytes += int64(len(b))
+			}
+		}
+	}
+
+	if !dryRun {
+		for _, digest := range toDelete {
+			delete(r.envelopes, digest)
+			delete(r.blobs, digest)
+
+			if r.baseDir != "" {
+				hexHash := strings.TrimPrefix(digest, "sha256:")
+				filePath := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.json", hexHash))
+				_ = os.Remove(filePath)
+				binPath := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.bin", hexHash))
+				_ = os.Remove(binPath)
+			}
+		}
+
+		// Rebuild subjectIndex
+		r.subjectIndex = make(map[string][]string)
+		for digest, env := range r.envelopes {
+			subURI := env.Subject.URI()
+			r.subjectIndex[subURI] = append(r.subjectIndex[subURI], digest)
+		}
+	}
+
+	report.RetainedCount = len(r.envelopes)
+	if dryRun {
+		report.RetainedCount = len(r.envelopes) - report.PrunedCount
+	}
+	report.Duration = time.Since(start)
+	return report, nil
 }

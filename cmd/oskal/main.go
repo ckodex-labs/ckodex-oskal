@@ -24,6 +24,7 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/webhook"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/diagnostics"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
+	"github.com/ckodex-labs/ckodex-oskal/internal/config"
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	recoscal "github.com/ckodex-labs/ckodex-oskal/internal/reconciler/oscal"
@@ -79,8 +80,26 @@ It evaluates continuous evidence contracts, tracks semantic drift,
 and projects defensible results into standard OSCAL artifacts.`,
 	}
 
+	var configFileFlag string
+	rootCmd.PersistentFlags().StringVar(&configFileFlag, "config", "", "Path to OSKAL configuration file (default .oskal.yaml)")
 	rootCmd.PersistentFlags().StringVar(&serverAddr, "server", "", "AssuranceService gRPC address (e.g. localhost:9090)")
 	rootCmd.PersistentFlags().StringVar(&evidenceDir, "evidence-dir", "", "Path to directory containing local EvidenceEnvelope JSON files")
+
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		cfg, _, err := config.LoadConfig(configFileFlag)
+		if err != nil && configFileFlag != "" {
+			return err
+		}
+		serverFlag := cmd.Root().PersistentFlags().Lookup("server")
+		if (serverFlag == nil || !serverFlag.Changed) && cfg.Server != "" {
+			serverAddr = cfg.Server
+		}
+		evDirFlag := cmd.Root().PersistentFlags().Lookup("evidence-dir")
+		if (evDirFlag == nil || !evDirFlag.Changed) && cfg.EvidenceDir != "" {
+			evidenceDir = cfg.EvidenceDir
+		}
+		return nil
+	}
 
 	assuranceCmd := &cobra.Command{
 		Use:   "assurance",
@@ -127,6 +146,8 @@ and projects defensible results into standard OSCAL artifacts.`,
 					fmt.Printf("EVIDENCE ROOT:   none\n")
 					fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
 					fmt.Printf("FRESHNESS:       unknown\n")
+					fmt.Printf("MISSING SIGNALS: kubernetes.admission, runtime.ebpf, spiffe.svid\n")
+					fmt.Printf("REMEDIATION:     oskal record admission --file <manifest.yaml> OR deploy ckodex-webhook\n")
 					return nil
 				}
 
@@ -152,6 +173,8 @@ and projects defensible results into standard OSCAL artifacts.`,
 					fmt.Printf("EVIDENCE ROOT:   none\n")
 					fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
 					fmt.Printf("FRESHNESS:       unknown\n")
+					fmt.Printf("MISSING SIGNALS: kubernetes.admission, runtime.ebpf, spiffe.svid\n")
+					fmt.Printf("REMEDIATION:     oskal record admission --file <manifest.yaml> OR specify --server\n")
 					return nil
 				}
 
@@ -177,6 +200,8 @@ and projects defensible results into standard OSCAL artifacts.`,
 			fmt.Printf("EVIDENCE ROOT:   none\n")
 			fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
 			fmt.Printf("FRESHNESS:       unknown\n")
+			fmt.Printf("MISSING SIGNALS: kubernetes.admission, runtime.ebpf, spiffe.svid\n")
+			fmt.Printf("REMEDIATION:     oskal record admission --file <manifest.yaml> OR specify --evidence-dir\n")
 			return nil
 		},
 	}
@@ -733,6 +758,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 		webhookServiceName string
 		webhookNamespace   string
 		webhookEvidenceDir string
+		webhookMode        string
 	)
 	webhookCmd := &cobra.Command{
 		Use:   "webhook",
@@ -742,6 +768,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 				ListenAddr:  webhookListenAddr,
 				TLSCertPath: webhookTLSCertFile,
 				TLSKeyPath:  webhookTLSKeyFile,
+				Mode:        webhook.WebhookMode(webhookMode),
 				ObserverAuth: assurance.AuthorityRef{
 					Scheme:  "k8s:admission-controller",
 					Subject: fmt.Sprintf("%s/%s", webhookNamespace, webhookServiceName),
@@ -780,7 +807,11 @@ and projects defensible results into standard OSCAL artifacts.`,
 			}
 
 			server := webhook.NewAdmissionWebhookServer(cfg)
-			fmt.Printf("OSKAL Validating Admission Webhook listening on %s (TLS enabled)\n", webhookListenAddr)
+			modeStr := string(cfg.Mode)
+			if modeStr == "" {
+				modeStr = "enforcing"
+			}
+			fmt.Printf("OSKAL Validating Admission Webhook listening on %s (TLS enabled, mode: %s)\n", webhookListenAddr, modeStr)
 
 			stopCh := make(chan os.Signal, 1)
 			signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
@@ -810,6 +841,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 	webhookCmd.Flags().StringVar(&webhookServiceName, "service-name", "oskal-webhook", "Kubernetes Service name for TLS SANs")
 	webhookCmd.Flags().StringVar(&webhookNamespace, "namespace", "ckodex-system", "Kubernetes Namespace for TLS SANs")
 	webhookCmd.Flags().StringVar(&webhookEvidenceDir, "evidence-dir", "", "Directory to record admitted in-flight evidence envelopes")
+	webhookCmd.Flags().StringVar(&webhookMode, "mode", "enforcing", "Webhook enforcement mode: enforcing, audit, warn")
 
 	// 9. oscal validate <file> [--schema <type>] [--output <format>]
 	var (
@@ -1094,6 +1126,16 @@ for a governed workload subject without collapsing them into generic logs.`,
 						},
 					},
 				}
+				if report.Remediation != nil {
+					root.Children = append(root.Children, &format.TreeNode{
+						Title:   "Channel 5: Actionable Remediation",
+						Details: fmt.Sprintf("Action: %s", report.Remediation.RemediationCmd),
+						Children: []*format.TreeNode{
+							{Title: "Missing Signals", Details: strings.Join(report.Remediation.MissingSignals, ", ")},
+							{Title: "Explanation", Details: report.Remediation.Explanation},
+						},
+					})
+				}
 				return format.RenderTree(w, root)
 			default:
 				_, _ = fmt.Fprintf(w, "OSKAL 4 TRUTH CHANNELS INSPECTION REPORT\n")
@@ -1127,6 +1169,14 @@ for a governed workload subject without collapsing them into generic logs.`,
 				_, _ = fmt.Fprintf(w, "   Artifact Count:  %d\n", len(report.Evidence.Artifacts))
 				for i, a := range report.Evidence.Artifacts {
 					_, _ = fmt.Fprintf(w, "   [%d] %s (Type: %s, Freshness: %s)\n", i+1, a.Digest, a.Type, a.Freshness)
+				}
+				if report.Remediation != nil {
+					_, _ = fmt.Fprintf(w, "\n5. ACTIONABLE REMEDIATION:\n")
+					_, _ = fmt.Fprintf(w, "   Target Control:  %s\n", report.Remediation.TargetControl)
+					_, _ = fmt.Fprintf(w, "   Disposition:     %s\n", report.Remediation.Disposition)
+					_, _ = fmt.Fprintf(w, "   Missing Signals: %s\n", strings.Join(report.Remediation.MissingSignals, ", "))
+					_, _ = fmt.Fprintf(w, "   Remediation Cmd: %s\n", report.Remediation.RemediationCmd)
+					_, _ = fmt.Fprintf(w, "   Explanation:     %s\n", report.Remediation.Explanation)
 				}
 				return nil
 			}
@@ -1176,6 +1226,86 @@ Merkle roots, drift alerts, and reconciliation loops.`,
 	cockpitCmd.Flags().BoolVar(&cockpitOnce, "once", false, "Render a single frame and exit (ideal for CI/scripts)")
 	cockpitCmd.Flags().StringVar(&cockpitSubject, "subject", "", "Filter dashboard to a specific workload subject")
 
+	// 15. oscal config [view|init]
+	configCmd := &cobra.Command{
+		Use:   "config",
+		Short: "Manage persistent OSKAL configuration (.oskal.yaml)",
+	}
+	configViewCmd := &cobra.Command{
+		Use:   "view",
+		Short: "View active OSKAL configuration and source file",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			w := cmd.OutOrStdout()
+			cfg, sourceFile, err := config.LoadConfig(configFileFlag)
+			if err != nil {
+				return err
+			}
+			sourceDesc := sourceFile
+			if sourceDesc == "" {
+				sourceDesc = "none (using smart defaults)"
+			}
+			_, _ = fmt.Fprintf(w, "CONFIG FILE:  %s\n", sourceDesc)
+			_, _ = fmt.Fprintf(w, "SERVER:       %s\n", cfg.Server)
+			_, _ = fmt.Fprintf(w, "EVIDENCE DIR: %s\n", cfg.EvidenceDir)
+			_, _ = fmt.Fprintf(w, "NAMESPACE:    %s\n", cfg.Namespace)
+			_, _ = fmt.Fprintf(w, "OUTPUT:       %s\n", cfg.Output)
+			_, _ = fmt.Fprintf(w, "PROFILE:      %s\n", cfg.Profile)
+			return nil
+		},
+	}
+	configInitCmd := &cobra.Command{
+		Use:   "init [path]",
+		Short: "Initialize a default .oskal.yaml configuration file",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := ".oskal.yaml"
+			if len(args) > 0 {
+				target = args[0]
+			}
+			cfg := config.DefaultConfig()
+			if err := config.SaveConfig(cfg, target); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Created default configuration file: %s\n", target)
+			return nil
+		},
+	}
+	configCmd.AddCommand(configViewCmd, configInitCmd)
+
+	// 16. oscal prune [--older-than <duration>] [--dry-run]
+	var (
+		pruneOlderThan time.Duration
+		pruneDryRun    bool
+	)
+	pruneCmd := &cobra.Command{
+		Use:   "prune",
+		Short: "Prune expired evidence envelopes from local CAS storage (bounded retention)",
+		Long: `Prunes verified evidence envelopes older than the specified retention window
+from the local Content-Addressable Storage (CAS) directory to prevent unbounded disk growth.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			w := cmd.OutOrStdout()
+			dir := evidenceDir
+			if dir == "" {
+				dir = "evidence"
+			}
+			repo, err := storage.NewFilesystemEvidenceRepository(dir)
+			if err != nil {
+				return fmt.Errorf("failed to open evidence repository at %s: %w", dir, err)
+			}
+			pruned, err := repo.Prune(pruneOlderThan, pruneDryRun)
+			if err != nil {
+				return fmt.Errorf("prune failed: %w", err)
+			}
+			mode := "PRUNED"
+			if pruneDryRun {
+				mode = "DRY-RUN (would prune)"
+			}
+			_, _ = fmt.Fprintf(w, "%s: %d envelopes (freed %d bytes) older than %s from %s\n", mode, pruned.PrunedCount, pruned.PrunedBytes, pruneOlderThan, dir)
+			return nil
+		},
+	}
+	pruneCmd.Flags().DurationVar(&pruneOlderThan, "older-than", 720*time.Hour, "Retention age threshold (e.g. 720h, 30d)")
+	pruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "Preview envelopes that would be deleted without removing them")
+
 	assuranceCmd.AddCommand(stateCmd, explainCmd, evidenceCmd, driftCmd)
 	rootCmd.AddCommand(
 		assuranceCmd,
@@ -1189,6 +1319,8 @@ Merkle roots, drift alerts, and reconciliation loops.`,
 		inspectCmd,
 		mcpCmd,
 		cockpitCmd,
+		configCmd,
+		pruneCmd,
 	)
 	return rootCmd
 }

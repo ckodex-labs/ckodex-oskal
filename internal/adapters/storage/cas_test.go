@@ -197,3 +197,65 @@ func TestEvidenceRepository_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestEvidenceRepository_Prune(t *testing.T) {
+	ctx := context.Background()
+	tmpDir, err := os.MkdirTemp("", "oskal-prune-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	repo, err := NewFilesystemEvidenceRepository(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+
+	// 1. Insert fresh envelope (now)
+	envFresh := createTestEnvelope("ev-fresh", "ns/Pod/fresh-pod", "test")
+	envFresh.CapturedAt = time.Now().UTC()
+	if _, err := repo.Put(ctx, envFresh, nil); err != nil {
+		t.Fatalf("put fresh failed: %v", err)
+	}
+
+	// 2. Insert old envelope (2 hours ago)
+	envOld := createTestEnvelope("ev-old", "ns/Pod/old-pod", "test")
+	envOld.CapturedAt = time.Now().UTC().Add(-2 * time.Hour)
+	if _, err := repo.Put(ctx, envOld, nil); err != nil {
+		t.Fatalf("put old failed: %v", err)
+	}
+
+	// Dry run prune with 1h cutoff
+	dryReport, err := repo.Prune(1*time.Hour, true)
+	if err != nil {
+		t.Fatalf("dry run prune failed: %v", err)
+	}
+	if dryReport.PrunedCount != 1 {
+		t.Fatalf("expected 1 pruned in dry-run, got %d", dryReport.PrunedCount)
+	}
+	if dryReport.RetainedCount != 1 {
+		t.Fatalf("expected 1 retained in dry-run, got %d", dryReport.RetainedCount)
+	}
+
+	// Actual prune with 1h cutoff
+	actReport, err := repo.Prune(1*time.Hour, false)
+	if err != nil {
+		t.Fatalf("actual prune failed: %v", err)
+	}
+	if actReport.PrunedCount != 1 {
+		t.Fatalf("expected 1 pruned, got %d", actReport.PrunedCount)
+	}
+	if actReport.RetainedCount != 1 {
+		t.Fatalf("expected 1 retained, got %d", actReport.RetainedCount)
+	}
+
+	// Verify only fresh remains
+	envelopes, err := repo.ListBySubject(ctx, assurance.SubjectRef{Scheme: "k8s", ID: "ns/Pod/fresh-pod"})
+	if err != nil || len(envelopes) != 1 {
+		t.Fatalf("expected fresh envelope to remain, got: %v, err: %v", envelopes, err)
+	}
+	oldEnvelopes, err := repo.ListBySubject(ctx, assurance.SubjectRef{Scheme: "k8s", ID: "ns/Pod/old-pod"})
+	if err != nil || len(oldEnvelopes) != 0 {
+		t.Fatalf("expected old envelope to be deleted, got: %v", oldEnvelopes)
+	}
+}

@@ -62,15 +62,25 @@ type EvidenceTrace struct {
 	LineageVerified bool           `json:"lineage_verified"`
 }
 
+// RemediationAction provides actionable advice and remediation steps to achieve or restore compliance.
+type RemediationAction struct {
+	TargetControl  string   `json:"target_control"`
+	Disposition    string   `json:"disposition"`
+	MissingSignals []string `json:"missing_signals"`
+	RemediationCmd string   `json:"remediation_cmd"`
+	Explanation    string   `json:"explanation"`
+}
+
 // InspectionReport unifies all 4 Truth Channels for a governed subject.
 type InspectionReport struct {
-	Subject        string         `json:"subject"`
-	AssuranceState string         `json:"assurance_state"`
-	Timestamp      time.Time      `json:"timestamp"`
-	Telemetry      TelemetryTrace `json:"telemetry_trace"`
-	Execution      ExecutionTrace `json:"execution_trace"`
-	Decision       DecisionTrace  `json:"decision_trace"`
-	Evidence       EvidenceTrace  `json:"evidence_trace"`
+	Subject        string             `json:"subject"`
+	AssuranceState string             `json:"assurance_state"`
+	Timestamp      time.Time          `json:"timestamp"`
+	Telemetry      TelemetryTrace     `json:"telemetry_trace"`
+	Execution      ExecutionTrace     `json:"execution_trace"`
+	Decision       DecisionTrace      `json:"decision_trace"`
+	Evidence       EvidenceTrace      `json:"evidence_trace"`
+	Remediation    *RemediationAction `json:"remediation,omitempty"`
 }
 
 // InspectSubject inspects a workload subject and reconstructs all 4 Truth Channels.
@@ -172,6 +182,39 @@ func InspectSubject(
 		LineageVerified: true,
 	}
 
+	var remediation *RemediationAction
+	ctrlID := eval.Control.ID
+	if ctrlID == "" {
+		ctrlID = "AC-6"
+	}
+
+	switch eval.State {
+	case assurance.AssuranceStateUnknown:
+		remediation = &RemediationAction{
+			TargetControl:  ctrlID,
+			Disposition:    "SAFE_HOLD",
+			MissingSignals: []string{"kubernetes.admission evidence", "runtime.ebpf telemetry", "spiffe.svid identity"},
+			RemediationCmd: "oskal record admission --file <manifest.yaml> OR deploy ckodex-webhook to cluster",
+			Explanation:    "Subject is in SAFE_HOLD because no verified evidence envelopes exist in CAS (EMPTY != NEGATIVE). Ingest observations to transition out of UNKNOWN.",
+		}
+	case assurance.AssuranceStateFailed:
+		remediation = &RemediationAction{
+			TargetControl:  ctrlID,
+			Disposition:    "DENY",
+			MissingSignals: []string{"non-root securityContext", "dropped capabilities (CAP_SYS_ADMIN, CAP_NET_ADMIN)"},
+			RemediationCmd: "Update pod spec: set securityContext.runAsNonRoot=true and drop privileged capabilities",
+			Explanation:    "Subject violated non-negotiable security invariant (Invariant I-01). Resource execution is blocked.",
+		}
+	case assurance.AssuranceStateStale:
+		remediation = &RemediationAction{
+			TargetControl:  ctrlID,
+			Disposition:    "ADMIT_WITH_OBLIGATIONS",
+			MissingSignals: []string{"fresh evidence within 15-minute validity epoch"},
+			RemediationCmd: "oskal daemon sync OR trigger observer refresh for subject",
+			Explanation:    "Existing evidence is older than maximum freshness window. Refresh required to maintain assurance standing.",
+		}
+	}
+
 	report := &InspectionReport{
 		Subject:        subject.URI(),
 		AssuranceState: eval.State.String(),
@@ -180,6 +223,7 @@ func InspectSubject(
 		Execution:      execTrace,
 		Decision:       decTrace,
 		Evidence:       evidenceTrace,
+		Remediation:    remediation,
 	}
 	report.Telemetry.EvaluationDuration = formatDurationASCII(time.Since(start))
 	return report

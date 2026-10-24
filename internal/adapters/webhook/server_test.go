@@ -377,3 +377,73 @@ func TestAdmissionWebhook_PartialSecurityContextWithoutRunAsNonRoot(t *testing.T
 		t.Fatalf("expected runAsNonRoot violation message, got %s", resp.Response.Result.Message)
 	}
 }
+
+func TestAdmissionWebhook_DegradedModes_AuditAndWarn(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "legacy-app", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "legacy",
+					Image: "legacy:v1",
+					SecurityContext: &corev1.SecurityContext{
+						Privileged: ptrBool(true),
+					},
+				},
+			},
+		},
+	}
+
+	podRaw, _ := json.Marshal(pod)
+	review := admissionv1.AdmissionReview{
+		Request: &admissionv1.AdmissionRequest{
+			UID:    "req-degraded-mode",
+			Kind:   metav1.GroupVersionKind{Kind: "Pod", Version: "v1"},
+			Object: runtime.RawExtension{Raw: podRaw},
+		},
+	}
+	body, _ := json.Marshal(review)
+
+	// 1. ModeAudit allows admission and adds degraded mode audit annotations
+	auditServer := NewAdmissionWebhookServer(ServerConfig{
+		Mode: ModeAudit,
+	})
+	reqAudit := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
+	wAudit := httptest.NewRecorder()
+	auditServer.Handler().ServeHTTP(wAudit, reqAudit)
+
+	var respAudit admissionv1.AdmissionReview
+	_ = json.Unmarshal(wAudit.Body.Bytes(), &respAudit)
+	if respAudit.Response == nil || !respAudit.Response.Allowed {
+		t.Fatalf("expected ModeAudit to allow admission")
+	}
+	if respAudit.Response.AuditAnnotations["assurance.ckodex.io/admitted-in-degraded-mode"] != "true" {
+		t.Errorf("expected degraded mode audit annotation")
+	}
+	if respAudit.Response.AuditAnnotations["assurance.ckodex.io/webhook-mode"] != "audit" {
+		t.Errorf("expected webhook-mode annotation to be audit")
+	}
+	if len(respAudit.Response.Warnings) > 0 {
+		t.Errorf("expected no admission warnings in pure audit mode")
+	}
+
+	// 2. ModeWarn allows admission, adds audit annotations AND admission warnings
+	warnServer := NewAdmissionWebhookServer(ServerConfig{
+		Mode: ModeWarn,
+	})
+	reqWarn := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
+	wWarn := httptest.NewRecorder()
+	warnServer.Handler().ServeHTTP(wWarn, reqWarn)
+
+	var respWarn admissionv1.AdmissionReview
+	_ = json.Unmarshal(wWarn.Body.Bytes(), &respWarn)
+	if respWarn.Response == nil || !respWarn.Response.Allowed {
+		t.Fatalf("expected ModeWarn to allow admission")
+	}
+	if respWarn.Response.AuditAnnotations["assurance.ckodex.io/admitted-in-degraded-mode"] != "true" {
+		t.Errorf("expected degraded mode audit annotation in warn mode")
+	}
+	if len(respWarn.Response.Warnings) == 0 {
+		t.Errorf("expected admission warnings in warn mode")
+	}
+}

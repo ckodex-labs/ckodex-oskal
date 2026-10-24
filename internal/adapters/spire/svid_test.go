@@ -250,3 +250,41 @@ func TestSVIDValidator_WorkloadIdentityAttestation(t *testing.T) {
 		t.Errorf("expected error on service account mismatch, got nil")
 	}
 }
+
+func TestSVIDValidator_ClockSkewTolerance(t *testing.T) {
+	caCert, caKey, caPEM := generateTestCA(t, "SPIFFE Root CA")
+	bundle := NewTrustBundle()
+	_ = bundle.AddRootCA("prod", caPEM)
+
+	validator := NewSVIDValidator(bundle, assurance.AuthorityRef{})
+	validator.SetClockSkewTolerance(1 * time.Minute)
+
+	baseTime := time.Now().Add(2 * time.Hour)
+
+	// SVID valid from baseTime to baseTime + 30m
+	svid := generateTestSVID(t, caCert, caKey, "spiffe://prod/ns/payments/sa/api", baseTime, baseTime.Add(30*time.Minute))
+
+	// Case 1: Node clock is 20s behind notBefore. Within 1m tolerance -> should pass
+	validator.SetClockOverride(func() time.Time {
+		return baseTime.Add(-20 * time.Second)
+	})
+	if _, err := validator.ValidateSVID(svid); err != nil {
+		t.Errorf("expected SVID to be valid within clock skew tolerance before notBefore, got err: %v", err)
+	}
+
+	// Case 2: Node clock is 20s past notAfter. Within 1m tolerance -> should pass
+	validator.SetClockOverride(func() time.Time {
+		return baseTime.Add(30*time.Minute + 20*time.Second)
+	})
+	if _, err := validator.ValidateSVID(svid); err != nil {
+		t.Errorf("expected SVID to be valid within clock skew tolerance after notAfter, got err: %v", err)
+	}
+
+	// Case 3: Node clock is 2m past notAfter. Exceeds 1m tolerance -> should fail
+	validator.SetClockOverride(func() time.Time {
+		return baseTime.Add(32 * time.Minute)
+	})
+	if _, err := validator.ValidateSVID(svid); err == nil {
+		t.Errorf("expected SVID to fail when exceeding clock skew tolerance, got nil")
+	}
+}
