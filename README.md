@@ -34,7 +34,79 @@ NIST OSCAL v1.2.3 Artifacts (Assessment Results, SSP, Component Definition, POAM
 
 ---
 
-## Architectural Signature
+## Unified Developer & Agentic Experience (UX / DX)
+
+OSKAL provides a complete suite of developer-first and AI-native capabilities:
+
+```text
++-------------------------------------------------------------------------+
+|                  OSKAL UNIFIED DEVELOPER & AGENTIC SUITE                |
++-------------------------------------------------------------------------+
+|  [Agentic DX]        oskal mcp          Native JSON-RPC 2.0 stdio       |
+|                                         tools for AI IDEs & Agents      |
+|  [Diagnostic DX]     oskal doctor       Deep preflight diagnostics      |
+|                      oskal inspect      4 Truth Channels reconstructor  |
+|  [Schema DX]         oskal validate     Embedded sub-millisecond        |
+|                                         NIST v1.2.3 validator           |
+|  [Workflow DX]       oskal scaffold     NIST / PCI / SOC2 generators    |
+|                      --output format    table, tree, json, yaml         |
+|  [Terminal UX]       oskal cockpit      Pure ASCII live dashboard       |
++-------------------------------------------------------------------------+
+```
+
+### 1. Agentic DX: Native Model Context Protocol (`oskal mcp`)
+Connects OSKAL directly to AI development tools (Claude Code, Cursor, OpenCode, VS Code) via stdio JSON-RPC 2.0 without middleware:
+- `get_assurance_state`: Query 6D vector state `<P, V, A, C, E, L, tau>`.
+- `explain_claim`: Inspect causal decision graphs for specific controls.
+- `validate_oscal`: In-process NIST v1.2.3 JSON/YAML document validation.
+- `detect_drift`: Multi-dimensional drift detection.
+- `scaffold_compliance`: Generate CRDs and OSCAL templates for any profile.
+- `project_oscal`: Real-time export to AR, CD, SSP, AP, and POAM.
+- `run_doctor`: System preflight health diagnosis.
+
+### 2. Deep Diagnostics (`oskal doctor` & `oskal inspect`)
+- **`oskal doctor`**: Preflight checks for Kernel substrate, Kubernetes API reachability, SPIFFE/SPIRE sockets, Sigstore trust root, CAS storage permissions, and embedded NIST schemas.
+- **`oskal inspect <subject-uri>`**: Reconstructs the **Four Truth Channels** (Constitution Section 13) without collapsing them into generic logs:
+  1. *Telemetry Trace*: Latency, evaluation time, CPU/memory usage.
+  2. *Execution Trace*: Sequential pipeline stages and CEL evaluations.
+  3. *Decision Trace*: Policies, obligations, and disposition (ADMIT/SAFE_HOLD/DENY).
+  4. *Evidence Trace*: Content-addressed envelopes, digests, and Merkle root.
+
+### 3. Schema Validation DX (`oskal validate`)
+Validates any NIST OSCAL v1.2.3 document (JSON or YAML) with sub-millisecond execution:
+- Auto-detects document type from root element.
+- Provides exact JSON-path failure diagnostics (e.g. `/assessment-results/results/0/uuid`).
+- Operates 100% offline via embedded schemas (zero internet dependency).
+
+```bash
+# Validate piped export or existing document
+oskal export assessment-results --subject k8s://prod/payments/Deployment/payments-api | oskal validate -
+```
+
+### 4. Workflow Scaffolding (`oskal scaffold`)
+Generates production-grade Kubernetes compliance manifests and OSCAL templates for standard baselines:
+- Supported profiles: `nist-sp-800-53`, `pci-dss`, `soc-2`, `iso-27001`.
+- Generates `EvidenceContract`, `ControlBinding`, CEL admission rules, and Component Definitions.
+
+```bash
+# Scaffold NIST SP 800-53 baseline for payments workload
+oskal scaffold nist-sp-800-53 --workload payments-api --output yaml
+```
+
+### 5. Interactive Terminal Cockpit (`oskal cockpit`)
+A live pure ASCII terminal monitoring dashboard displaying:
+- Real-time vector state across workloads.
+- Active Merkle lineage and epoch roots.
+- Ingestion rates, active evidence count, and drift status.
+- Non-interactive snapshot mode (`--once`) for CI pipelines.
+
+```bash
+# Run interactive cockpit or single-frame snapshot
+oskal cockpit --refresh 2s
+oskal cockpit --once
+```
+
+---
 
 - **Pure Semantic Kernel:** `core/assurance` owns domain semantics and invariants with zero external dependencies (100% Go standard library).
 - **Invariant I-02 (Absence of Evidence is UNKNOWN):** Never return optimistic passes. If evidence is missing, unverified, expired, or corrupted, the state MUST resolve to `UNKNOWN` or `STALE`, never `PASS` or `ASSURED`.

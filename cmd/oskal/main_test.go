@@ -99,3 +99,63 @@ func TestCLI_WebhookHelp(t *testing.T) {
 		t.Fatalf("unexpected webhook help output: %s", out)
 	}
 }
+
+func TestCLI_Doctor(t *testing.T) {
+	cmd := NewRootCommand()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"doctor", "--output", "json"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error executing doctor: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"Runtime Substrate"`) || !strings.Contains(out, `"NIST OSCAL v1.2.3 Schemas"`) {
+		t.Fatalf("unexpected doctor output: %s", out)
+	}
+}
+
+func TestCLI_Inspect(t *testing.T) {
+	cmd := NewRootCommand()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"inspect", "k8s://prod/payments/Deployment/payments-api", "--output", "tree"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error executing inspect: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Channel 1: Telemetry") || !strings.Contains(out, "Channel 4: Evidence Trace") {
+		t.Fatalf("unexpected inspect tree output: %s", out)
+	}
+}
+
+func TestCLI_Scaffold(t *testing.T) {
+	cmd := NewRootCommand()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"scaffold", "nist-sp-800-53", "--workload", "order-service", "--output", "yaml"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error executing scaffold: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "kind: EvidenceContract") || !strings.Contains(out, "kind: ControlBinding") {
+		t.Fatalf("unexpected scaffold output: %s", out)
+	}
+}
+
+func TestCLI_CockpitOnce(t *testing.T) {
+	cmd := NewRootCommand()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"cockpit", "--once"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error executing cockpit --once: %v", err)
+	}
+}

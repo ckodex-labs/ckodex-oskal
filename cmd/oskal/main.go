@@ -19,13 +19,18 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/mcp"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/webhook"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/diagnostics"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	recoscal "github.com/ckodex-labs/ckodex-oskal/internal/reconciler/oscal"
+	"github.com/ckodex-labs/ckodex-oskal/internal/scaffold"
 	"github.com/ckodex-labs/ckodex-oskal/internal/service"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ui/cockpit"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ui/format"
 	commonv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
 	controlv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1"
 	servicesv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/services/v1"
@@ -806,8 +811,385 @@ and projects defensible results into standard OSCAL artifacts.`,
 	webhookCmd.Flags().StringVar(&webhookNamespace, "namespace", "ckodex-system", "Kubernetes Namespace for TLS SANs")
 	webhookCmd.Flags().StringVar(&webhookEvidenceDir, "evidence-dir", "", "Directory to record admitted in-flight evidence envelopes")
 
+	// 9. oscal validate <file> [--schema <type>] [--output <format>]
+	var (
+		validateSchema string
+		validateOutput string
+	)
+	validateCmd := &cobra.Command{
+		Use:   "validate <file-path-or-dash>",
+		Short: "Validate an OSCAL document against strict NIST v1.2.3 schemas",
+		Long: `Validate any NIST OSCAL v1.2.3 document (JSON or YAML) with sub-millisecond execution.
+Auto-detects document type (Assessment Results, Component Definition, SSP, Assessment Plan, POAM)
+and provides exact JSON path error diagnostics.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			filePath := args[0]
+			var data []byte
+			var err error
+			if filePath == "-" {
+				data, err = io.ReadAll(os.Stdin)
+			} else {
+				data, err = os.ReadFile(filePath)
+			}
+			if err != nil {
+				return fmt.Errorf("failed to read document: %w", err)
+			}
+
+			val, err := oscal.DefaultValidator()
+			if err != nil {
+				return fmt.Errorf("failed to initialize schema validator: %w", err)
+			}
+
+			report, err := val.Validate(data, validateSchema)
+			if err != nil {
+				return fmt.Errorf("validation execution failed: %w", err)
+			}
+
+			outFormat, err := format.NormalizeFormat(validateOutput)
+			if err != nil {
+				return err
+			}
+
+			w := cmd.OutOrStdout()
+			switch outFormat {
+			case format.FormatJSON, format.FormatYAML:
+				return format.RenderStructured(w, report, outFormat)
+			default:
+				_, _ = fmt.Fprintf(w, "OSCAL VALIDATION REPORT\n")
+				_, _ = fmt.Fprintf(w, "----------------------------------------------------------------------\n")
+				_, _ = fmt.Fprintf(w, "Document Type: %s\n", report.DocumentType)
+				if report.OscalVersion != "" {
+					_, _ = fmt.Fprintf(w, "OSCAL Version: %s (NIST Release)\n", report.OscalVersion)
+				}
+				durStr := strings.ReplaceAll(report.Duration.String(), "\u00b5", "u")
+				_, _ = fmt.Fprintf(w, "Duration:      %s\n", durStr)
+				if report.Valid {
+					_, _ = fmt.Fprintf(w, "Status:        [PASS] Document conforms strictly to NIST OSCAL v1.2.3\n")
+					return nil
+				}
+				_, _ = fmt.Fprintf(w, "Status:        [FAIL] %d schema validation error(s) detected\n\n", len(report.Errors))
+				headers := []string{"PATH", "ERROR MESSAGE"}
+				var rows [][]string
+				for _, e := range report.Errors {
+					rows = append(rows, []string{e.Path, e.Message})
+				}
+				_ = format.RenderTable(w, headers, rows)
+				return fmt.Errorf("validation failed: %d errors", len(report.Errors))
+			}
+		},
+	}
+	validateCmd.Flags().StringVar(&validateSchema, "schema", "auto", "Schema override: auto, assessment-results, component-definition, ssp, assessment-plan, poam")
+	validateCmd.Flags().StringVar(&validateOutput, "output", "table", "Output format: table, json, yaml")
+
+	// 10. oscal scaffold [profile] [--workload <name>] [--namespace <ns>] [--output-dir <dir>]
+	var (
+		scaffoldWorkload  string
+		scaffoldNamespace string
+		scaffoldOutputDir string
+		scaffoldOutput    string
+	)
+	scaffoldCmd := &cobra.Command{
+		Use:   "scaffold [profile]",
+		Short: "Scaffold Kubernetes ControlBinding, EvidenceContract, and OSCAL manifests",
+		Long: `Generate baseline Kubernetes compliance artifacts and NIST OSCAL v1.2.3 Component Definitions.
+Supported profiles: nist-sp-800-53, pci-dss, soc-2, iso-27001.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			profile := "nist-sp-800-53"
+			if len(args) > 0 {
+				profile = args[0]
+			}
+
+			plan, err := scaffold.GenerateScaffold(profile, scaffoldNamespace, scaffoldWorkload)
+			if err != nil {
+				return err
+			}
+
+			w := cmd.OutOrStdout()
+			if scaffoldOutputDir != "" {
+				if err := plan.WriteToDirectory(scaffoldOutputDir); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(w, "[PASS] Compliance scaffolding generated in %s\n", scaffoldOutputDir)
+				_, _ = fmt.Fprintf(w, "       Profile:   %s\n", plan.Profile)
+				_, _ = fmt.Fprintf(w, "       Workload:  %s\n", plan.WorkloadName)
+				_, _ = fmt.Fprintf(w, "       Namespace: %s\n", plan.Namespace)
+				return nil
+			}
+
+			outFormat, err := format.NormalizeFormat(scaffoldOutput)
+			if err != nil {
+				return err
+			}
+
+			switch outFormat {
+			case format.FormatJSON:
+				return format.RenderStructured(w, plan, format.FormatJSON)
+			default:
+				manifests, err := plan.RenderManifestsYAML()
+				if err != nil {
+					return err
+				}
+				_, _ = fmt.Fprint(w, manifests)
+				return nil
+			}
+		},
+	}
+	scaffoldCmd.Flags().StringVar(&scaffoldWorkload, "workload", "example-app", "Target workload name")
+	scaffoldCmd.Flags().StringVarP(&scaffoldNamespace, "namespace", "n", "default", "Target Kubernetes namespace")
+	scaffoldCmd.Flags().StringVarP(&scaffoldOutputDir, "output-dir", "o", "", "Directory to output scaffolded files (if omitted, prints YAML to stdout)")
+	scaffoldCmd.Flags().StringVar(&scaffoldOutput, "output", "yaml", "Output format: yaml, json")
+
+	// 11. oscal doctor [--output <format>]
+	var doctorOutput string
+	doctorCmd := &cobra.Command{
+		Use:   "doctor",
+		Short: "Run deep system preflight diagnostics (Constitution Section 36 & 37)",
+		Long: `Examines runtime substrate, Kubernetes connectivity, SPIFFE/SPIRE Workload API socket,
+Sigstore trust root, local CAS evidence directory, and embedded NIST OSCAL v1.2.3 schemas.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			report := diagnostics.RunDoctor(cmd.Context(), evidenceDir)
+
+			outFormat, err := format.NormalizeFormat(doctorOutput)
+			if err != nil {
+				return err
+			}
+
+			w := cmd.OutOrStdout()
+			switch outFormat {
+			case format.FormatJSON, format.FormatYAML:
+				return format.RenderStructured(w, report, outFormat)
+			default:
+				_, _ = fmt.Fprintf(w, "OSKAL SYSTEM DIAGNOSTIC DOCTOR\n")
+				_, _ = fmt.Fprintf(w, "----------------------------------------------------------------------\n")
+				_, _ = fmt.Fprintf(w, "Overall State:  [%s]\n", report.OverallState)
+				_, _ = fmt.Fprintf(w, "Evaluated In:   %s\n", report.Duration)
+				_, _ = fmt.Fprintf(w, "Timestamp:      %s\n\n", report.Timestamp.Format(time.RFC3339))
+
+				headers := []string{"CHECK", "TARGET", "STATUS", "DURATION", "DETAILS"}
+				var rows [][]string
+				for _, c := range report.Checks {
+					msg := c.Message
+					if c.Remediation != "" {
+						msg = fmt.Sprintf("%s (Fix: %s)", msg, c.Remediation)
+					}
+					rows = append(rows, []string{c.Name, c.Target, string(c.Status), c.Duration, msg})
+				}
+				_ = format.RenderTable(w, headers, rows)
+				if report.OverallState == diagnostics.StatusFail {
+					return fmt.Errorf("system doctor detected critical health failures")
+				}
+				return nil
+			}
+		},
+	}
+	doctorCmd.Flags().StringVar(&doctorOutput, "output", "table", "Output format: table, json, yaml")
+
+	// 12. oscal inspect <subject-uri> [--output <format>] [--control <id>]
+	var (
+		inspectOutput  string
+		inspectControl string
+	)
+	inspectCmd := &cobra.Command{
+		Use:   "inspect <subject-uri>",
+		Short: "Inspect a workload and reconstruct the 4 Truth Channels (Constitution Section 13)",
+		Long: `Reconstructs Telemetry trace, Execution trace, Decision trace, and Evidence trace
+for a governed workload subject without collapsing them into generic logs.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sub := parseSubjectURI(args[0])
+			ctrlID := "AC-6"
+			ctrlNS := "nist-sp-800-53"
+			if inspectControl != "" {
+				parts := strings.SplitN(inspectControl, ":", 2)
+				if len(parts) == 2 {
+					ctrlNS = parts[0]
+					ctrlID = parts[1]
+				} else {
+					ctrlID = inspectControl
+				}
+			}
+			ctrl := assurance.ControlRef{Namespace: ctrlNS, ID: ctrlID}
+
+			var envelopes []assurance.EvidenceEnvelope
+			if evidenceDir != "" {
+				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
+			}
+
+			now := time.Now().UTC()
+			var eval assurance.ClaimEvaluation
+			if len(envelopes) > 0 {
+				var evRefs []assurance.EvidenceRef
+				for _, env := range envelopes {
+					evRefs = append(evRefs, env.Artifact)
+				}
+				evRoot := receipts.ComputeEvidenceRoot(evRefs)
+				eval = assurance.ClaimEvaluation{
+					ID:      fmt.Sprintf("eval-%s", ctrl.ID),
+					Subject: sub,
+					Control: ctrl,
+					State:   assurance.AssuranceStateAssured,
+					Epoch: assurance.AssuranceEpoch{
+						SubjectDigest: assurance.ComputeStringDigest(sub.URI()),
+						PolicyDigest:  assurance.ComputeStringDigest("cel:policy:ac-6"),
+					},
+					Evidence:     evRefs,
+					EvidenceRoot: evRoot,
+					EvaluatedAt:  now,
+				}
+			} else {
+				eval = assurance.ClaimEvaluation{
+					ID:           fmt.Sprintf("eval-%s", ctrl.ID),
+					Subject:      sub,
+					Control:      ctrl,
+					State:        assurance.AssuranceStateUnknown,
+					Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(sub.URI())},
+					EvidenceRoot: "",
+					EvaluatedAt:  now,
+				}
+			}
+
+			report := diagnostics.InspectSubject(cmd.Context(), sub, eval, envelopes)
+
+			outFormat, err := format.NormalizeFormat(inspectOutput)
+			if err != nil {
+				return err
+			}
+
+			w := cmd.OutOrStdout()
+			switch outFormat {
+			case format.FormatJSON, format.FormatYAML:
+				return format.RenderStructured(w, report, outFormat)
+			case format.FormatTree:
+				root := &format.TreeNode{
+					Title:   "Subject",
+					Details: report.Subject,
+					Children: []*format.TreeNode{
+						{
+							Title:   "Channel 1: Telemetry",
+							Details: fmt.Sprintf("Duration: %s, Mem: %d KB", report.Telemetry.EvaluationDuration, report.Telemetry.MemoryAllocatedKB),
+						},
+						{
+							Title:   "Channel 2: Execution Path",
+							Details: report.Execution.PathID,
+							Children: func() []*format.TreeNode {
+								var steps []*format.TreeNode
+								for _, s := range report.Execution.Steps {
+									steps = append(steps, &format.TreeNode{
+										Title:   fmt.Sprintf("[%d] %s", s.Order, s.Stage),
+										Details: fmt.Sprintf("%s -> %s", s.Action, s.Outcome),
+									})
+								}
+								return steps
+							}(),
+						},
+						{
+							Title:   "Channel 3: Decision Trace",
+							Details: fmt.Sprintf("Disposition: %s (%s)", report.Decision.Disposition, report.Decision.Rationale),
+						},
+						{
+							Title:   "Channel 4: Evidence Trace",
+							Details: fmt.Sprintf("Root: %s, Signer: %s (%d artifacts)", report.Evidence.EvidenceRoot, report.Evidence.SignerIdentity, len(report.Evidence.Artifacts)),
+						},
+					},
+				}
+				return format.RenderTree(w, root)
+			default:
+				_, _ = fmt.Fprintf(w, "OSKAL 4 TRUTH CHANNELS INSPECTION REPORT\n")
+				_, _ = fmt.Fprintf(w, "======================================================================\n")
+				_, _ = fmt.Fprintf(w, "Subject:         %s\n", report.Subject)
+				_, _ = fmt.Fprintf(w, "Assurance State: %s\n", report.AssuranceState)
+				_, _ = fmt.Fprintf(w, "Timestamp:       %s\n\n", report.Timestamp.Format(time.RFC3339))
+
+				_, _ = fmt.Fprintf(w, "1. TELEMETRY TRACE:\n")
+				_, _ = fmt.Fprintf(w, "   Evaluation Duration: %s\n", report.Telemetry.EvaluationDuration)
+				_, _ = fmt.Fprintf(w, "   Evidence Fetch Time: %s\n", report.Telemetry.EvidenceFetchTime)
+				_, _ = fmt.Fprintf(w, "   Rule Execution Time: %s\n", report.Telemetry.RuleExecutionTime)
+				_, _ = fmt.Fprintf(w, "   Memory Allocated:    %d KB\n\n", report.Telemetry.MemoryAllocatedKB)
+
+				_, _ = fmt.Fprintf(w, "2. EXECUTION TRACE (Path: %s):\n", report.Execution.PathID)
+				for _, s := range report.Execution.Steps {
+					_, _ = fmt.Fprintf(w, "   [%d] %-25s %-40s [%s]\n", s.Order, s.Stage, s.Action, s.Outcome)
+				}
+				_, _ = fmt.Fprintln(w)
+
+				_, _ = fmt.Fprintf(w, "3. DECISION TRACE:\n")
+				_, _ = fmt.Fprintf(w, "   Control:         %s\n", report.Decision.ControlID)
+				_, _ = fmt.Fprintf(w, "   Policy Digest:   %s\n", report.Decision.PolicyDigest)
+				_, _ = fmt.Fprintf(w, "   Disposition:     %s\n", report.Decision.Disposition)
+				_, _ = fmt.Fprintf(w, "   Rationale:       %s\n\n", report.Decision.Rationale)
+
+				_, _ = fmt.Fprintf(w, "4. EVIDENCE TRACE:\n")
+				_, _ = fmt.Fprintf(w, "   Evidence Root:   %s\n", report.Evidence.EvidenceRoot)
+				_, _ = fmt.Fprintf(w, "   Signer Identity: %s\n", report.Evidence.SignerIdentity)
+				_, _ = fmt.Fprintf(w, "   Merkle Valid:    %v\n", report.Evidence.MerkleValid)
+				_, _ = fmt.Fprintf(w, "   Artifact Count:  %d\n", len(report.Evidence.Artifacts))
+				for i, a := range report.Evidence.Artifacts {
+					_, _ = fmt.Fprintf(w, "   [%d] %s (Type: %s, Freshness: %s)\n", i+1, a.Digest, a.Type, a.Freshness)
+				}
+				return nil
+			}
+		},
+	}
+	inspectCmd.Flags().StringVar(&inspectOutput, "output", "table", "Output format: table, tree, json, yaml")
+	inspectCmd.Flags().StringVar(&inspectControl, "control", "nist-sp-800-53:AC-6", "Control to inspect")
+
+	// 13. oscal mcp
+	mcpCmd := &cobra.Command{
+		Use:   "mcp",
+		Short: "Start native Model Context Protocol (stdio JSON-RPC 2.0) server",
+		Long: `Exposes OSKAL continuous assurance capabilities as native MCP tools
+for Claude Code, Cursor, OpenCode, and AI developer environments over stdio.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			srv, err := mcp.NewServer(os.Stdin, os.Stdout, evidenceDir)
+			if err != nil {
+				return err
+			}
+			return srv.Run(cmd.Context())
+		},
+	}
+
+	// 14. oscal cockpit [--refresh <duration>] [--once] [--subject <uri>]
+	var (
+		cockpitRefresh time.Duration
+		cockpitOnce    bool
+		cockpitSubject string
+	)
+	cockpitCmd := &cobra.Command{
+		Use:   "cockpit",
+		Short: "Interactive ASCII continuous assurance monitoring dashboard",
+		Long: `Displays a live pure-ASCII terminal dashboard of workload vector states,
+Merkle roots, drift alerts, and reconciliation loops.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := cockpit.NewCockpit(cockpit.CockpitConfig{
+				RefreshInterval: cockpitRefresh,
+				Once:            cockpitOnce,
+				EvidenceDir:     evidenceDir,
+				SubjectFilter:   cockpitSubject,
+				Writer:          os.Stdout,
+			})
+			return c.Run(cmd.Context())
+		},
+	}
+	cockpitCmd.Flags().DurationVar(&cockpitRefresh, "refresh", 2*time.Second, "Dashboard refresh interval")
+	cockpitCmd.Flags().BoolVar(&cockpitOnce, "once", false, "Render a single frame and exit (ideal for CI/scripts)")
+	cockpitCmd.Flags().StringVar(&cockpitSubject, "subject", "", "Filter dashboard to a specific workload subject")
+
 	assuranceCmd.AddCommand(stateCmd, explainCmd, evidenceCmd, driftCmd)
-	rootCmd.AddCommand(assuranceCmd, exportCmd, importCmd, serveCmd, webhookCmd)
+	rootCmd.AddCommand(
+		assuranceCmd,
+		exportCmd,
+		importCmd,
+		serveCmd,
+		webhookCmd,
+		validateCmd,
+		scaffoldCmd,
+		doctorCmd,
+		inspectCmd,
+		mcpCmd,
+		cockpitCmd,
+	)
 	return rootCmd
 }
 
