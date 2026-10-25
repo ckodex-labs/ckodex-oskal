@@ -32,7 +32,7 @@ For local development and testing, OSKAL provides a standalone server daemon tha
 Start the daemon on port 9090 in a background terminal:
 
 ```bash
-./bin/oskal serve --addr :9090 &
+./bin/oskal serve --port 9090 &
 ```
 
 Verify that the server is responding:
@@ -44,11 +44,14 @@ Verify that the server is responding:
 Because no observations have been ingested yet, OSKAL strictly enforces **Invariant I-02** and outputs:
 
 ```text
-[STATE: UNKNOWN]
-SUBJECT:     Deployment/payment-service (ns: production)
-STATUS:      Absence of verified evidence (Invariant I-02)
-EVIDENCE:    0 verified leaf envelopes
-MERKLE ROOT: 
+SUBJECT:         k8s://production/Deployment/payment-service
+STATE:           UNKNOWN
+STATUS:          No matching evidence envelopes found (Invariant I-02)
+EVIDENCE ROOT:   none
+LAST EVALUATED:  2026-10-25T12:00:00Z
+FRESHNESS:       unknown
+MISSING SIGNALS: kubernetes.admission, runtime.ebpf, spiffe.svid
+REMEDIATION:     oskal record admission --file <manifest.yaml> OR specify --server
 ```
 
 Notice that OSKAL does not report a fake `PASS` or synthetic digest. Absence of evidence is `UNKNOWN`.
@@ -57,7 +60,7 @@ Notice that OSKAL does not report a fake `PASS` or synthetic digest. Absence of 
 
 ## Step 2: Ingest Valid Admission & Runtime Evidence
 
-Now, we will simulate the ingestion of authentic evidence envelopes emitted by the Kubernetes CEL admission controller and the Tetragon runtime sensor.
+Now, we will simulate the ingestion of authentic evidence envelopes emitted by the Kubernetes CEL admission controller and the runtime sensor.
 
 Create a temporary directory for evidence envelopes:
 
@@ -65,59 +68,85 @@ Create a temporary directory for evidence envelopes:
 mkdir -p /tmp/oskal-tutorial/evidence
 ```
 
-Write the admission observation envelope to `/tmp/oskal-tutorial/evidence/env-admission.json`:
+You can either record evidence automatically from a manifest using the OSKAL CLI:
+
+```bash
+./bin/oskal record admission --file examples/sample-workload.yaml --evidence-dir /tmp/oskal-tutorial/evidence
+```
+
+Or write the canonical admission observation envelope directly to `/tmp/oskal-tutorial/evidence/env-admission.json`:
 
 ```json
 {
+  "schema": "https://assurance.ckodex.io/schemas/v1",
   "id": "env-001-admission",
-  "schema_version": "1.0.0",
   "subject": {
-    "kind": "Deployment",
-    "namespace": "production",
-    "name": "payment-service",
-    "generation": 1
+    "scheme": "k8s",
+    "id": "production/Deployment/payment-service"
   },
-  "producer_spiffe_id": "spiffe://ckodex.internal/ns/system/sa/oskal-cel-adapter",
-  "observation": {
-    "observation_id": "obs-001",
-    "observation_type": "kubernetes.admission",
-    "subject_digest": "sha256:1a84f329910c2837bc281",
-    "policy_digest": "sha256:e3b0c44298fc1c149afbf4",
-    "collected_at": "2026-09-24T11:20:00Z",
-    "attributes": {
-      "admission.k8s.io/allowed": "true",
-      "policy.k8s.io/name": "disallow-privileged-containers"
+  "observationType": "admission",
+  "capturedAt": "2026-10-25T12:00:00Z",
+  "producer": {
+    "scheme": "spiffe",
+    "subject": "ckodex.internal/ns/system/sa/oskal-cel-adapter"
+  },
+  "artifact": {
+    "uri": "file:///manifests/payment-service.yaml",
+    "digest": "sha256:88192a0149bb8812c3098194a081bc2014918239018401928091820491820938",
+    "mediaType": "application/yaml"
+  },
+  "integrityDigest": "sha256:88192a0149bb8812c3098194a081bc2014918239018401928091820491820938",
+  "epoch": {
+    "subjectDigest": "sha256:1a84f329910c2837bc2810000000000000000000000000000000000000000000",
+    "implementationDigest": "sha256:f47a981240182409182409182409182409182409182409182409182409182409",
+    "policyDigest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "authorityDigest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    "environmentDigest": "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+  },
+  "controlRefs": [
+    {
+      "namespace": "nist-sp-800-53",
+      "id": "AC-6"
     }
-  },
-  "integrity_digest": "sha256:88192a0149bb8812c30981"
+  ]
 }
 ```
 
-Write the Tetragon runtime observation envelope to `/tmp/oskal-tutorial/evidence/env-runtime.json`:
+Write the runtime observation envelope to `/tmp/oskal-tutorial/evidence/env-runtime.json`:
 
 ```json
 {
+  "schema": "https://assurance.ckodex.io/schemas/v1",
   "id": "env-002-runtime",
-  "schema_version": "1.0.0",
   "subject": {
-    "kind": "Deployment",
-    "namespace": "production",
-    "name": "payment-service",
-    "generation": 1
+    "scheme": "k8s",
+    "id": "production/Deployment/payment-service"
   },
-  "producer_spiffe_id": "spiffe://ckodex.internal/ns/system/sa/oskal-tetragon-adapter",
-  "observation": {
-    "observation_id": "obs-002",
-    "observation_type": "workload.runtime.capabilities",
-    "subject_digest": "sha256:1a84f329910c2837bc281",
-    "policy_digest": "sha256:e3b0c44298fc1c149afbf4",
-    "collected_at": "2026-09-24T11:20:05Z",
-    "attributes": {
-      "process.security/effective_capabilities": "none",
-      "kernel.bpf/dropped_caps": "CAP_SYS_ADMIN,CAP_NET_ADMIN"
+  "observationType": "runtime.capabilities",
+  "capturedAt": "2026-10-25T12:00:05Z",
+  "producer": {
+    "scheme": "spiffe",
+    "subject": "ckodex.internal/ns/system/sa/oskal-tetragon-adapter"
+  },
+  "artifact": {
+    "uri": "k8s://production/Deployment/payment-service/caps",
+    "digest": "sha256:49c01192fa9812cc182901380918204918240182903810293810928301928301",
+    "mediaType": "application/json"
+  },
+  "integrityDigest": "sha256:49c01192fa9812cc182901380918204918240182903810293810928301928301",
+  "epoch": {
+    "subjectDigest": "sha256:1a84f329910c2837bc2810000000000000000000000000000000000000000000",
+    "implementationDigest": "sha256:f47a981240182409182409182409182409182409182409182409182409182409",
+    "policyDigest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "authorityDigest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    "environmentDigest": "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+  },
+  "controlRefs": [
+    {
+      "namespace": "nist-sp-800-53",
+      "id": "AC-6"
     }
-  },
-  "integrity_digest": "sha256:49c01192fa9812cc182901"
+  ]
 }
 ```
 
@@ -139,26 +168,64 @@ Run the OSKAL explain command pointing to the directory of authentic evidence:
 The output renders the Section 51 Explain Graph:
 
 ```text
-================================================================================
-SECTION 51 EXPLAIN GRAPH: AC-6 (Least Privilege)
-SUBJECT: Deployment/payment-service (ns: production, gen: 1)
-EVALUATION: [PASS] (Score: 1.00)
---------------------------------------------------------------------------------
-ATOMIC REQUIREMENTS:
-  [PASS] kubernetes.admission (Source: env-001-admission)
-         Digest: sha256:88192a0149bb8812c30981
-  [PASS] workload.runtime.capabilities (Source: env-002-runtime)
-         Digest: sha256:49c01192fa9812cc182901
+SUBJECT
+k8s://production/Deployment/payment-service
 
-CANONICAL MERKLE EVIDENCE ROOT:
-  sha256:39a81f08cb2149b109e2098fa0192809ca1980a0129038cb019a82019481920b
+CONTROL
+nist-sp-800-53:AC-6
 
-CRYPTOGRAPHIC RECEIPT:
-  Receipt ID: rcpt-prod-payment-service-AC-6
-  Signer:     spiffe://ckodex.internal/ns/system/sa/oskal-controller
-  Algorithm:  Ed25519
-  Signature:  3f890a...b189
-================================================================================
+CANONICAL CONTROL
+ckodex:least-privilege
+
+APPLICABILITY
+[PASS] applicable
+
+ATOMIC REQUIREMENTS
+
+[PASS] non-root execution
+[PASS] capability restriction
+[PASS] bounded ServiceAccount
+[PASS] network isolation
+[PASS] workload identity
+[PASS] approved artifact
+
+IMPLEMENTATIONS
+
+non-root
+  kubernetes ValidatingAdmissionPolicy
+capabilities
+  Kubernetes CEL
+  Tetragon runtime observer
+identity
+  SPIFFE/SPIRE
+network
+  Cilium
+artifact
+  Sigstore
+
+EVIDENCE
+
+[PASS] admission decision
+[PASS] signed OCI artifact
+[PASS] workload identity
+[PASS] network configuration
+[PASS] runtime process observation
+[PASS] capability observation
+
+COMPLETENESS
+6 / 6 required
+
+FRESHNESS
+current
+
+AUTHORITY
+verified
+
+ASSURANCE
+ASSURED
+
+EVIDENCE ROOT
+sha256:33b2bca7002b852ba15a9fae8d57597393caa446c467bde0afed6a7c9b327fdf
 ```
 
 ---
