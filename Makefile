@@ -41,7 +41,7 @@ fmt:
 	gofmt -s -w .
 
 clean:
-	rm -rf $(BIN_DIR) coverage.out coverage.html
+	rm -rf $(BIN_DIR) dist coverage.out coverage.html site/public site/resources site/.hugo_build.lock .hugo_build.lock evidence .oskal.yaml
 
 e2e: build
 	./scripts/e2e-kind-testbed.sh

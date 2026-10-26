@@ -1,11 +1,17 @@
-# Binaries
+# Binaries and Build Artifacts
 bin/
+dist/
+*.test
 
 # Coverage
 coverage.out
 coverage.html
 
-# IDE
+# Local Evidence CAS and Config
+evidence/
+.oskal.yaml
+
+# IDE and Editor
 .idea/
 .vscode/
 *.swp
