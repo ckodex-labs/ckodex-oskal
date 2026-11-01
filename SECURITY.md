@@ -6,6 +6,7 @@ The following table lists the security support status for versions of `ckodex-os
 
 | Version | Supported |
 | ------- | --------- |
+| 0.3.x   | Yes       |
 | 0.2.x   | Yes       |
 | < 0.2.0 | No        |
 

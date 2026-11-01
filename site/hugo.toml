@@ -12,6 +12,9 @@ title = "CKODEX-OSKAL - Continuous Assurance Runtime"
   evidence_tier = "E5"
   invariant = "mode changes deployment, not governance semantics"
 
+[outputs]
+  home = ["HTML", "JSON"]
+
 [markup]
   [markup.goldmark]
     [markup.goldmark.renderer]

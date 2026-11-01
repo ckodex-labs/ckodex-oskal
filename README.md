@@ -56,6 +56,24 @@ OSKAL provides a complete suite of developer-first and AI-native capabilities:
 +-------------------------------------------------------------------------+
 ```
 
+### Quickstart (30-Second Walkthrough)
+
+Experience the entire continuous assurance loop (doctor, NIST validation, CRD contract scaffolding, 4 Truth Channels reconstruction, and live cockpit) in under 30 seconds:
+
+```bash
+# Run the automated end-to-end quickstart script
+./examples/quickstart-walkthrough.sh
+```
+
+Or run individual Developer Experience targets directly via Makefile:
+
+```bash
+make doctor          # Deep system preflight diagnostics
+make validate-sample # Sub-millisecond NIST OSCAL v1.2.3 validation
+make cockpit         # Live ASCII continuous assurance monitoring dashboard
+make docs-build      # Build complete Hugo documentation site
+```
+
 ### 1. Agentic DX: Native Model Context Protocol (`oskal mcp`)
 Connects OSKAL directly to AI development tools (Claude Code, Cursor, OpenCode, VS Code) via stdio JSON-RPC 2.0 without middleware:
 - `get_assurance_state`: Query 6D vector state `<P, V, A, C, E, L, tau>`.

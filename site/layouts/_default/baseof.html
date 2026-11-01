@@ -248,6 +248,29 @@
     {{ partial "margin.html" . }}
     {{ partial "footer.html" . }}
   </div>
+
+  <!-- Search Dialog Modal -->
+  <div id="ck-search-modal" class="ck-search-modal" style="display: none;" role="dialog" aria-modal="true" aria-label="Search Documentation">
+    <div class="ck-search-backdrop"></div>
+    <div class="ck-search-panel">
+      <div class="ck-search-input-wrap">
+        <span class="ck-search-icon">&gt;</span>
+        <input type="text" id="ck-search-input" placeholder="Search tutorials, how-tos, reference, invariants..." autocomplete="off" spellcheck="false" aria-label="Search input">
+        <button id="ck-search-close" class="ck-search-kbd" type="button" aria-label="Close search dialog" style="cursor: pointer;">ESC</button>
+      </div>
+      <div id="ck-search-results" class="ck-search-results" role="listbox">
+        <div class="ck-search-empty">Type keywords to search NIST OSCAL specs, CLI commands, tutorials, and invariants...</div>
+      </div>
+      <div class="ck-search-footer">
+        <span><kbd>&uarr;</kbd> <kbd>&darr;</kbd> Navigate</span>
+        <span><kbd>ENTER</kbd> Select</span>
+        <span><kbd>ESC</kbd> Close</span>
+      </div>
+    </div>
+  </div>
+
+  <script>window.CKODEX_INDEX_URL = "{{ "index.json" | relURL }}";</script>
   <script src="{{ "js/theme.js" | relURL }}"></script>
+  <script src="{{ "js/search.js" | relURL }}"></script>
 </body>
 </html>
