@@ -3,10 +3,13 @@ package oskal
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	commonv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
@@ -36,9 +39,11 @@ type Client interface {
 }
 
 type grpcClient struct {
-	conn       *grpc.ClientConn
-	grpcClient servicesv1.AssuranceServiceClient
-	timeout    time.Duration
+	conn        *grpc.ClientConn
+	grpcClient  servicesv1.AssuranceServiceClient
+	timeout     time.Duration
+	maxAttempts int
+	baseBackoff time.Duration
 }
 
 // ClientOption configures an OSKAL client.
@@ -47,6 +52,8 @@ type ClientOption func(*clientOptions)
 type clientOptions struct {
 	dialOptions []grpc.DialOption
 	timeout     time.Duration
+	maxAttempts int
+	baseBackoff time.Duration
 }
 
 // WithInsecure specifies insecure gRPC transport (useful for internal or local dev).
@@ -70,10 +77,26 @@ func WithTimeout(d time.Duration) ClientOption {
 	}
 }
 
+// WithRetry configures bounded retry with exponential backoff and jitter for idempotent read RPCs (Constitution Section 30).
+func WithRetry(maxAttempts int, baseBackoff time.Duration) ClientOption {
+	return func(o *clientOptions) {
+		if maxAttempts < 1 {
+			maxAttempts = 1
+		}
+		if maxAttempts > 5 {
+			maxAttempts = 5
+		}
+		o.maxAttempts = maxAttempts
+		o.baseBackoff = baseBackoff
+	}
+}
+
 // NewClient connects to an OSKAL AssuranceService gRPC daemon at the specified target address.
 func NewClient(ctx context.Context, target string, opts ...ClientOption) (Client, error) {
 	options := clientOptions{
-		timeout: 10 * time.Second,
+		timeout:     10 * time.Second,
+		maxAttempts: 2,
+		baseBackoff: 25 * time.Millisecond,
 	}
 	for _, opt := range opts {
 		opt(&options)
@@ -89,9 +112,11 @@ func NewClient(ctx context.Context, target string, opts ...ClientOption) (Client
 	}
 
 	return &grpcClient{
-		conn:       conn,
-		grpcClient: servicesv1.NewAssuranceServiceClient(conn),
-		timeout:    options.timeout,
+		conn:        conn,
+		grpcClient:  servicesv1.NewAssuranceServiceClient(conn),
+		timeout:     options.timeout,
+		maxAttempts: options.maxAttempts,
+		baseBackoff: options.baseBackoff,
 	}, nil
 }
 
@@ -109,15 +134,69 @@ func (c *grpcClient) withTimeout(ctx context.Context) (context.Context, context.
 	return ctx, func() {}
 }
 
-func (c *grpcClient) GetAssuranceState(ctx context.Context, subject SubjectRef) (*StateResponse, error) {
-	rpcCtx, cancel := c.withTimeout(ctx)
-	defer cancel()
+func isTransientGRPCError(err error) bool {
+	if err == nil {
+		return false
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.Unavailable, codes.ResourceExhausted:
+		return true
+	default:
+		return false
+	}
+}
 
-	resp, err := c.grpcClient.GetAssuranceState(rpcCtx, &servicesv1.GetAssuranceStateRequest{
-		Subject: &commonv1.SubjectRef{
-			Scheme: subject.Scheme,
-			Id:     subject.ID,
-		},
+func (c *grpcClient) doIdempotentRPC(ctx context.Context, fn func(context.Context) error) error {
+	attempts := c.maxAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		rpcCtx, cancel := c.withTimeout(ctx)
+		lastErr = fn(rpcCtx)
+		cancel()
+		if lastErr == nil || attempt == attempts || !isTransientGRPCError(lastErr) {
+			return lastErr
+		}
+		backoff := c.baseBackoff * time.Duration(1<<(attempt-1))
+		if backoff <= 0 {
+			backoff = 25 * time.Millisecond
+		}
+		if backoff > 2*time.Second {
+			backoff = 2 * time.Second
+		}
+		// Bounded 0..50% jitter
+		jitter := time.Duration(rand.Int63n(int64(backoff/2) + 1))
+		timer := time.NewTimer(backoff + jitter)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return lastErr
+}
+
+func (c *grpcClient) GetAssuranceState(ctx context.Context, subject SubjectRef) (*StateResponse, error) {
+	var resp *servicesv1.GetAssuranceStateResponse
+	err := c.doIdempotentRPC(ctx, func(rpcCtx context.Context) error {
+		var callErr error
+		resp, callErr = c.grpcClient.GetAssuranceState(rpcCtx, &servicesv1.GetAssuranceStateRequest{
+			Subject: &commonv1.SubjectRef{
+				Scheme: subject.Scheme,
+				Id:     subject.ID,
+			},
+		})
+		return callErr
 	})
 	if err != nil {
 		return nil, err
@@ -155,9 +234,6 @@ func (c *grpcClient) GetAssuranceState(ctx context.Context, subject SubjectRef) 
 }
 
 func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, controls []ControlRef) (*EvaluationResponse, error) {
-	rpcCtx, cancel := c.withTimeout(ctx)
-	defer cancel()
-
 	var protoCtrls []*controlv1.ControlRef
 	for _, ctrl := range controls {
 		protoCtrls = append(protoCtrls, &controlv1.ControlRef{
@@ -166,12 +242,17 @@ func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, co
 		})
 	}
 
-	resp, err := c.grpcClient.EvaluateSubject(rpcCtx, &servicesv1.EvaluateSubjectRequest{
-		Subject: &commonv1.SubjectRef{
-			Scheme: subject.Scheme,
-			Id:     subject.ID,
-		},
-		Controls: protoCtrls,
+	var resp *servicesv1.EvaluateSubjectResponse
+	err := c.doIdempotentRPC(ctx, func(rpcCtx context.Context) error {
+		var callErr error
+		resp, callErr = c.grpcClient.EvaluateSubject(rpcCtx, &servicesv1.EvaluateSubjectRequest{
+			Subject: &commonv1.SubjectRef{
+				Scheme: subject.Scheme,
+				Id:     subject.ID,
+			},
+			Controls: protoCtrls,
+		})
+		return callErr
 	})
 	if err != nil {
 		return nil, err
@@ -179,6 +260,9 @@ func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, co
 
 	var evals []ClaimEvaluation
 	for _, evalProto := range resp.Evaluations {
+		if evalProto == nil {
+			continue
+		}
 		ctrl := ControlRef{}
 		if evalProto.Control != nil {
 			ctrl = ControlRef{Namespace: evalProto.Control.Namespace, ID: evalProto.Control.Id}
@@ -203,6 +287,13 @@ func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, co
 				Missing:  int(evalProto.Completeness.Missing),
 			}
 		}
+		var evalAt, validUntil time.Time
+		if evalProto.EvaluatedAt != nil {
+			evalAt = evalProto.EvaluatedAt.AsTime()
+		}
+		if evalProto.ValidUntil != nil {
+			validUntil = evalProto.ValidUntil.AsTime()
+		}
 
 		evals = append(evals, ClaimEvaluation{
 			ID:           evalProto.Id,
@@ -212,8 +303,8 @@ func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, co
 			Epoch:        epoch,
 			Completeness: completeness,
 			EvidenceRoot: evalProto.EvidenceRoot,
-			EvaluatedAt:  evalProto.EvaluatedAt.AsTime(),
-			ValidUntil:   evalProto.ValidUntil.AsTime(),
+			EvaluatedAt:  evalAt,
+			ValidUntil:   validUntil,
 		})
 	}
 
@@ -226,18 +317,20 @@ func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, co
 }
 
 func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, control ControlRef) (*ExplainResponse, error) {
-	rpcCtx, cancel := c.withTimeout(ctx)
-	defer cancel()
-
-	resp, err := c.grpcClient.ExplainClaim(rpcCtx, &servicesv1.ExplainClaimRequest{
-		Subject: &commonv1.SubjectRef{
-			Scheme: subject.Scheme,
-			Id:     subject.ID,
-		},
-		Control: &controlv1.ControlRef{
-			Namespace: control.Namespace,
-			Id:        control.ID,
-		},
+	var resp *servicesv1.ExplainClaimResponse
+	err := c.doIdempotentRPC(ctx, func(rpcCtx context.Context) error {
+		var callErr error
+		resp, callErr = c.grpcClient.ExplainClaim(rpcCtx, &servicesv1.ExplainClaimRequest{
+			Subject: &commonv1.SubjectRef{
+				Scheme: subject.Scheme,
+				Id:     subject.ID,
+			},
+			Control: &controlv1.ControlRef{
+				Namespace: control.Namespace,
+				Id:        control.ID,
+			},
+		})
+		return callErr
 	})
 	if err != nil {
 		return nil, err
@@ -245,6 +338,9 @@ func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, contr
 
 	var atoms []ExplainAtomicReq
 	for _, a := range resp.AtomicRequirements {
+		if a == nil {
+			continue
+		}
 		atoms = append(atoms, ExplainAtomicReq{
 			ID:        a.Id,
 			Satisfied: a.Satisfied,
@@ -254,6 +350,9 @@ func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, contr
 
 	var imps []ExplainImplementation
 	for _, imp := range resp.Implementations {
+		if imp == nil {
+			continue
+		}
 		imps = append(imps, ExplainImplementation{
 			Requirement: imp.Id,
 			Provider:    imp.Provider,
@@ -263,6 +362,9 @@ func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, contr
 
 	var evItems []ExplainEvidenceItem
 	for _, ev := range resp.Evidence {
+		if ev == nil {
+			continue
+		}
 		evItems = append(evItems, ExplainEvidenceItem{
 			Type:     ev.MediaType,
 			Verified: true,

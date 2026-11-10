@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,6 +38,10 @@ const (
 	ModeAudit WebhookMode = "audit"
 	// ModeWarn permits admission on invariant violations with admission warnings and audit annotations.
 	ModeWarn WebhookMode = "warn"
+	// MaxWebhookBodyBytes bounds AdmissionReview request payload size (4 MiB) per Constitution Section 30.
+	MaxWebhookBodyBytes = 4 << 20
+	// MaxWebhookInFlight bounds simultaneous in-flight admission validations before backpressure.
+	MaxWebhookInFlight = 256
 )
 
 // ServerConfig configures the admission webhook server.
@@ -56,6 +61,7 @@ type AdmissionWebhookServer struct {
 	config   ServerConfig
 	observer *cel.AdmissionObserver
 	server   *http.Server
+	sem      chan struct{}
 }
 
 // NewAdmissionWebhookServer creates a new AdmissionWebhookServer.
@@ -64,6 +70,7 @@ func NewAdmissionWebhookServer(cfg ServerConfig) *AdmissionWebhookServer {
 	s := &AdmissionWebhookServer{
 		config:   cfg,
 		observer: observer,
+		sem:      make(chan struct{}, MaxWebhookInFlight),
 	}
 
 	mux := http.NewServeMux()
@@ -71,12 +78,23 @@ func NewAdmissionWebhookServer(cfg ServerConfig) *AdmissionWebhookServer {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/readyz", s.handleReadyz)
 
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				http.Error(w, fmt.Sprintf("admission webhook panic recovered: %v", rec), http.StatusInternalServerError)
+			}
+		}()
+		mux.ServeHTTP(w, r)
+	})
+
 	s.server = &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           mux,
+		Handler:           wrapped,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	return s
@@ -138,8 +156,25 @@ func (s *AdmissionWebhookServer) handleValidate(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	if s.sem != nil {
+		select {
+		case s.sem <- struct{}{}:
+			defer func() { <-s.sem }()
+		default:
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "admission webhook concurrency limit reached", http.StatusTooManyRequests)
+			return
+		}
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, MaxWebhookBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "admission review payload exceeds maximum size (4 MiB)", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, fmt.Sprintf("could not read request body: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -254,10 +289,49 @@ func (s *AdmissionWebhookServer) validateRequest(req *admissionv1.AdmissionReque
 		}
 
 		// Degraded mode: ModeAudit or ModeWarn permits admission with full diagnostic audit trail
+		// AND emits adverse violation evidence to EvidenceSink so CAS truthfully transitions to FAILED/DECOHERENT (Section 29).
+		policy := cel.SampleRestrictedContainerPolicy()
+		policyDigest := cel.ComputePolicyDigest(policy)
+		epochWithPolicy := epoch
+		epochWithPolicy.PolicyDigest = policyDigest
+		rawViolationPayload := fmt.Sprintf("admission-violation|%s|%s|mode=%s|violations=%s|%d",
+			sub.URI(), policy.Name, string(mode), strings.Join(allViolations, ";"), now.Unix())
+		violationDigest := assurance.ComputeStringDigest(rawViolationPayload)
+		adverseEnv := assurance.EvidenceEnvelope{
+			Schema:          "assurance.ckodex.io/evidence/v1alpha1",
+			ID:              fmt.Sprintf("ev-adm-viol-%d", now.UnixNano()),
+			Subject:         sub,
+			ObservationType: "kubernetes.admission.violation",
+			CapturedAt:      now,
+			Producer:        s.config.ObserverAuth,
+			Artifact: assurance.EvidenceRef{
+				URI:       fmt.Sprintf("evidence://admission-violation/%s/%s", req.Namespace, podName),
+				Digest:    violationDigest,
+				MediaType: "application/vnd.ckodex.evidence+json",
+			},
+			IntegrityDigest: violationDigest,
+			Epoch:           epochWithPolicy,
+			ControlRefs: []assurance.ControlRef{
+				{Namespace: "ckodex", ID: "container.least-privilege"},
+			},
+		}
+		if adverseEnv.Producer.Scheme == "" {
+			adverseEnv.Producer = assurance.AuthorityRef{
+				Scheme:      "spiffe",
+				Subject:     "prod/ns/ckodex-assurance/sa/cel-admission-observer",
+				TrustDomain: "prod",
+			}
+		}
+		if s.config.EvidenceSink != nil {
+			s.config.EvidenceSink(adverseEnv)
+		}
+
 		auditAnnotations := map[string]string{
 			"assurance.ckodex.io/admitted-in-degraded-mode": "true",
 			"assurance.ckodex.io/webhook-mode":              string(mode),
 			"assurance.ckodex.io/violations":                strings.Join(allViolations, "; "),
+			"assurance.ckodex.io/admission-envelope-id":     adverseEnv.ID,
+			"assurance.ckodex.io/admission-envelope-digest": adverseEnv.IntegrityDigest,
 		}
 
 		resp := &admissionv1.AdmissionResponse{
@@ -300,10 +374,13 @@ func (s *AdmissionWebhookServer) validateRequest(req *admissionv1.AdmissionReque
 
 // checkNonRootCompliance validates that container executes as non-root.
 func allContainers(pod *corev1.Pod) []corev1.Container {
-	total := len(pod.Spec.Containers) + len(pod.Spec.InitContainers)
+	total := len(pod.Spec.Containers) + len(pod.Spec.InitContainers) + len(pod.Spec.EphemeralContainers)
 	all := make([]corev1.Container, 0, total)
 	all = append(all, pod.Spec.Containers...)
 	all = append(all, pod.Spec.InitContainers...)
+	for _, ec := range pod.Spec.EphemeralContainers {
+		all = append(all, corev1.Container(ec.EphemeralContainerCommon))
+	}
 	return all
 }
 
@@ -339,6 +416,14 @@ func checkNonRootCompliance(pod *corev1.Pod) []string {
 // checkCapabilityCompliance validates dropped capabilities and privilege escalation prohibitions.
 func checkCapabilityCompliance(pod *corev1.Pod) []string {
 	var violations []string
+	forbiddenCaps := map[string]bool{
+		"SYS_ADMIN":    true,
+		"NET_ADMIN":    true,
+		"SYS_PTRACE":   true,
+		"SYS_MODULE":   true,
+		"DAC_OVERRIDE": true,
+		"NET_RAW":      true,
+	}
 
 	for _, c := range allContainers(pod) {
 		if c.SecurityContext != nil {
@@ -350,7 +435,8 @@ func checkCapabilityCompliance(pod *corev1.Pod) []string {
 			}
 			if c.SecurityContext.Capabilities != nil {
 				for _, addCap := range c.SecurityContext.Capabilities.Add {
-					if addCap == "CAP_SYS_ADMIN" || addCap == "SYS_ADMIN" || addCap == "CAP_NET_ADMIN" || addCap == "NET_ADMIN" {
+					norm := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(string(addCap))), "CAP_")
+					if forbiddenCaps[norm] {
 						violations = append(violations, fmt.Sprintf("container %s adds prohibited capability %s", c.Name, addCap))
 					}
 				}

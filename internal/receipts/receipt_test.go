@@ -21,7 +21,7 @@ func TestCryptographicReceiptIssueAndIndependentVerification(t *testing.T) {
 		t.Fatalf("failed to create receipt manager: %v", err)
 	}
 
-	sub := assurance.SubjectRef{Scheme: "k8s", ID: "payments/payments-api/Deployment/payments-api"}
+	sub := assurance.SubjectRef{Scheme: "k8s", ID: "payments/Deployment/payments-api"}
 	ctrl := assurance.ControlRef{Namespace: "ckodex", ID: "container.least-privilege"}
 	epoch := assurance.AssuranceEpoch{
 		SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
@@ -137,5 +137,27 @@ func TestReceiptSignerInterface(t *testing.T) {
 	valid, err := signer.VerifyReceipt(ctx, signed)
 	if err != nil || !valid {
 		t.Fatalf("VerifyReceipt failed: valid=%v, err=%v", valid, err)
+	}
+}
+
+func TestLoadOrCreateReceiptManagerPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	evaluator := assurance.AuthorityRef{
+		Scheme:  "spiffe",
+		Subject: "prod/ns/oskal/sa/evaluator",
+	}
+
+	mgr1, err := LoadOrCreateReceiptManager(evaluator, tmpDir)
+	if err != nil {
+		t.Fatalf("first LoadOrCreateReceiptManager failed: %v", err)
+	}
+
+	mgr2, err := LoadOrCreateReceiptManager(evaluator, tmpDir)
+	if err != nil {
+		t.Fatalf("second LoadOrCreateReceiptManager failed: %v", err)
+	}
+
+	if mgr1.PublicKey() != mgr2.PublicKey() {
+		t.Fatalf("expected persisted public key to match across reloads: %s != %s", mgr1.PublicKey(), mgr2.PublicKey())
 	}
 }

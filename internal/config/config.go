@@ -100,10 +100,13 @@ func LoadConfig(explicitFilePath string) (Config, string, error) {
 	return cfg, configFile, nil
 }
 
-// SaveConfig writes the configuration to the specified file path as YAML.
+// SaveConfig writes the configuration atomically to the specified file path as YAML.
 func SaveConfig(cfg Config, path string) error {
 	dir := filepath.Dir(path)
-	if dir != "." && dir != "" {
+	if dir == "" {
+		dir = "."
+	}
+	if dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create config directory %s: %w", dir, err)
 		}
@@ -115,5 +118,36 @@ func SaveConfig(cfg Config, path string) error {
 	}
 
 	header := "# OSKAL Configuration File (CKODEX Continuous Kubernetes Assurance)\n"
-	return os.WriteFile(path, append([]byte(header), data...), 0644)
+	content := append([]byte(header), data...)
+
+	tmp, err := os.CreateTemp(dir, ".oskal-cfg-tmp-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp config file: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }

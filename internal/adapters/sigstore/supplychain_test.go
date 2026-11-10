@@ -1,6 +1,9 @@
 package sigstore
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -102,5 +105,30 @@ func TestUntrustedSignerRejection(t *testing.T) {
 	_, err := verifier.GenerateSupplyChainEvidence(assurance.SubjectRef{}, untrustedArtifact, assurance.AssuranceEpoch{}, time.Now())
 	if err == nil {
 		t.Fatalf("expected error verifying artifact with untrusted signer")
+	}
+
+	// Test cryptographic Ed25519 signature verification when public key is pinned
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	signer := "spiffe://prod/ns/ci/sa/dagger-builder"
+	verifier.RegisterTrustedPublicKey(signer, pub)
+
+	signedArt := ArtifactMetadata{
+		ImageURI: "registry.example/payments/payments-api",
+		Digest:   assurance.ComputeStringDigest("image-v1"),
+		Signer:   signer,
+	}
+	// Without SignatureHex -> must fail when key is pinned
+	if ok, err := verifier.VerifyArtifact(signedArt); err == nil || ok {
+		t.Fatalf("expected missing signature error when public key is pinned")
+	}
+
+	// With valid SignatureHex -> must succeed
+	sig := ed25519.Sign(priv, CanonicalSigningPayload(signedArt))
+	signedArt.SignatureHex = hex.EncodeToString(sig)
+	if ok, err := verifier.VerifyArtifact(signedArt); err != nil || !ok {
+		t.Fatalf("expected valid cryptographic signature to pass, got ok=%v, err=%v", ok, err)
 	}
 }

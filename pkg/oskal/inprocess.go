@@ -3,6 +3,7 @@ package oskal
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,13 +14,104 @@ import (
 	receiptv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/receipt/v1"
 )
 
+// DefaultFreshnessWindow is the standard 15-minute maximum evidence freshness window.
+const DefaultFreshnessWindow = 15 * time.Minute
+
+func isObservationViolation(obs *evidencev1.Observation) bool {
+	if obs == nil {
+		return false
+	}
+	lowerType := strings.ToLower(strings.TrimSpace(obs.Type))
+	if strings.Contains(lowerType, "violation") ||
+		strings.Contains(lowerType, "denied") ||
+		strings.Contains(lowerType, "fail") ||
+		strings.Contains(lowerType, "adverse") {
+		return true
+	}
+	for k, v := range obs.Attributes {
+		kl := strings.ToLower(strings.TrimSpace(k))
+		vl := strings.ToLower(strings.TrimSpace(v))
+		switch kl {
+		case "status", "disposition", "result", "outcome", "state":
+			if vl == "violation" || vl == "failed" || vl == "fail" || vl == "denied" || vl == "deny" {
+				return true
+			}
+		case "valence":
+			if vl == "negative" {
+				return true
+			}
+		case "violation", "failed", "denied":
+			if vl == "true" || vl == "1" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func evaluateObservations(obsList []*evidencev1.Observation, now time.Time) (AssuranceState, string, []assurance.EvidenceRef, string, int) {
+	var validRefs []assurance.EvidenceRef
+	validObsCount := 0
+	hasViolation := false
+	hasStale := false
+
+	for _, obs := range obsList {
+		if obs == nil || obs.ObservedAt == nil {
+			continue
+		}
+		obsTime := obs.ObservedAt.AsTime()
+		if obsTime.IsZero() || obsTime.After(now.Add(1*time.Minute)) {
+			continue
+		}
+		isViol := isObservationViolation(obs)
+		if !isViol && len(obs.Evidence) == 0 {
+			continue
+		}
+		validObsCount++
+		if isViol {
+			hasViolation = true
+		}
+		if now.Sub(obsTime) > DefaultFreshnessWindow {
+			hasStale = true
+		}
+		for _, ev := range obs.Evidence {
+			if ev == nil {
+				continue
+			}
+			validRefs = append(validRefs, assurance.EvidenceRef{
+				URI:       ev.Uri,
+				Digest:    ev.Digest,
+				MediaType: ev.MediaType,
+			})
+		}
+	}
+
+	if validObsCount == 0 {
+		return StateUnknown, "unknown", nil, "none", 0
+	}
+
+	evRoot := "none"
+	if len(validRefs) > 0 {
+		evRoot = receipts.ComputeEvidenceRoot(validRefs)
+	}
+	if hasViolation {
+		return StateFailed, "current", validRefs, evRoot, validObsCount
+	}
+	if hasStale {
+		return StateStale, "stale", validRefs, evRoot, validObsCount
+	}
+	return StateAssured, "current", validRefs, evRoot, validObsCount
+}
+
 // InProcessClient is an in-memory embedded implementation of the OSKAL Client interface.
 // It allows consumers to evaluate claims, store observations, and verify receipts
 // without requiring an external running gRPC daemon.
 type InProcessClient struct {
 	mu           sync.RWMutex
 	observations map[string][]*evidencev1.Observation
+	subjectOrder []string
 	receipts     map[string]*receiptv1.ControlReceipt
+	receiptOrder []string
 	explainer    *explain.Explainer
 	receiptMgr   *receipts.ReceiptManager
 }
@@ -76,36 +168,28 @@ func (c *InProcessClient) GetAssuranceState(ctx context.Context, subject Subject
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	now := time.Now().UTC()
 	subKey := subject.Scheme + "://" + subject.ID
 	obsList := c.observations[subKey]
 
-	// Invariant I-02: Absence of evidence is UNKNOWN, never PASS
-	if len(obsList) == 0 {
+	state, freshness, _, evRoot, _ := evaluateObservations(obsList, now)
+
+	// Invariant I-02: Absence of valid evidence is UNKNOWN, never PASS
+	if state == StateUnknown {
 		return &StateResponse{
 			Subject:       subject,
 			State:         StateUnknown,
 			EvidenceRoot:  "none",
-			LastEvaluated: time.Now().UTC(),
+			LastEvaluated: now,
 			Freshness:     "unknown",
 		}, nil
 	}
 
-	var evRefs []assurance.EvidenceRef
-	for _, obs := range obsList {
-		for _, ev := range obs.Evidence {
-			evRefs = append(evRefs, assurance.EvidenceRef{
-				URI:       ev.Uri,
-				Digest:    ev.Digest,
-				MediaType: ev.MediaType,
-			})
-		}
-	}
-	evRoot := receipts.ComputeEvidenceRoot(evRefs)
 	policyDigest := assurance.ComputeStringDigest(subKey + ":" + evRoot)
 
 	return &StateResponse{
 		Subject:      subject,
-		State:        StateAssured,
+		State:        state,
 		EvidenceRoot: evRoot,
 		Epoch: &AssuranceEpoch{
 			SubjectDigest:        assurance.ComputeStringDigest(subKey),
@@ -114,8 +198,8 @@ func (c *InProcessClient) GetAssuranceState(ctx context.Context, subject Subject
 			AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
 			EnvironmentDigest:    assurance.ComputeStringDigest("cluster:kubernetes"),
 		},
-		LastEvaluated: time.Now().UTC(),
-		Freshness:     "current",
+		LastEvaluated: now,
+		Freshness:     freshness,
 	}, nil
 }
 
@@ -128,25 +212,20 @@ func (c *InProcessClient) EvaluateSubject(ctx context.Context, subject SubjectRe
 	obsList := c.observations[subKey]
 	now := time.Now().UTC()
 
-	hasEvidence := len(obsList) > 0
-	targetState := StateUnknown
-	evRoot := "none"
+	targetState, _, _, evRoot, validObsCount := evaluateObservations(obsList, now)
 	completeness := EvidenceCompleteness{Required: len(controls)}
 
-	if hasEvidence {
-		targetState = StateAssured
-		var evRefs []assurance.EvidenceRef
-		for _, obs := range obsList {
-			for _, ev := range obs.Evidence {
-				evRefs = append(evRefs, assurance.EvidenceRef{
-					Digest: ev.Digest,
-				})
-			}
-		}
-		evRoot = receipts.ComputeEvidenceRoot(evRefs)
-		completeness.Present = len(obsList)
-		completeness.Verified = len(obsList)
-	} else {
+	switch targetState {
+	case StateAssured:
+		completeness.Present = validObsCount
+		completeness.Verified = validObsCount
+	case StateStale:
+		completeness.Present = validObsCount
+		completeness.Stale = validObsCount
+	case StateFailed:
+		completeness.Present = validObsCount
+		completeness.Missing = len(controls)
+	default:
 		completeness.Missing = len(controls)
 	}
 
@@ -184,23 +263,21 @@ func (c *InProcessClient) ExplainClaim(ctx context.Context, subject SubjectRef, 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	now := time.Now().UTC()
 	subKey := subject.Scheme + "://" + subject.ID
 	obsList := c.observations[subKey]
 
-	targetState := StateUnknown
-	evRoot := "none"
-	var evRefs []assurance.EvidenceRef
-
-	if len(obsList) > 0 {
-		targetState = StateAssured
-		for _, obs := range obsList {
-			for _, ev := range obs.Evidence {
-				evRefs = append(evRefs, assurance.EvidenceRef{
-					Digest: ev.Digest,
-				})
-			}
-		}
-		evRoot = receipts.ComputeEvidenceRoot(evRefs)
+	targetState, _, evRefs, evRoot, validObsCount := evaluateObservations(obsList, now)
+	comp := EvidenceCompleteness{Required: 1}
+	switch targetState {
+	case StateAssured:
+		comp.Present = validObsCount
+		comp.Verified = validObsCount
+	case StateStale:
+		comp.Present = validObsCount
+		comp.Stale = validObsCount
+	default:
+		comp.Missing = 1
 	}
 
 	eval := ClaimEvaluation{
@@ -209,6 +286,7 @@ func (c *InProcessClient) ExplainClaim(ctx context.Context, subject SubjectRef, 
 		Control:      control,
 		State:        targetState,
 		Evidence:     evRefs,
+		Completeness: comp,
 		EvidenceRoot: evRoot,
 		Epoch: AssuranceEpoch{
 			SubjectDigest:        assurance.ComputeStringDigest(subKey),
@@ -217,8 +295,8 @@ func (c *InProcessClient) ExplainClaim(ctx context.Context, subject SubjectRef, 
 			AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
 			EnvironmentDigest:    assurance.ComputeStringDigest("cluster:kubernetes"),
 		},
-		EvaluatedAt: time.Now().UTC(),
-		ValidUntil:  time.Now().UTC().Add(5 * time.Minute),
+		EvaluatedAt: now,
+		ValidUntil:  now.Add(5 * time.Minute),
 	}
 
 	graph := c.explainer.BuildExplainGraph(ctx, subject, control, eval)
@@ -239,12 +317,31 @@ func (c *InProcessClient) SubmitObservation(ctx context.Context, obs *ProtoObser
 	if obs == nil || obs.Subject == nil {
 		return "", fmt.Errorf("observation and subject cannot be nil")
 	}
+	if obs.Id == "" {
+		obs.Id = fmt.Sprintf("obs-%d", time.Now().UnixNano())
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	const (
+		maxObservationsPerSubject = 1000
+		maxTrackedSubjects        = 4096
+	)
 	subKey := obs.Subject.Scheme + "://" + obs.Subject.Id
-	c.observations[subKey] = append(c.observations[subKey], obs)
+	if _, exists := c.observations[subKey]; !exists {
+		if len(c.observations) >= maxTrackedSubjects && len(c.subjectOrder) > 0 {
+			evictKey := c.subjectOrder[0]
+			c.subjectOrder = c.subjectOrder[1:]
+			delete(c.observations, evictKey)
+		}
+		c.subjectOrder = append(c.subjectOrder, subKey)
+	}
+	list := append(c.observations[subKey], obs)
+	if len(list) > maxObservationsPerSubject {
+		list = list[len(list)-maxObservationsPerSubject:]
+	}
+	c.observations[subKey] = list
 	return obs.Id, nil
 }
 
@@ -252,6 +349,9 @@ func (c *InProcessClient) SubmitObservation(ctx context.Context, obs *ProtoObser
 func (c *InProcessClient) SubmitReceipt(ctx context.Context, rcpt *ProtoReceipt) (bool, string, error) {
 	if rcpt == nil {
 		return false, "receipt cannot be nil", fmt.Errorf("receipt is nil")
+	}
+	if rcpt.Subject == nil || rcpt.Control == nil || rcpt.Evaluator == nil || rcpt.EvaluatedAt == nil {
+		return false, "receipt missing required fields", fmt.Errorf("receipt requires non-nil subject, control, evaluator, and evaluated_at")
 	}
 
 	coreReceipt := assurance.ControlReceipt{
@@ -262,12 +362,14 @@ func (c *InProcessClient) SubmitReceipt(ctx context.Context, rcpt *ProtoReceipt)
 		Control: assurance.ControlRef{
 			Namespace: rcpt.Control.GetNamespace(),
 			ID:        rcpt.Control.GetId(),
+			Version:   rcpt.Control.GetVersion(),
 		},
 		State:        mapProtoState(rcpt.State),
 		EvidenceRoot: rcpt.EvidenceRoot,
 		Evaluator: assurance.AuthorityRef{
-			Scheme:  rcpt.Evaluator.GetScheme(),
-			Subject: rcpt.Evaluator.GetSubject(),
+			Scheme:      rcpt.Evaluator.GetScheme(),
+			Subject:     rcpt.Evaluator.GetSubject(),
+			TrustDomain: rcpt.Evaluator.GetTrustDomain(),
 		},
 		EvaluatedAt: rcpt.EvaluatedAt.AsTime(),
 		Signature:   rcpt.Signature,
@@ -288,8 +390,18 @@ func (c *InProcessClient) SubmitReceipt(ctx context.Context, rcpt *ProtoReceipt)
 		return false, "signature or digest verification failed", nil
 	}
 
+	const maxStoredReceipts = 8192
+	digest := coreReceipt.Digest()
 	c.mu.Lock()
-	c.receipts[coreReceipt.Digest()] = rcpt
+	if _, exists := c.receipts[digest]; !exists {
+		if len(c.receipts) >= maxStoredReceipts && len(c.receiptOrder) > 0 {
+			evictDigest := c.receiptOrder[0]
+			c.receiptOrder = c.receiptOrder[1:]
+			delete(c.receipts, evictDigest)
+		}
+		c.receiptOrder = append(c.receiptOrder, digest)
+	}
+	c.receipts[digest] = rcpt
 	c.mu.Unlock()
 
 	return true, "Receipt verified and accepted", nil

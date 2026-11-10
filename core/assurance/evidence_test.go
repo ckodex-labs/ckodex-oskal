@@ -197,6 +197,33 @@ func TestEvidenceContractEvaluation(t *testing.T) {
 	if !resOptional.Completeness.IsComplete() {
 		t.Fatalf("expected completeness to remain complete with missing optional requirement: %s", resOptional.Completeness.Summary())
 	}
+
+	// 6. Future-dated evidence (even +30s ahead) must be rejected as Missing/UNKNOWN, never STALE
+	evFuture := evAdmission
+	evFuture.CapturedAt = now.Add(30 * time.Second)
+	singleContract := EvidenceContract{
+		ID: "single-adm",
+		Requirements: []EvidenceRequirement{
+			{
+				ID:                "req-adm",
+				EvidenceType:      "k8s:admission:review",
+				Required:          true,
+				MaxAge:            15 * time.Minute,
+				AcceptedProducers: []string{"spiffe://", "k8s:admission-controller://"},
+			},
+		},
+		OnMissingRequiredState: AssuranceStateUnknown,
+	}
+	resFuture := singleContract.Evaluate([]EvidenceEnvelope{evFuture}, epoch, now)
+	if resFuture.State != AssuranceStateUnknown || resFuture.Completeness.Missing != 1 || resFuture.Completeness.Stale != 0 {
+		t.Fatalf("expected future-dated evidence to be rejected as Missing/UNKNOWN, got state=%s, completeness=%+v", resFuture.State, resFuture.Completeness)
+	}
+
+	// 7. Colon-delimited k8s:admission:review matches kubernetes.admission and admission
+	resColonMatch := singleContract.Evaluate([]EvidenceEnvelope{evAdmission}, epoch, now)
+	if resColonMatch.State != AssuranceStateVerified {
+		t.Fatalf("expected k8s:admission:review to match kubernetes.admission, got %s", resColonMatch.State)
+	}
 }
 
 func TestProducerAntiSpoofing(t *testing.T) {
@@ -252,5 +279,47 @@ func TestEnvelopeDigestSensitivity(t *testing.T) {
 	d3 := envWithCtrl.Digest()
 	if d1 == d3 {
 		t.Fatalf("digest must change when ControlRefs is added")
+	}
+}
+
+func TestAdverseObservationDominatesContractEvaluation(t *testing.T) {
+	now := time.Now().UTC()
+	sub := SubjectRef{Scheme: "k8s", ID: "prod/payments/Deployment/payments-api"}
+	epoch := AssuranceEpoch{SubjectDigest: ComputeStringDigest(sub.URI())}
+
+	contract := EvidenceContract{
+		ID: "contract-strict",
+		Requirements: []EvidenceRequirement{
+			{
+				ID:           "req-adm",
+				EvidenceType: "kubernetes.admission",
+				Required:     true,
+				MaxAge:       15 * time.Minute,
+			},
+		},
+	}
+
+	goodEnv := EvidenceEnvelope{
+		ID:              "ev-good",
+		Subject:         sub,
+		ObservationType: "kubernetes.admission",
+		CapturedAt:      now.Add(-1 * time.Minute),
+		Producer:        AuthorityRef{Scheme: "spiffe", Subject: "prod/ns/system/sa/observer"},
+		Artifact:        EvidenceRef{Digest: ComputeStringDigest("good-payload")},
+		Epoch:           epoch,
+	}
+	adverseEnv := EvidenceEnvelope{
+		ID:              "ev-adverse",
+		Subject:         sub,
+		ObservationType: "kubernetes.admission.violation",
+		CapturedAt:      now,
+		Producer:        AuthorityRef{Scheme: "spiffe", Subject: "prod/ns/system/sa/observer"},
+		Artifact:        EvidenceRef{Digest: ComputeStringDigest("adverse-payload")},
+		Epoch:           epoch,
+	}
+
+	res := contract.Evaluate([]EvidenceEnvelope{goodEnv, adverseEnv}, epoch, now)
+	if res.State != AssuranceStateFailed {
+		t.Fatalf("expected adverse observation to dominate contract evaluation with AssuranceStateFailed (Section 23), got %v", res.State)
 	}
 }

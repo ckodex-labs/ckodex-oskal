@@ -10,8 +10,10 @@ import (
 )
 
 func TestMetricsRegistrationAndRecording(t *testing.T) {
-	// Test recording helpers
+	// Test recording helpers and state/generation transition gauge reset
 	telemetry.RecordAssuranceState("prod", "binding-01", "ASSURED", "1", true)
+	telemetry.RecordAssuranceState("prod", "binding-01", "STALE", "1", true)
+	telemetry.RecordAssuranceState("prod", "binding-01", "ASSURED", "2", true)
 	telemetry.RecordEvidenceProcessed("trivy", "vulnerability", "PASS")
 	telemetry.RecordReceiptIssued("contract-01", "VALID")
 	telemetry.RecordDriftInvalidation("binding-01", "generation_changed")
@@ -26,16 +28,25 @@ func TestMetricsRegistrationAndRecording(t *testing.T) {
 	}
 
 	foundAssuranceGauge := false
+	activeCount := 0
 	for _, mf := range mfs {
 		if mf.GetName() == "oskal_assurance_state" {
 			foundAssuranceGauge = true
 			if len(mf.GetMetric()) == 0 {
 				t.Fatalf("expected metrics in oskal_assurance_state, got 0")
 			}
+			for _, m := range mf.GetMetric() {
+				if m.GetGauge().GetValue() == 1.0 {
+					activeCount++
+				}
+			}
 		}
 	}
 	if !foundAssuranceGauge {
 		t.Errorf("expected oskal_assurance_state in gathered metrics")
+	}
+	if activeCount != 1 {
+		t.Errorf("expected\nexactly 1 active state gauge with value 1.0 after transition gen=1 -> gen=2, got %d", activeCount)
 	}
 }
 

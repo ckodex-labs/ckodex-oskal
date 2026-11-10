@@ -96,4 +96,31 @@ func TestExplainer_BuildExplainGraph(t *testing.T) {
 	if graphFailed.AssuranceState != assurance.AssuranceStateFailed {
 		t.Fatalf("expected FAILED state, got %s", graphFailed.AssuranceState)
 	}
+
+	// 5. Evidence-proportional ExplainGraph when eval.Evidence is provided
+	evalSingleEv := assurance.ClaimEvaluation{
+		ID:          "eval-05",
+		Subject:     sub,
+		Control:     ctrl,
+		State:       assurance.AssuranceStateAssured,
+		Epoch:       epoch,
+		EvaluatedAt: now,
+		Evidence: []assurance.EvidenceRef{
+			{
+				URI:       "evidence://cel/admission",
+				Digest:    assurance.ComputeStringDigest("adm-payload"),
+				MediaType: "application/json",
+			},
+		},
+	}
+	graphProp := expl.BuildExplainGraph(ctx, sub, ctrl, evalSingleEv)
+	if graphProp.Completeness.Verified != 1 {
+		t.Fatalf("expected 1 verified evidence category when only admission evidence is supplied, got %d", graphProp.Completeness.Verified)
+	}
+	if !graphProp.Evidence[0].Verified || graphProp.Evidence[0].Digest == "" {
+		t.Fatalf("expected admission decision slot to be verified with digest, got %+v", graphProp.Evidence[0])
+	}
+	if graphProp.Evidence[1].Verified {
+		t.Fatalf("expected signed OCI artifact slot to remain unverified when only admission evidence was supplied")
+	}
 }

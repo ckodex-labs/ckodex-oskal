@@ -1,6 +1,7 @@
 package sigstore
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -15,6 +16,7 @@ type ArtifactMetadata struct {
 	ImageURI     string `json:"imageUri"`
 	Digest       string `json:"digest"`
 	SignatureRef string `json:"signatureRef"`
+	SignatureHex string `json:"signatureHex,omitempty"`
 	Signer       string `json:"signer"`
 	SBOMDigest   string `json:"sbomDigest,omitempty"`
 	SLSACommit   string `json:"slsaCommit,omitempty"`
@@ -22,8 +24,9 @@ type ArtifactMetadata struct {
 
 // SigstoreVerifier validates supply-chain evidence for container images.
 type SigstoreVerifier struct {
-	trustedSigners   []string
-	verifierIdentity assurance.AuthorityRef
+	trustedSigners    []string
+	trustedPublicKeys map[string]ed25519.PublicKey
+	verifierIdentity  assurance.AuthorityRef
 }
 
 // NewSigstoreVerifier creates a new supply-chain verifier.
@@ -32,7 +35,8 @@ func NewSigstoreVerifier(trustedSigners []string) *SigstoreVerifier {
 		trustedSigners = []string{"spiffe://prod/ns/ci/sa/dagger-builder", "signer@ckodex.io"}
 	}
 	return &SigstoreVerifier{
-		trustedSigners: trustedSigners,
+		trustedSigners:    trustedSigners,
+		trustedPublicKeys: make(map[string]ed25519.PublicKey),
 		verifierIdentity: assurance.AuthorityRef{
 			Scheme:      "spiffe",
 			Subject:     "prod/ns/ckodex-evidence/sa/sigstore-verifier",
@@ -41,9 +45,23 @@ func NewSigstoreVerifier(trustedSigners []string) *SigstoreVerifier {
 	}
 }
 
+// RegisterTrustedPublicKey registers an Ed25519 public key for cryptographic verification of a signer's artifacts.
+func (v *SigstoreVerifier) RegisterTrustedPublicKey(signer string, pub ed25519.PublicKey) {
+	if v.trustedPublicKeys == nil {
+		v.trustedPublicKeys = make(map[string]ed25519.PublicKey)
+	}
+	v.trustedPublicKeys[signer] = pub
+}
+
+// CanonicalSigningPayload returns the canonical byte payload signed for an artifact.
+func CanonicalSigningPayload(artifact ArtifactMetadata) []byte {
+	return []byte(fmt.Sprintf("%s|%s|%s", artifact.ImageURI, artifact.Digest, artifact.Signer))
+}
+
 // VerifyArtifact verifies the signature and provenance of an artifact.
 func (v *SigstoreVerifier) VerifyArtifact(artifact ArtifactMetadata) (bool, error) {
-	if !strings.HasPrefix(artifact.Digest, "sha256:") {
+	hexDigest := strings.TrimPrefix(artifact.Digest, "sha256:")
+	if !strings.HasPrefix(artifact.Digest, "sha256:") || len(hexDigest) == 0 {
 		return false, fmt.Errorf("invalid artifact digest format: %s", artifact.Digest)
 	}
 
@@ -56,6 +74,19 @@ func (v *SigstoreVerifier) VerifyArtifact(artifact ArtifactMetadata) (bool, erro
 	}
 	if !trusted {
 		return false, fmt.Errorf("untrusted signer: %s", artifact.Signer)
+	}
+
+	if pub, hasKey := v.trustedPublicKeys[artifact.Signer]; hasKey {
+		if artifact.SignatureHex == "" {
+			return false, fmt.Errorf("missing cryptographic signature for key-pinned signer: %s", artifact.Signer)
+		}
+		sigBytes, err := hex.DecodeString(artifact.SignatureHex)
+		if err != nil {
+			return false, fmt.Errorf("invalid signature hex: %w", err)
+		}
+		if !ed25519.Verify(pub, CanonicalSigningPayload(artifact), sigBytes) {
+			return false, fmt.Errorf("cryptographic signature verification failed for signer: %s", artifact.Signer)
+		}
 	}
 
 	return true, nil

@@ -6,11 +6,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ui/format"
 )
@@ -127,10 +129,14 @@ func (c *Cockpit) RenderSnapshot() error {
 
 	_, _ = fmt.Fprintln(w, thinDivider)
 	_, _ = fmt.Fprintf(w, "  CRYPTOGRAPHIC MERKLE LINEAGE & RECONCILIATION:\n")
-	if len(workloads) > 0 {
+	if len(workloads) > 0 && workloads[0].State == "ASSURED" {
 		_, _ = fmt.Fprintf(w, "  * Active Root:     %s\n", workloads[0].EvidenceRoot)
 		_, _ = fmt.Fprintf(w, "  * Authority Trust: spiffe://assurance.ckodex.io/server (SPIRE verified)\n")
 		_, _ = fmt.Fprintf(w, "  * Semantic Drift:  0 dimensions drifted (In Sync)\n")
+	} else if len(workloads) > 0 {
+		_, _ = fmt.Fprintf(w, "  * Active Root:     %s\n", workloads[0].EvidenceRoot)
+		_, _ = fmt.Fprintf(w, "  * Authority Trust: unverified (absence of evidence -> UNKNOWN)\n")
+		_, _ = fmt.Fprintf(w, "  * Semantic Drift:  UNKNOWN (record evidence via oskal record admission)\n")
 	} else {
 		_, _ = fmt.Fprintf(w, "  * Active Root:     none (no workloads observed)\n")
 	}
@@ -141,6 +147,14 @@ func (c *Cockpit) RenderSnapshot() error {
 	return nil
 }
 
+func parseCockpitSubject(raw string) assurance.SubjectRef {
+	if strings.Contains(raw, "://") {
+		parts := strings.SplitN(raw, "://", 2)
+		return assurance.SubjectRef{Scheme: parts[0], ID: parts[1]}
+	}
+	return assurance.SubjectRef{Scheme: "k8s", ID: raw}
+}
+
 func (c *Cockpit) gatherWorkloads() []WorkloadStatusSummary {
 	var results []WorkloadStatusSummary
 
@@ -149,35 +163,108 @@ func (c *Cockpit) gatherWorkloads() []WorkloadStatusSummary {
 		subject = "k8s://prod/payments/Deployment/payments-api"
 	}
 
-	// Calculate deterministic mock-free status
-	sub := assurance.SubjectRef{Scheme: "k8s", ID: "prod/payments/Deployment/payments-api"}
-	evRef := assurance.EvidenceRef{
-		URI:       "cas://sha256/admission-payments-api.json",
-		Digest:    assurance.ComputeStringDigest(sub.URI()),
-		MediaType: "application/json",
+	dir := c.cfg.EvidenceDir
+	if dir == "" {
+		if info, err := os.Stat("evidence"); err == nil && info.IsDir() {
+			dir = "evidence"
+		}
 	}
-	evRoot := receipts.ComputeEvidenceRoot([]assurance.EvidenceRef{evRef})
 
+	if dir != "" {
+		if repo, err := storage.NewFilesystemEvidenceRepository(dir); err == nil {
+			var envelopes []assurance.EvidenceEnvelope
+			if c.cfg.SubjectFilter != "" {
+				envelopes, _ = repo.ListBySubject(context.Background(), parseCockpitSubject(c.cfg.SubjectFilter))
+			} else {
+				envelopes, _ = repo.ListAll(context.Background())
+			}
+
+			if len(envelopes) > 0 {
+				bySubject := make(map[string][]assurance.EvidenceEnvelope)
+				for _, env := range envelopes {
+					uri := env.Subject.URI()
+					if c.cfg.SubjectFilter != "" {
+						uri = subject
+					}
+					bySubject[uri] = append(bySubject[uri], env)
+				}
+
+				var uris []string
+				for u := range bySubject {
+					uris = append(uris, u)
+				}
+				sort.Strings(uris)
+
+				now := time.Now().UTC()
+				for _, uri := range uris {
+					subEnvs := bySubject[uri]
+					var evRefs []assurance.EvidenceRef
+					isStale := false
+					isViolation := false
+					for _, env := range subEnvs {
+						if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
+							continue
+						}
+						lowerObs := strings.ToLower(strings.TrimSpace(env.ObservationType))
+						if strings.Contains(lowerObs, "violation") ||
+							strings.Contains(lowerObs, "denied") ||
+							strings.Contains(lowerObs, "fail") ||
+							strings.Contains(lowerObs, "adverse") {
+							isViolation = true
+						}
+						if now.Sub(env.CapturedAt) > 15*time.Minute {
+							isStale = true
+						}
+						evRefs = append(evRefs, env.Artifact)
+					}
+					if len(evRefs) == 0 && !isViolation {
+						continue
+					}
+					evRoot := "none"
+					if len(evRefs) > 0 {
+						evRoot = receipts.ComputeEvidenceRoot(evRefs)
+					}
+					state := "ASSURED"
+					valence := "POSITIVE"
+					coherence := "COHERENT"
+					freshness := "FRESH (<15m)"
+					if isViolation {
+						state = "FAILED"
+						valence = "NEGATIVE"
+						coherence = "DECOHERENT"
+					} else if isStale {
+						state = "STALE"
+						valence = "MIXED"
+						freshness = "STALE (>15m)"
+					}
+					results = append(results, WorkloadStatusSummary{
+						Subject:      uri,
+						State:        state,
+						Presence:     "PRESENT",
+						Valence:      valence,
+						Coherence:    coherence,
+						EvidenceRoot: evRoot,
+						Freshness:    freshness,
+						Controls:     "AC-6",
+					})
+				}
+				if len(results) > 0 {
+					return results
+				}
+			}
+		}
+	}
+
+	// Invariant I-02: Absence of verified evidence must report UNKNOWN, never ASSURED.
 	results = append(results, WorkloadStatusSummary{
 		Subject:      subject,
-		State:        "ASSURED",
-		Presence:     "PRESENT",
-		Valence:      "POSITIVE",
+		State:        "UNKNOWN",
+		Presence:     "EMPTY",
+		Valence:      "UNRESOLVED",
 		Coherence:    "COHERENT",
-		EvidenceRoot: evRoot,
-		Freshness:    "FRESH (<5m)",
-		Controls:     "AC-6, CM-6, SC-28",
-	})
-
-	results = append(results, WorkloadStatusSummary{
-		Subject:      "k8s://prod/auth/Deployment/auth-service",
-		State:        "ASSURED",
-		Presence:     "PRESENT",
-		Valence:      "POSITIVE",
-		Coherence:    "COHERENT",
-		EvidenceRoot: assurance.ComputeStringDigest("auth-service-root"),
-		Freshness:    "FRESH (<2m)",
-		Controls:     "AC-6, SC-28",
+		EvidenceRoot: "none",
+		Freshness:    "UNKNOWN",
+		Controls:     "AC-6",
 	})
 
 	return results

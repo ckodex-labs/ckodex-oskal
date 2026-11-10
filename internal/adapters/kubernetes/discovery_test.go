@@ -34,11 +34,23 @@ func TestDeploymentDiscoveryAndDigest(t *testing.T) {
 	}
 
 	sub := BuildDeploymentSubjectRef(deploy)
-	if sub.URI() != "k8s://payments/payments-api/Deployment/payments-api" {
+	if sub.URI() != "k8s://payments/Deployment/payments-api" {
 		t.Fatalf("unexpected subject URI: %s", sub.URI())
 	}
 	if sub.Attributes["generation"] != "1" {
 		t.Fatalf("expected generation 1, got %s", sub.Attributes["generation"])
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "payments-api-pod-1",
+			Namespace: "payments",
+			UID:       "pod-uid-1",
+		},
+	}
+	podSub := BuildPodSubjectRef(pod)
+	if podSub.URI() != "k8s://payments/Pod/payments-api-pod-1" {
+		t.Fatalf("unexpected pod subject URI: %s", podSub.URI())
 	}
 
 	d1 := ComputeDeploymentDigest(deploy)

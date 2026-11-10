@@ -118,14 +118,14 @@ func buildNistScaffold(plan *ScaffoldPlan) {
 					Type:              "k8s:admission:review",
 					Required:          true,
 					Freshness:         metav1.Duration{Duration: 15 * time.Minute},
-					AcceptedProducers: []string{"spiffe://assurance.ckodex.io/ns/ckodex-system/sa/oskal-webhook"},
+					AcceptedProducers: []string{"spiffe://assurance.ckodex.io/ns/ckodex-system/sa/oskal-webhook", "k8s:admission-controller://", "spiffe://"},
 				},
 				{
 					ID:                "req-sigstore-attestation",
 					Type:              "sigstore:cosign:attestation",
 					Required:          true,
 					Freshness:         metav1.Duration{Duration: 24 * time.Hour},
-					AcceptedProducers: []string{"spiffe://assurance.ckodex.io/ns/ckodex-system/sa/oskal-signer"},
+					AcceptedProducers: []string{"spiffe://assurance.ckodex.io/ns/ckodex-system/sa/oskal-signer", "spiffe://"},
 				},
 			},
 			OnMissingRequiredEvidence: assurancev1alpha1.MissingEvidencePolicy{
@@ -252,8 +252,11 @@ func buildPciDssScaffold(plan *ScaffoldPlan) {
 					Type:              "k8s:admission:review",
 					Required:          true,
 					Freshness:         metav1.Duration{Duration: 10 * time.Minute},
-					AcceptedProducers: []string{"spiffe://assurance.ckodex.io/ns/ckodex-system/sa/oskal-webhook"},
+					AcceptedProducers: []string{"spiffe://assurance.ckodex.io/ns/ckodex-system/sa/oskal-webhook", "k8s:admission-controller://", "spiffe://"},
 				},
+			},
+			OnMissingRequiredEvidence: assurancev1alpha1.MissingEvidencePolicy{
+				State: "Unknown",
 			},
 		},
 	}
@@ -308,6 +311,10 @@ func buildPciDssScaffold(plan *ScaffoldPlan) {
 						{
 							Purpose:  "preventive",
 							Provider: "kubernetes-validating-admission",
+							Ref: assurancev1alpha1.ImplementationTargetRef{
+								Name:      "validating-webhook-configuration",
+								Namespace: "ckodex-system",
+							},
 						},
 					},
 				},
@@ -343,8 +350,11 @@ func buildSoc2Scaffold(plan *ScaffoldPlan) {
 					Type:              "k8s:admission:review",
 					Required:          true,
 					Freshness:         metav1.Duration{Duration: 30 * time.Minute},
-					AcceptedProducers: []string{"spiffe://assurance.ckodex.io/ns/ckodex-system/sa/oskal-webhook"},
+					AcceptedProducers: []string{"spiffe://assurance.ckodex.io/ns/ckodex-system/sa/oskal-webhook", "k8s:admission-controller://", "spiffe://"},
 				},
+			},
+			OnMissingRequiredEvidence: assurancev1alpha1.MissingEvidencePolicy{
+				State: "Unknown",
 			},
 		},
 	}
@@ -380,6 +390,22 @@ func buildSoc2Scaffold(plan *ScaffoldPlan) {
 					MatchLabels: map[string]string{"app": plan.WorkloadName},
 				},
 			},
+			Requirements: []assurancev1alpha1.RequirementBinding{
+				{
+					ID:               "binding-soc2-admission",
+					EvidenceContract: ec.Name,
+					Implementations: []assurancev1alpha1.ImplementationBindingRef{
+						{
+							Purpose:  "preventive",
+							Provider: "kubernetes-validating-admission",
+							Ref: assurancev1alpha1.ImplementationTargetRef{
+								Name:      "validating-webhook-configuration",
+								Namespace: "ckodex-system",
+							},
+						},
+					},
+				},
+			},
 		},
 	}
 	plan.ControlBindings = append(plan.ControlBindings, cb)
@@ -407,11 +433,15 @@ func buildIsoScaffold(plan *ScaffoldPlan) {
 		Spec: assurancev1alpha1.EvidenceContractSpec{
 			Requirements: []assurancev1alpha1.ContractRequirement{
 				{
-					ID:        "iso-req-change-control",
-					Type:      "k8s:admission:review",
-					Required:  true,
-					Freshness: metav1.Duration{Duration: 1 * time.Hour},
+					ID:                "iso-req-change-control",
+					Type:              "k8s:admission:review",
+					Required:          true,
+					Freshness:         metav1.Duration{Duration: 1 * time.Hour},
+					AcceptedProducers: []string{"spiffe://assurance.ckodex.io/ns/ckodex-system/sa/oskal-webhook", "k8s:admission-controller://", "spiffe://"},
 				},
+			},
+			OnMissingRequiredEvidence: assurancev1alpha1.MissingEvidencePolicy{
+				State: "Unknown",
 			},
 		},
 	}
@@ -441,9 +471,34 @@ func buildIsoScaffold(plan *ScaffoldPlan) {
 					MatchLabels: map[string]string{"app": plan.WorkloadName},
 				},
 			},
+			Requirements: []assurancev1alpha1.RequirementBinding{
+				{
+					ID:               "binding-iso-admission",
+					EvidenceContract: ec.Name,
+					Implementations: []assurancev1alpha1.ImplementationBindingRef{
+						{
+							Purpose:  "preventive",
+							Provider: "kubernetes-validating-admission",
+							Ref: assurancev1alpha1.ImplementationTargetRef{
+								Name:      "validating-webhook-configuration",
+								Namespace: "ckodex-system",
+							},
+						},
+					},
+				},
+			},
 		},
 	}
 	plan.ControlBindings = append(plan.ControlBindings, cb)
+
+	plan.CelPolicies = append(plan.CelPolicies,
+		CelPolicyTemplate{
+			Name:       "iso-enforce-change-control",
+			ControlID:  "A.12.1.2",
+			Expression: "!has(spec.template.spec.containers) || spec.template.spec.containers.all(c, !c.image.endsWith(':latest'))",
+			Message:    "ISO 27001 A.12.1.2: Mutable :latest image tags are prohibited",
+		},
+	)
 }
 
 func buildComponentDefinition(plan *ScaffoldPlan) {
@@ -472,6 +527,33 @@ func buildComponentDefinition(plan *ScaffoldPlan) {
 	plan.ComponentDefinition = cd
 }
 
+func (p *ScaffoldPlan) renderCelConfigMapYAML() (string, error) {
+	policiesJSON, err := json.MarshalIndent(p.CelPolicies, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	cm := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]interface{}{
+			"name":      fmt.Sprintf("%s-cel-rules", p.WorkloadName),
+			"namespace": p.Namespace,
+			"labels": map[string]string{
+				"assurance.ckodex.io/profile": p.Profile,
+				"assurance.ckodex.io/target":  p.WorkloadName,
+			},
+		},
+		"data": map[string]string{
+			"policies.json": string(policiesJSON),
+		},
+	}
+	b, err := yaml.Marshal(cm)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 // RenderManifestsYAML combines all Kubernetes CRD manifests into standard multi-document YAML.
 func (p *ScaffoldPlan) RenderManifestsYAML() (string, error) {
 	var documents []string
@@ -490,6 +572,14 @@ func (p *ScaffoldPlan) RenderManifestsYAML() (string, error) {
 			return "", fmt.Errorf("failed to marshal ControlBinding %s: %w", cb.Name, err)
 		}
 		documents = append(documents, string(y))
+	}
+
+	if len(p.CelPolicies) > 0 {
+		cmYAML, err := p.renderCelConfigMapYAML()
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal CEL ConfigMap: %w", err)
+		}
+		documents = append(documents, cmYAML)
 	}
 
 	return strings.Join(documents, "\n---\n") + "\n", nil
@@ -526,21 +616,11 @@ func (p *ScaffoldPlan) WriteToDirectory(outDir string) error {
 
 	if len(p.CelPolicies) > 0 {
 		celPath := filepath.Join(outDir, fmt.Sprintf("%s-cel-rules.yaml", p.WorkloadName))
-		celBytes, err := yaml.Marshal(map[string]interface{}{
-			"apiVersion": "assurance.ckodex.io/v1alpha1",
-			"kind":       "CelPolicySet",
-			"metadata": map[string]string{
-				"name":      fmt.Sprintf("%s-cel-rules", p.WorkloadName),
-				"namespace": p.Namespace,
-			},
-			"spec": map[string]interface{}{
-				"policies": p.CelPolicies,
-			},
-		})
+		cmYAML, err := p.renderCelConfigMapYAML()
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(celPath, celBytes, 0644); err != nil {
+		if err := os.WriteFile(celPath, []byte(cmYAML), 0644); err != nil {
 			return fmt.Errorf("failed to write %s: %w", celPath, err)
 		}
 	}

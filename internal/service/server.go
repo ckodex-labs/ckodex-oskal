@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,51 @@ import (
 	servicesv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/services/v1"
 )
 
+const (
+	// DefaultFreshnessWindow is the standard 15-minute maximum evidence freshness window.
+	DefaultFreshnessWindow = 15 * time.Minute
+	// MaxTrackedSubjects bounds distinct subject keys retained in memory per Constitution Section 30.
+	MaxTrackedSubjects = 4096
+	// MaxStoredReceipts bounds verified receipts retained in memory per Constitution Section 30.
+	MaxStoredReceipts = 8192
+)
+
+func isViolationType(obsType string) bool {
+	lower := strings.ToLower(strings.TrimSpace(obsType))
+	return strings.Contains(lower, "violation") ||
+		strings.Contains(lower, "denied") ||
+		strings.Contains(lower, "fail") ||
+		strings.Contains(lower, "adverse")
+}
+
+func isViolationObservation(obs *evidencev1.Observation) bool {
+	if obs == nil {
+		return false
+	}
+	if isViolationType(obs.Type) {
+		return true
+	}
+	for k, v := range obs.Attributes {
+		kl := strings.ToLower(strings.TrimSpace(k))
+		vl := strings.ToLower(strings.TrimSpace(v))
+		switch kl {
+		case "status", "disposition", "result", "outcome", "state":
+			if vl == "violation" || vl == "failed" || vl == "fail" || vl == "denied" || vl == "deny" {
+				return true
+			}
+		case "valence":
+			if vl == "negative" {
+				return true
+			}
+		case "violation", "failed", "denied":
+			if vl == "true" || vl == "1" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Server implements servicesv1.AssuranceServiceServer (Section 29).
 type Server struct {
 	servicesv1.UnimplementedAssuranceServiceServer
@@ -32,7 +78,9 @@ type Server struct {
 	receiptMgr   *receipts.ReceiptManager
 	evidenceRepo ports.EvidenceRepository
 	observations map[string][]*evidencev1.Observation
+	subjectOrder []string
 	receipts     map[string]*receiptv1.ControlReceipt
+	receiptOrder []string
 }
 
 // NewServer creates a new AssuranceService gRPC server.
@@ -61,7 +109,7 @@ func NewServer(receiptMgr *receipts.ReceiptManager, evidenceRepos ...ports.Evide
 
 // SubmitObservation ingests an observation from an authorized producer.
 func (s *Server) SubmitObservation(ctx context.Context, req *servicesv1.SubmitObservationRequest) (*servicesv1.SubmitObservationResponse, error) {
-	if req.Observation == nil {
+	if req == nil || req.Observation == nil {
 		return nil, status.Error(codes.InvalidArgument, "observation cannot be nil")
 	}
 
@@ -75,8 +123,21 @@ func (s *Server) SubmitObservation(ctx context.Context, req *servicesv1.SubmitOb
 
 	subKey := obs.Subject.Scheme + "://" + obs.Subject.Id
 
+	const maxObservationsPerSubject = 1000
 	s.mu.Lock()
-	s.observations[subKey] = append(s.observations[subKey], obs)
+	if _, exists := s.observations[subKey]; !exists {
+		if len(s.observations) >= MaxTrackedSubjects && len(s.subjectOrder) > 0 {
+			evictKey := s.subjectOrder[0]
+			s.subjectOrder = s.subjectOrder[1:]
+			delete(s.observations, evictKey)
+		}
+		s.subjectOrder = append(s.subjectOrder, subKey)
+	}
+	list := append(s.observations[subKey], obs)
+	if len(list) > maxObservationsPerSubject {
+		list = list[len(list)-maxObservationsPerSubject:]
+	}
+	s.observations[subKey] = list
 	s.mu.Unlock()
 
 	// Ingest evidence envelopes into the content-addressed EvidenceRepository
@@ -84,11 +145,14 @@ func (s *Server) SubmitObservation(ctx context.Context, req *servicesv1.SubmitOb
 		Scheme: obs.Subject.Scheme,
 		ID:     obs.Subject.Id,
 	}
-	obsTime := time.Now().UTC()
+	var obsTime time.Time
 	if obs.ObservedAt != nil {
 		obsTime = obs.ObservedAt.AsTime()
 	}
 	for i, ev := range obs.Evidence {
+		if ev == nil {
+			continue
+		}
 		env := assurance.EvidenceEnvelope{
 			ID:              fmt.Sprintf("env-%s-%d", obs.Id, i),
 			ObservationType: obs.Type,
@@ -124,9 +188,92 @@ func (s *Server) SubmitObservation(ctx context.Context, req *servicesv1.SubmitOb
 	}, nil
 }
 
+func (s *Server) evaluateSubjectEvidence(
+	ctx context.Context,
+	subRef assurance.SubjectRef,
+	now time.Time,
+) (commonv1.AssuranceState, assurance.AssuranceState, []assurance.EvidenceRef, string) {
+	subKey := subRef.Scheme + "://" + subRef.ID
+
+	s.mu.RLock()
+	obsList := s.observations[subKey]
+	s.mu.RUnlock()
+
+	var validRefs []assurance.EvidenceRef
+	validCount := 0
+	hasViolation := false
+	hasStale := false
+
+	for _, obs := range obsList {
+		if obs == nil || obs.ObservedAt == nil {
+			continue
+		}
+		obsTime := obs.ObservedAt.AsTime()
+		if obsTime.IsZero() || obsTime.After(now.Add(1*time.Minute)) {
+			continue
+		}
+		isViol := isViolationObservation(obs)
+		if !isViol && len(obs.Evidence) == 0 {
+			continue
+		}
+		validCount++
+		if isViol {
+			hasViolation = true
+		}
+		if now.Sub(obsTime) > DefaultFreshnessWindow {
+			hasStale = true
+		}
+		for _, ev := range obs.Evidence {
+			if ev == nil {
+				continue
+			}
+			validRefs = append(validRefs, assurance.EvidenceRef{
+				URI:       ev.Uri,
+				Digest:    ev.Digest,
+				MediaType: ev.MediaType,
+			})
+		}
+	}
+
+	if validCount == 0 && len(obsList) == 0 && s.evidenceRepo != nil {
+		if envs, err := s.evidenceRepo.ListBySubject(ctx, subRef); err == nil {
+			for _, env := range envs {
+				if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
+					continue
+				}
+				validCount++
+				if isViolationType(env.ObservationType) {
+					hasViolation = true
+				}
+				if now.Sub(env.CapturedAt) > DefaultFreshnessWindow {
+					hasStale = true
+				}
+				validRefs = append(validRefs, env.Artifact)
+			}
+		}
+	}
+
+	if validCount == 0 {
+		return commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN, assurance.AssuranceStateUnknown, nil, ""
+	}
+
+	evRoot := ""
+	if len(validRefs) > 0 {
+		evRoot = receipts.ComputeEvidenceRoot(validRefs)
+	}
+
+	if hasViolation {
+		return commonv1.AssuranceState_ASSURANCE_STATE_FAILED, assurance.AssuranceStateFailed, validRefs, evRoot
+	}
+	if hasStale {
+		return commonv1.AssuranceState_ASSURANCE_STATE_STALE, assurance.AssuranceStateStale, validRefs, evRoot
+	}
+	return commonv1.AssuranceState_ASSURANCE_STATE_ASSURED, assurance.AssuranceStateAssured, validRefs, evRoot
+}
+
 // EvaluateSubject evaluates all claims for a given subject based on ingested evidence.
 func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSubjectRequest) (*servicesv1.EvaluateSubjectResponse, error) {
-	if req.Subject == nil {
+	if req == nil || req.Subject == nil {
 		return nil, status.Error(codes.InvalidArgument, "subject cannot be nil")
 	}
 
@@ -137,13 +284,24 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 		ID:     req.Subject.Id,
 	}
 
+	s.mu.RLock()
+	obsList := s.observations[subKey]
+	s.mu.RUnlock()
+
+	hasViolation := false
+	for _, obs := range obsList {
+		if obs != nil && obs.ObservedAt != nil {
+			t := obs.ObservedAt.AsTime()
+			if !t.IsZero() && !t.After(now.Add(1*time.Minute)) && isViolationObservation(obs) {
+				hasViolation = true
+			}
+		}
+	}
+
 	envelopes, _ := s.evidenceRepo.ListBySubject(ctx, subRef)
 	if len(envelopes) == 0 {
-		s.mu.RLock()
-		obsList := s.observations[subKey]
-		s.mu.RUnlock()
 		for _, obs := range obsList {
-			obsTime := now
+			var obsTime time.Time
 			if obs.ObservedAt != nil {
 				obsTime = obs.ObservedAt.AsTime()
 			}
@@ -165,6 +323,11 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 			}
 		}
 	}
+	for _, env := range envelopes {
+		if !env.CapturedAt.IsZero() && !env.CapturedAt.After(now.Add(1*time.Minute)) && isViolationType(env.ObservationType) {
+			hasViolation = true
+		}
+	}
 
 	currentEpoch := assurance.AssuranceEpoch{
 		SubjectDigest:        assurance.ComputeStringDigest(subRef.URI()),
@@ -182,13 +345,16 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 				ID:           "admission-or-runtime",
 				EvidenceType: "admission",
 				Required:     true,
-				MaxAge:       24 * time.Hour,
+				MaxAge:       DefaultFreshnessWindow,
 			},
 		},
 		OnMissingRequiredState: assurance.AssuranceStateUnknown,
 	}
 
 	contractResult := contract.Evaluate(envelopes, currentEpoch, now)
+	if hasViolation {
+		contractResult.State = assurance.AssuranceStateFailed
+	}
 
 	var targetState commonv1.AssuranceState
 	var valence commonv1.Valence
@@ -220,6 +386,7 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 		Required: int32(contractResult.Completeness.Required),
 		Present:  int32(contractResult.Completeness.Present),
 		Verified: int32(contractResult.Completeness.Verified),
+		Stale:    int32(contractResult.Completeness.Stale),
 		Missing:  int32(contractResult.Completeness.Missing),
 	}
 
@@ -237,6 +404,9 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 
 	var evaluations []*assessmentv1.ClaimEvaluation
 	for _, ctrl := range req.Controls {
+		if ctrl == nil {
+			continue
+		}
 		eval := &assessmentv1.ClaimEvaluation{
 			Id:      fmt.Sprintf("eval-%s-%s", req.Subject.Id, ctrl.Id),
 			Control: ctrl,
@@ -277,32 +447,11 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 
 // ExplainClaim constructs a full reverse-traceable explain graph.
 func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimRequest) (*servicesv1.ExplainClaimResponse, error) {
-	if req.Subject == nil || req.Control == nil {
+	if req == nil || req.Subject == nil || req.Control == nil {
 		return nil, status.Error(codes.InvalidArgument, "subject and control are required")
 	}
 
-	subKey := req.Subject.Scheme + "://" + req.Subject.Id
-
-	s.mu.RLock()
-	obsList := s.observations[subKey]
-	s.mu.RUnlock()
-
-	claimState := assurance.AssuranceStateUnknown
-	respState := commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN
-	var evRoot string
-
-	if len(obsList) > 0 {
-		claimState = assurance.AssuranceStateAssured
-		respState = commonv1.AssuranceState_ASSURANCE_STATE_ASSURED
-		var evRefs []assurance.EvidenceRef
-		for _, obs := range obsList {
-			for _, ev := range obs.Evidence {
-				evRefs = append(evRefs, assurance.EvidenceRef{Digest: ev.Digest})
-			}
-		}
-		evRoot = receipts.ComputeEvidenceRoot(evRefs)
-	}
-
+	now := time.Now().UTC()
 	sub := assurance.SubjectRef{
 		Scheme: req.Subject.Scheme,
 		ID:     req.Subject.Id,
@@ -313,6 +462,8 @@ func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimR
 		Version:   req.Control.Version,
 	}
 
+	respState, claimState, evRefs, evRoot := s.evaluateSubjectEvidence(ctx, sub, now)
+
 	polDigest := ""
 	impDigest := ""
 	authDigest := ""
@@ -322,6 +473,18 @@ func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimR
 		impDigest = assurance.ComputeStringDigest("kubernetes:workload-specification")
 		authDigest = assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server")
 		envDigest = assurance.ComputeStringDigest("cluster:kubernetes")
+	}
+
+	var comp assurance.EvidenceCompleteness
+	switch claimState {
+	case assurance.AssuranceStateAssured:
+		comp = assurance.EvidenceCompleteness{Required: len(evRefs), Present: len(evRefs), Verified: len(evRefs)}
+	case assurance.AssuranceStateStale:
+		comp = assurance.EvidenceCompleteness{Required: len(evRefs), Present: len(evRefs), Verified: 0, Stale: len(evRefs)}
+	case assurance.AssuranceStateFailed:
+		comp = assurance.EvidenceCompleteness{Required: 1, Present: len(evRefs), Verified: 0, Missing: 1}
+	default:
+		comp = assurance.EvidenceCompleteness{Required: 1, Present: 0, Verified: 0, Missing: 1}
 	}
 
 	eval := assurance.ClaimEvaluation{
@@ -336,7 +499,11 @@ func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimR
 			AuthorityDigest:      authDigest,
 			EnvironmentDigest:    envDigest,
 		},
+		Evidence:     evRefs,
+		Completeness: comp,
 		EvidenceRoot: evRoot,
+		EvaluatedAt:  now,
+		ValidUntil:   now.Add(5 * time.Minute),
 	}
 
 	graph := s.explainer.BuildExplainGraph(ctx, sub, ctrl, eval)
@@ -391,18 +558,21 @@ func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimR
 
 // GetAssuranceState returns summary assurance state based on verified evidence.
 func (s *Server) GetAssuranceState(ctx context.Context, req *servicesv1.GetAssuranceStateRequest) (*servicesv1.GetAssuranceStateResponse, error) {
-	if req.Subject == nil {
+	if req == nil || req.Subject == nil {
 		return nil, status.Error(codes.InvalidArgument, "subject is required")
 	}
 
-	subKey := req.Subject.Scheme + "://" + req.Subject.Id
+	now := time.Now().UTC()
+	subRef := assurance.SubjectRef{
+		Scheme: req.Subject.Scheme,
+		ID:     req.Subject.Id,
+	}
+	subKey := subRef.Scheme + "://" + subRef.ID
 
-	s.mu.RLock()
-	obsList := s.observations[subKey]
-	s.mu.RUnlock()
+	protoState, _, _, root := s.evaluateSubjectEvidence(ctx, subRef, now)
 
-	// Invariant I-02: Absence of evidence is UNKNOWN, never PASS
-	if len(obsList) == 0 {
+	// Invariant I-02: Absence of valid evidence is UNKNOWN, never PASS
+	if protoState == commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN {
 		return &servicesv1.GetAssuranceStateResponse{
 			Subject:      req.Subject,
 			State:        commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN,
@@ -411,22 +581,10 @@ func (s *Server) GetAssuranceState(ctx context.Context, req *servicesv1.GetAssur
 		}, nil
 	}
 
-	var evRefs []assurance.EvidenceRef
-	for _, obs := range obsList {
-		for _, ev := range obs.Evidence {
-			evRefs = append(evRefs, assurance.EvidenceRef{
-				URI:       ev.Uri,
-				Digest:    ev.Digest,
-				MediaType: ev.MediaType,
-			})
-		}
-	}
-	root := receipts.ComputeEvidenceRoot(evRefs)
 	policyDigest := assurance.ComputeStringDigest(subKey + ":" + root)
-
 	return &servicesv1.GetAssuranceStateResponse{
 		Subject:      req.Subject,
-		State:        commonv1.AssuranceState_ASSURANCE_STATE_ASSURED,
+		State:        protoState,
 		EvidenceRoot: root,
 		Epoch: &commonv1.AssuranceEpoch{
 			SubjectDigest:        assurance.ComputeStringDigest(subKey),
@@ -440,11 +598,15 @@ func (s *Server) GetAssuranceState(ctx context.Context, req *servicesv1.GetAssur
 
 // SubmitReceipt verifies an incoming cryptographic receipt.
 func (s *Server) SubmitReceipt(ctx context.Context, req *servicesv1.SubmitReceiptRequest) (*servicesv1.SubmitReceiptResponse, error) {
-	if req.Receipt == nil {
+	if req == nil || req.Receipt == nil {
 		return nil, status.Error(codes.InvalidArgument, "receipt cannot be nil")
 	}
 
 	rcpt := req.Receipt
+	if rcpt.Subject == nil || rcpt.Control == nil || rcpt.Evaluator == nil || rcpt.EvaluatedAt == nil {
+		return nil, status.Error(codes.InvalidArgument, "receipt requires non-nil subject, control, evaluator, and evaluated_at")
+	}
+
 	coreReceipt := assurance.ControlReceipt{
 		Subject: assurance.SubjectRef{
 			Scheme: rcpt.Subject.Scheme,
@@ -453,22 +615,26 @@ func (s *Server) SubmitReceipt(ctx context.Context, req *servicesv1.SubmitReceip
 		Control: assurance.ControlRef{
 			Namespace: rcpt.Control.Namespace,
 			ID:        rcpt.Control.Id,
+			Version:   rcpt.Control.Version,
 		},
-		State: assurance.AssuranceState(rcpt.State),
-		Epoch: assurance.AssuranceEpoch{
+		State:        assurance.AssuranceState(rcpt.State),
+		EvidenceRoot: rcpt.EvidenceRoot,
+		Evaluator: assurance.AuthorityRef{
+			Scheme:      rcpt.Evaluator.Scheme,
+			Subject:     rcpt.Evaluator.Subject,
+			TrustDomain: rcpt.Evaluator.TrustDomain,
+		},
+		EvaluatedAt: rcpt.EvaluatedAt.AsTime(),
+		Signature:   rcpt.Signature,
+	}
+	if rcpt.Epoch != nil {
+		coreReceipt.Epoch = assurance.AssuranceEpoch{
 			SubjectDigest:        rcpt.Epoch.SubjectDigest,
 			ImplementationDigest: rcpt.Epoch.ImplementationDigest,
 			PolicyDigest:         rcpt.Epoch.PolicyDigest,
 			AuthorityDigest:      rcpt.Epoch.AuthorityDigest,
 			EnvironmentDigest:    rcpt.Epoch.EnvironmentDigest,
-		},
-		EvidenceRoot: rcpt.EvidenceRoot,
-		Evaluator: assurance.AuthorityRef{
-			Scheme:  rcpt.Evaluator.Scheme,
-			Subject: rcpt.Evaluator.Subject,
-		},
-		EvaluatedAt: rcpt.EvaluatedAt.AsTime(),
-		Signature:   rcpt.Signature,
+		}
 	}
 
 	valid, err := receipts.VerifyIndependentReceipt(coreReceipt, s.receiptMgr.PublicKey())
@@ -481,6 +647,14 @@ func (s *Server) SubmitReceipt(ctx context.Context, req *servicesv1.SubmitReceip
 
 	digest := coreReceipt.Digest()
 	s.mu.Lock()
+	if _, exists := s.receipts[digest]; !exists {
+		if len(s.receipts) >= MaxStoredReceipts && len(s.receiptOrder) > 0 {
+			evictDigest := s.receiptOrder[0]
+			s.receiptOrder = s.receiptOrder[1:]
+			delete(s.receipts, evictDigest)
+		}
+		s.receiptOrder = append(s.receiptOrder, digest)
+	}
 	s.receipts[digest] = rcpt
 	s.mu.Unlock()
 

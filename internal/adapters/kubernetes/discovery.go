@@ -156,7 +156,7 @@ func BuildPodSubjectRef(pod *corev1.Pod) assurance.SubjectRef {
 
 	return assurance.SubjectRef{
 		Scheme: "k8s",
-		ID:     fmt.Sprintf("%s/%s/Pod/%s", pod.Namespace, pod.Name, pod.Name),
+		ID:     fmt.Sprintf("%s/Pod/%s", pod.Namespace, pod.Name),
 		Attributes: map[string]string{
 			"cluster":         "local",
 			"namespace":       pod.Namespace,
@@ -190,7 +190,7 @@ func BuildDeploymentSubjectRef(deploy *appsv1.Deployment) assurance.SubjectRef {
 
 	return assurance.SubjectRef{
 		Scheme: "k8s",
-		ID:     fmt.Sprintf("%s/%s/Deployment/%s", deploy.Namespace, deploy.Name, deploy.Name),
+		ID:     fmt.Sprintf("%s/Deployment/%s", deploy.Namespace, deploy.Name),
 		Attributes: map[string]string{
 			"cluster":         "local",
 			"namespace":       deploy.Namespace,

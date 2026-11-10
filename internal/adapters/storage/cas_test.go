@@ -259,3 +259,171 @@ func TestEvidenceRepository_Prune(t *testing.T) {
 		t.Fatalf("expected old envelope to be deleted, got: %v", oldEnvelopes)
 	}
 }
+
+func TestEvidenceRepository_ListAllAndReceipts(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	repo, err := NewFilesystemEvidenceRepository(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+
+	envA := createTestEnvelope("ev-a", "ns/Pod/pod-a", "test")
+	envB := createTestEnvelope("ev-b", "ns/Pod/pod-b", "test")
+	if _, err := repo.Put(ctx, envB, nil); err != nil {
+		t.Fatalf("put B failed: %v", err)
+	}
+	if _, err := repo.Put(ctx, envA, nil); err != nil {
+		t.Fatalf("put A failed: %v", err)
+	}
+
+	all, err := repo.ListAll(ctx)
+	if err != nil {
+		t.Fatalf("ListAll failed: %v", err)
+	}
+	if len(all) != 2 || all[0].ID != "ev-a" || all[1].ID != "ev-b" {
+		t.Fatalf("expected sorted envelopes [ev-a, ev-b], got: %+v", all)
+	}
+
+	rcpt := assurance.ControlReceipt{
+		Subject:      assurance.SubjectRef{Scheme: "k8s", ID: "ns/Deployment/pod-a"},
+		Control:      assurance.ControlRef{Namespace: "ckodex", ID: "AC-6"},
+		State:        assurance.AssuranceStateAssured,
+		EvidenceRoot: "sha256:1234",
+		Signature:    "deadbeef",
+	}
+	rcptID, err := repo.PutReceipt(ctx, rcpt)
+	if err != nil {
+		t.Fatalf("PutReceipt failed: %v", err)
+	}
+	if rcptID != "rcpt-AC-6" {
+		t.Fatalf("expected receipt ID rcpt-AC-6, got %s", rcptID)
+	}
+
+	repoReloaded, err := NewFilesystemEvidenceRepository(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to reload repo: %v", err)
+	}
+	gotRcpt, err := repoReloaded.GetReceipt(ctx, "rcpt-AC-6")
+	if err != nil {
+		t.Fatalf("GetReceipt after reload failed: %v", err)
+	}
+	if gotRcpt.Signature != "deadbeef" {
+		t.Fatalf("expected signature deadbeef, got %s", gotRcpt.Signature)
+	}
+}
+
+func TestEvidenceRepository_NamespacePrefixAndDiskTamper(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	repo, err := NewFilesystemEvidenceRepository(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+
+	// 1. Cross-namespace, version-suffix, and prefix boundary isolation
+	envPayments := createTestEnvelope("ev-pay", "payments/Pod/payments-api-7f8b9-x1234", "kubernetes.admission")
+	envAdmin := createTestEnvelope("ev-admin", "payments/Pod/payments-api-admin-7f8b9-x1234", "kubernetes.admission")
+	envV2 := createTestEnvelope("ev-v2", "payments/Pod/payments-api-v2-7f8b9-x1234", "kubernetes.admission")
+	envDeploy2 := createTestEnvelope("ev-deploy2", "payments/Deployment/payments-api-2", "kubernetes.admission")
+	envOtherNS := createTestEnvelope("ev-other-ns", "staging/Pod/payments-api-7f8b9-x1234", "kubernetes.admission")
+	envStsPod := createTestEnvelope("ev-sts-0", "payments/Pod/payments-db-0", "kubernetes.admission")
+
+	_, _ = repo.Put(ctx, envPayments, nil)
+	_, _ = repo.Put(ctx, envAdmin, nil)
+	_, _ = repo.Put(ctx, envV2, nil)
+	_, _ = repo.Put(ctx, envDeploy2, nil)
+	_, _ = repo.Put(ctx, envOtherNS, nil)
+	_, _ = repo.Put(ctx, envStsPod, nil)
+
+	matches, err := repo.ListBySubject(ctx, assurance.SubjectRef{Scheme: "k8s", ID: "payments/Deployment/payments-api"})
+	if err != nil {
+		t.Fatalf("ListBySubject failed: %v", err)
+	}
+	if len(matches) != 1 || matches[0].ID != "ev-pay" {
+		t.Fatalf("expected only ev-pay to match payments/Deployment/payments-api, got: %+v", matches)
+	}
+
+	// StatefulSet ordinal pod (payments-db-0) should match StatefulSet/payments-db
+	stsMatches, err := repo.ListBySubject(ctx, assurance.SubjectRef{Scheme: "k8s", ID: "payments/StatefulSet/payments-db"})
+	if err != nil || len(stsMatches) != 1 || stsMatches[0].ID != "ev-sts-0" {
+		t.Fatalf("expected StatefulSet ordinal pod to match payments/StatefulSet/payments-db, got: %+v, err: %v", stsMatches, err)
+	}
+
+	// Cluster-prefixed query (prod/payments/Deployment/payments-api) should still match payments/Pod/payments-api-...
+	clusterMatches, err := repo.ListBySubject(ctx, assurance.SubjectRef{Scheme: "k8s", ID: "prod/payments/Deployment/payments-api"})
+	if err != nil || len(clusterMatches) != 1 || clusterMatches[0].ID != "ev-pay" {
+		t.Fatalf("expected cluster-prefixed query to match ev-pay, got: %+v, err: %v", clusterMatches, err)
+	}
+
+	// 2. Multi-subject receipt indexing without clobbering subject-scoped keys
+	rcptA := assurance.ControlReceipt{
+		Subject:      assurance.SubjectRef{Scheme: "k8s", ID: "payments/Deployment/payments-api"},
+		Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
+		State:        assurance.AssuranceStateAssured,
+		EvidenceRoot: "sha256:aaaa",
+		Signature:    "sig-a",
+	}
+	rcptB := assurance.ControlReceipt{
+		Subject:      assurance.SubjectRef{Scheme: "k8s", ID: "payments/Deployment/billing-api"},
+		Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
+		State:        assurance.AssuranceStateAssured,
+		EvidenceRoot: "sha256:bbbb",
+		Signature:    "sig-b",
+	}
+	_, _ = repo.PutReceipt(ctx, rcptA)
+	_, _ = repo.PutReceipt(ctx, rcptB)
+
+	gotA, err := repo.GetReceipt(ctx, "rcpt-payments-api-AC-6")
+	if err != nil || gotA.Signature != "sig-a" {
+		t.Fatalf("expected rcpt-payments-api-AC-6 with sig-a, got %+v, err=%v", gotA, err)
+	}
+	gotB, err := repo.GetReceipt(ctx, "rcpt-billing-api-AC-6")
+	if err != nil || gotB.Signature != "sig-b" {
+		t.Fatalf("expected rcpt-billing-api-AC-6 with sig-b, got %+v, err=%v", gotB, err)
+	}
+
+	// 3. Tampered blob file in blobs/sha256/<hash>.json must be rejected by loadFromDisk
+	tamperedHash := "0000000000000000000000000000000000000000000000000000000000000000"
+	blobDir := tmpDir + "/blobs/sha256"
+	_ = os.MkdirAll(blobDir, 0755)
+	fakeEnvJSON := `{"id":"ev-forged","subject":{"scheme":"k8s","id":"payments/Deployment/forged"},"observation_type":"kubernetes.admission"}`
+	_ = os.WriteFile(blobDir+"/"+tamperedHash+".json", []byte(fakeEnvJSON), 0644)
+
+	reloaded, err := NewFilesystemEvidenceRepository(tmpDir)
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	forgedList, _ := reloaded.ListBySubject(ctx, assurance.SubjectRef{Scheme: "k8s", ID: "payments/Deployment/forged"})
+	if len(forgedList) != 0 {
+		t.Fatalf("expected tampered blob file to be rejected on loadFromDisk, got: %+v", forgedList)
+	}
+
+	// 4. VerifyIntegrity detects on-disk tampering immediately
+	if _, err := reloaded.VerifyIntegrity(ctx); err == nil {
+		t.Fatal("expected VerifyIntegrity to detect tampered CAS blob on disk, got nil")
+	}
+	_ = os.Remove(blobDir + "/" + tamperedHash + ".json")
+	verifiedBlobs, err := reloaded.VerifyIntegrity(ctx)
+	if err != nil || verifiedBlobs == 0 {
+		t.Fatalf("expected VerifyIntegrity to pass after removing tampered file, got count=%d err=%v", verifiedBlobs, err)
+	}
+
+	// 5. Idempotent Put deduplicates subjectIndex and rejects oversized payloads
+	for i := 0; i < 10; i++ {
+		if _, err := reloaded.Put(ctx, envPayments, nil); err != nil {
+			t.Fatalf("idempotent Put failed: %v", err)
+		}
+	}
+	subURI := envPayments.Subject.URI()
+	if len(reloaded.subjectIndex[subURI]) != 1 {
+		t.Fatalf("expected subjectIndex[%s] to have 1 deduplicated digest, got %d", subURI, len(reloaded.subjectIndex[subURI]))
+	}
+
+	oversized := bytes.NewReader(make([]byte, MaxPayloadBytes+10))
+	if _, err := reloaded.Put(ctx, envPayments, oversized); err == nil {
+		t.Fatal("expected oversized payload (> MaxPayloadBytes) to be rejected")
+	}
+}

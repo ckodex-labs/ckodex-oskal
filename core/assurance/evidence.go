@@ -128,12 +128,12 @@ type EvidenceRequirement struct {
 
 // IsFresh checks whether evidence captured at capturedAt satisfies maxAge.
 func (r EvidenceRequirement) IsFresh(capturedAt time.Time, now time.Time) bool {
+	if capturedAt.IsZero() || capturedAt.After(now) {
+		// Zero or future timestamp is invalid
+		return false
+	}
 	if r.MaxAge <= 0 {
 		return true
-	}
-	if capturedAt.After(now) {
-		// Future timestamp is invalid
-		return false
 	}
 	return now.Sub(capturedAt) <= r.MaxAge
 }
@@ -149,6 +149,9 @@ func (r EvidenceRequirement) IsProducerAccepted(producerID string) bool {
 		}
 		// Prefix match for SPIFFE trust domain patterns
 		if strings.HasSuffix(accepted, "*") && strings.HasPrefix(producerID, strings.TrimSuffix(accepted, "*")) {
+			return true
+		}
+		if strings.HasSuffix(accepted, "://") && strings.HasPrefix(producerID, accepted) {
 			return true
 		}
 		if strings.HasPrefix(producerID, accepted+"://") {
@@ -244,6 +247,16 @@ type EvidenceContract struct {
 	OnMissingRequiredState AssuranceState        `json:"onMissingRequiredState"`
 }
 
+// IsAdverseObservationType returns true when an observation type represents a violation, denial, or structural ANTI signal.
+func IsAdverseObservationType(obsType string) bool {
+	lower := strings.ToLower(strings.TrimSpace(obsType))
+	return strings.Contains(lower, "violation") ||
+		strings.Contains(lower, "denied") ||
+		strings.Contains(lower, "fail") ||
+		strings.Contains(lower, "adverse") ||
+		strings.Contains(lower, "quarantine")
+}
+
 // Evaluate checks candidate evidence envelopes against this contract at time `now`.
 func (c EvidenceContract) Evaluate(envelopes []EvidenceEnvelope, currentEpoch AssuranceEpoch, now time.Time) ContractEvaluationResult {
 	requiredCount := 0
@@ -260,9 +273,22 @@ func (c EvidenceContract) Evaluate(envelopes []EvidenceEnvelope, currentEpoch As
 		},
 	}
 
+	hasAdverse := false
+	for _, env := range envelopes {
+		if env.CapturedAt.IsZero() || env.CapturedAt.After(now) {
+			continue
+		}
+		if IsAdverseObservationType(env.ObservationType) {
+			hasAdverse = true
+		}
+	}
+
 	for _, req := range c.Requirements {
 		var candidates []EvidenceEnvelope
 		for _, env := range envelopes {
+			if IsAdverseObservationType(env.ObservationType) && !IsAdverseObservationType(req.EvidenceType) {
+				continue
+			}
 			if matchesEvidenceType(env.ObservationType, req.EvidenceType) {
 				candidates = append(candidates, env)
 			}
@@ -274,6 +300,11 @@ func (c EvidenceContract) Evaluate(envelopes []EvidenceEnvelope, currentEpoch As
 		for _, cand := range candidates {
 			// Check producer authorization
 			if !req.IsProducerAccepted(cand.Producer.Canonical()) {
+				continue
+			}
+
+			// Reject zero or future-dated evidence outright
+			if cand.CapturedAt.IsZero() || cand.CapturedAt.After(now) {
 				continue
 			}
 
@@ -319,8 +350,10 @@ func (c EvidenceContract) Evaluate(envelopes []EvidenceEnvelope, currentEpoch As
 		}
 	}
 
-	// Determine resulting state per contract
-	if result.Completeness.IsComplete() {
+	// Determine resulting state per contract (Section 23: Mandatory anti/violation invariants dominate scores)
+	if hasAdverse {
+		result.State = AssuranceStateFailed
+	} else if result.Completeness.IsComplete() {
 		result.State = AssuranceStateVerified
 	} else if result.Completeness.Stale > 0 && result.Completeness.Missing == 0 {
 		result.State = AssuranceStateStale
@@ -335,10 +368,21 @@ func (c EvidenceContract) Evaluate(envelopes []EvidenceEnvelope, currentEpoch As
 	return result
 }
 
+func normalizeEvidenceType(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	s = strings.ReplaceAll(s, ":", ".")
+	s = strings.ReplaceAll(s, "-", ".")
+	s = strings.TrimSuffix(s, ".review")
+	if strings.HasPrefix(s, "k8s.") {
+		s = "kubernetes." + strings.TrimPrefix(s, "k8s.")
+	}
+	return s
+}
+
 // matchesEvidenceType checks if an observed evidence type satisfies a required evidence type.
 // It supports exact matches (e.g. "kubernetes.admission" == "kubernetes.admission"),
 // hierarchical suffix matches (e.g. "admission" matches "kubernetes.admission"),
-// and normalized case-insensitive comparisons.
+// and normalized case-insensitive comparisons (including "k8s:admission:review").
 func matchesEvidenceType(obsType, reqType string) bool {
 	if obsType == reqType {
 		return true
@@ -349,8 +393,8 @@ func matchesEvidenceType(obsType, reqType string) bool {
 	if strings.HasSuffix(obsType, "."+reqType) || strings.HasSuffix(reqType, "."+obsType) {
 		return true
 	}
-	cleanObs := strings.ReplaceAll(strings.ToLower(obsType), "-", ".")
-	cleanReq := strings.ReplaceAll(strings.ToLower(reqType), "-", ".")
+	cleanObs := normalizeEvidenceType(obsType)
+	cleanReq := normalizeEvidenceType(reqType)
 	if cleanObs == cleanReq {
 		return true
 	}

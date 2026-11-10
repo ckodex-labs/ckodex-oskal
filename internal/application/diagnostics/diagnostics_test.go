@@ -108,3 +108,74 @@ func TestInspectSubjectFourTruthChannels(t *testing.T) {
 		t.Fatalf("unexpected evidence root: %s", report.Evidence.EvidenceRoot)
 	}
 }
+
+func TestInspectSubjectHonestUnknownAndFutureDated(t *testing.T) {
+	sub := assurance.SubjectRef{Scheme: "k8s", ID: "prod/payments/Deployment/unverified-app"}
+	ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+	now := time.Now().UTC()
+
+	evalUnknown := assurance.ClaimEvaluation{
+		ID:          "eval-unknown",
+		Subject:     sub,
+		Control:     ctrl,
+		State:       assurance.AssuranceStateUnknown,
+		EvaluatedAt: now,
+	}
+
+	report := InspectSubject(context.Background(), sub, evalUnknown, nil)
+	if report.Decision.Disposition != "SAFE_HOLD" {
+		t.Fatalf("expected SAFE_HOLD disposition for UNKNOWN state, got %s", report.Decision.Disposition)
+	}
+	for _, step := range report.Execution.Steps {
+		if step.Order >= 3 && (step.Outcome == "VERIFIED" || step.Outcome == "EMITTED") {
+			t.Fatalf("expected unverified/skipped outcome on step %d when no evidence exists, got %s", step.Order, step.Outcome)
+		}
+	}
+
+	// Future-dated evidence envelope should downgrade disposition to SAFE_HOLD
+	futureEnv := assurance.EvidenceEnvelope{
+		ID:              "env-future",
+		Subject:         sub,
+		ObservationType: "kubernetes.admission",
+		CapturedAt:      now.Add(10 * time.Minute),
+		Artifact:        assurance.EvidenceRef{URI: "file:///future.json", Digest: "sha256:1111"},
+	}
+	evalAssured := evalUnknown
+	evalAssured.State = assurance.AssuranceStateAssured
+	futureReport := InspectSubject(context.Background(), sub, evalAssured, []assurance.EvidenceEnvelope{futureEnv})
+	if futureReport.Decision.Disposition != "SAFE_HOLD" {
+		t.Fatalf("expected future-dated evidence to downgrade disposition to SAFE_HOLD, got %s", futureReport.Decision.Disposition)
+	}
+}
+
+func TestRunDoctorEnvChecks(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Non-existent TUF_ROOT fails checkSigstoreInfrastructure
+	t.Setenv("TUF_ROOT", tmpDir+"/missing-tuf-root.json")
+	emptyKube := tmpDir + "/empty-kubeconfig"
+	_ = os.WriteFile(emptyKube, []byte("   "), 0600)
+	t.Setenv("KUBECONFIG", emptyKube)
+
+	report := RunDoctor(context.Background(), tmpDir)
+	if report.OverallState != StatusFail {
+		t.Fatalf("expected OverallState StatusFail when TUF_ROOT is missing, got %s", report.OverallState)
+	}
+
+	foundTufFail := false
+	foundKubeWarn := false
+	for _, c := range report.Checks {
+		if strings.Contains(c.Name, "Sigstore") && c.Status == StatusFail {
+			foundTufFail = true
+		}
+		if strings.Contains(c.Name, "Kubernetes") && c.Status == StatusWarn && strings.Contains(c.Message, "empty or missing") {
+			foundKubeWarn = true
+		}
+	}
+	if !foundTufFail {
+		t.Fatal("expected Sigstore check to FAIL for non-existent TUF_ROOT")
+	}
+	if !foundKubeWarn {
+		t.Fatal("expected Kubernetes check to WARN for empty kubeconfig file")
+	}
+}

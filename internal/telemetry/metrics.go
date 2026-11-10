@@ -1,6 +1,8 @@
 package telemetry
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -74,8 +76,39 @@ func init() {
 	)
 }
 
+var (
+	knownAssuranceStates = []string{
+		"ASSURED",
+		"FAILED",
+		"STALE",
+		"UNKNOWN",
+		"VERIFIED",
+		"EXPIRED",
+	}
+	generationMu   sync.Mutex
+	lastGeneration = make(map[string]string)
+)
+
 // RecordAssuranceState records the state gauge for a given binding.
 func RecordAssuranceState(namespace, binding, status, generation string, active bool) {
+	if active {
+		key := namespace + "/" + binding
+		generationMu.Lock()
+		prevGen, hadPrev := lastGeneration[key]
+		lastGeneration[key] = generation
+		generationMu.Unlock()
+
+		if hadPrev && prevGen != generation {
+			for _, s := range knownAssuranceStates {
+				AssuranceStateGauge.WithLabelValues(namespace, binding, s, prevGen).Set(0.0)
+			}
+		}
+		for _, s := range knownAssuranceStates {
+			if s != status {
+				AssuranceStateGauge.WithLabelValues(namespace, binding, s, generation).Set(0.0)
+			}
+		}
+	}
 	val := 0.0
 	if active {
 		val = 1.0

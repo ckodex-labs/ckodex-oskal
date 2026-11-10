@@ -3,6 +3,7 @@ package diagnostics
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
@@ -92,24 +93,63 @@ func InspectSubject(
 ) *InspectionReport {
 	now := time.Now().UTC()
 	start := time.Now()
+	ruleStart := time.Now()
 
-	// 1. Telemetry Trace
+	var validEnvelopes []assurance.EvidenceEnvelope
+	hasStaleEnvelope := false
+	for _, env := range envelopes {
+		if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
+			continue
+		}
+		if now.Sub(env.CapturedAt) > 15*time.Minute {
+			hasStaleEnvelope = true
+		}
+		validEnvelopes = append(validEnvelopes, env)
+	}
+	if len(envelopes) > 0 && len(validEnvelopes) == 0 {
+		eval.State = assurance.AssuranceStateUnknown
+		eval.EvidenceRoot = ""
+	} else if hasStaleEnvelope && (eval.State == assurance.AssuranceStateAssured || eval.State == assurance.AssuranceStateVerified) {
+		eval.State = assurance.AssuranceStateStale
+	}
+
+	// 1. Telemetry Trace (populated with measured runtime metrics at end of inspection)
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
 	telemetry := TelemetryTrace{
-		EvaluationDuration: "420us",
-		EvidenceFetchTime:  "150us",
-		RuleExecutionTime:  "180us",
-		MemoryAllocatedKB:  32,
-		CacheHit:           len(envelopes) > 0,
+		MemoryAllocatedKB: memStats.Alloc / 1024,
+		CacheHit:          len(validEnvelopes) > 0,
 	}
 
 	// 2. Execution Trace
+	cryptoOutcome := "VERIFIED"
+	policyOutcome := "EVALUATED"
+	receiptOutcome := "EMITTED"
+	switch eval.State {
+	case assurance.AssuranceStateUnknown, assurance.AssuranceStateUnspecified:
+		if len(validEnvelopes) == 0 {
+			cryptoOutcome = "UNVERIFIED"
+			policyOutcome = "SKIPPED"
+			receiptOutcome = "SKIPPED"
+		} else {
+			cryptoOutcome = "UNVERIFIED"
+			receiptOutcome = "SKIPPED"
+		}
+	case assurance.AssuranceStateStale:
+		cryptoOutcome = "STALE"
+		receiptOutcome = "DEFERRED"
+	case assurance.AssuranceStateFailed:
+		cryptoOutcome = "FAILED"
+		receiptOutcome = "SKIPPED"
+	}
+
 	execSteps := []ExecutionStep{
 		{Order: 1, Stage: "Ingestion", Action: "Resolve subject reference", Outcome: "RESOLVED"},
-		{Order: 2, Stage: "EvidenceGathering", Action: fmt.Sprintf("Query CAS repository (%d envelopes)", len(envelopes)), Outcome: "COMPLETED"},
-		{Order: 3, Stage: "CryptographicVerification", Action: "Verify Merkle root & producer SPIFFE identities", Outcome: "VERIFIED"},
-		{Order: 4, Stage: "PolicyEvaluation", Action: fmt.Sprintf("Evaluate CEL contract for %s", eval.Control.ID), Outcome: "EVALUATED"},
+		{Order: 2, Stage: "EvidenceGathering", Action: fmt.Sprintf("Query CAS repository (%d envelopes)", len(validEnvelopes)), Outcome: "COMPLETED"},
+		{Order: 3, Stage: "CryptographicVerification", Action: "Verify Merkle root & producer SPIFFE identities", Outcome: cryptoOutcome},
+		{Order: 4, Stage: "PolicyEvaluation", Action: fmt.Sprintf("Evaluate CEL contract for %s", eval.Control.ID), Outcome: policyOutcome},
 		{Order: 5, Stage: "StateTransition", Action: "Compute 6D Vector State transition", Outcome: eval.State.String()},
-		{Order: 6, Stage: "ReceiptGeneration", Action: "Emit signed in-toto receipt & Merkle attestation", Outcome: "EMITTED"},
+		{Order: 6, Stage: "ReceiptGeneration", Action: "Emit signed in-toto receipt & Merkle attestation", Outcome: receiptOutcome},
 	}
 	execTrace := ExecutionTrace{
 		PathID: fmt.Sprintf("trace-%s-%d", eval.Control.ID, now.UnixNano()),
@@ -144,14 +184,16 @@ func InspectSubject(
 		},
 		Rationale: rationale,
 	}
+	ruleDur := time.Since(ruleStart)
+	evStart := time.Now()
 
 	// 4. Evidence Trace
 	var items []EvidenceItem
 	var evRefs []assurance.EvidenceRef
-	for _, env := range envelopes {
+	for _, env := range validEnvelopes {
 		evRefs = append(evRefs, env.Artifact)
 		freshness := "FRESH"
-		if now.Sub(env.CapturedAt) > 15*time.Minute {
+		if eval.State == assurance.AssuranceStateStale || now.Sub(env.CapturedAt) > 15*time.Minute {
 			freshness = "STALE"
 		}
 		items = append(items, EvidenceItem{
@@ -169,18 +211,21 @@ func InspectSubject(
 		evRoot = receipts.ComputeEvidenceRoot(evRefs)
 	}
 
-	signerID := "spiffe://assurance.ckodex.io/server"
-	if len(envelopes) > 0 {
-		signerID = envelopes[0].Producer.Canonical()
+	signerID := "none"
+	if len(validEnvelopes) > 0 {
+		signerID = validEnvelopes[0].Producer.Canonical()
+	} else if eval.State == assurance.AssuranceStateAssured || eval.State == assurance.AssuranceStateVerified {
+		signerID = "spiffe://assurance.ckodex.io/server"
 	}
 
 	evidenceTrace := EvidenceTrace{
 		EvidenceRoot:    evRoot,
 		SignerIdentity:  signerID,
 		Artifacts:       items,
-		MerkleValid:     len(items) > 0,
-		LineageVerified: true,
+		MerkleValid:     len(items) > 0 && eval.State != assurance.AssuranceStateFailed,
+		LineageVerified: len(items) > 0 && (eval.State == assurance.AssuranceStateAssured || eval.State == assurance.AssuranceStateVerified),
 	}
+	evDur := time.Since(evStart)
 
 	var remediation *RemediationAction
 	ctrlID := eval.Control.ID
@@ -225,6 +270,8 @@ func InspectSubject(
 		Evidence:       evidenceTrace,
 		Remediation:    remediation,
 	}
+	report.Telemetry.RuleExecutionTime = formatDurationASCII(ruleDur)
+	report.Telemetry.EvidenceFetchTime = formatDurationASCII(evDur)
 	report.Telemetry.EvaluationDuration = formatDurationASCII(time.Since(start))
 	return report
 }

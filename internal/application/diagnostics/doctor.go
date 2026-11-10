@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 )
 
@@ -56,7 +57,7 @@ func RunDoctor(ctx context.Context, evidenceDir string) *DoctorReport {
 	report.addCheck(checkOscalSchemas())
 
 	// 3. Evidence Storage / CAS Integrity Check
-	report.addCheck(checkEvidenceStorage(evidenceDir))
+	report.addCheck(checkEvidenceStorage(ctx, evidenceDir))
 
 	// 4. SPIFFE / SPIRE Workload API Socket Check
 	report.addCheck(checkSPIFFEWorkloadAPI(ctx))
@@ -181,7 +182,7 @@ func checkOscalSchemas() DiagnosticCheck {
 	}
 }
 
-func checkEvidenceStorage(dir string) DiagnosticCheck {
+func checkEvidenceStorage(ctx context.Context, dir string) DiagnosticCheck {
 	start := time.Now()
 	if dir == "" {
 		return DiagnosticCheck{
@@ -194,7 +195,6 @@ func checkEvidenceStorage(dir string) DiagnosticCheck {
 		}
 	}
 
-	testFile := filepath.Join(dir, ".oskal-doctor-probe")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return DiagnosticCheck{
 			Name:        "Content-Addressable Storage (CAS)",
@@ -206,8 +206,8 @@ func checkEvidenceStorage(dir string) DiagnosticCheck {
 		}
 	}
 
-	probeContent := []byte(fmt.Sprintf("probe-%d", time.Now().UnixNano()))
-	if err := os.WriteFile(testFile, probeContent, 0600); err != nil {
+	tmpProbe, err := os.CreateTemp(dir, ".oskal-doctor-probe-*")
+	if err != nil {
 		return DiagnosticCheck{
 			Name:        "Content-Addressable Storage (CAS)",
 			Target:      dir,
@@ -217,14 +217,51 @@ func checkEvidenceStorage(dir string) DiagnosticCheck {
 			Remediation: "Ensure user has write permissions to evidence directory",
 		}
 	}
-	_ = os.Remove(testFile)
+	probeName := tmpProbe.Name()
+	probeContent := []byte(fmt.Sprintf("probe-%d", time.Now().UnixNano()))
+	_, writeErr := tmpProbe.Write(probeContent)
+	_ = tmpProbe.Close()
+	_ = os.Remove(probeName)
+	if writeErr != nil {
+		return DiagnosticCheck{
+			Name:        "Content-Addressable Storage (CAS)",
+			Target:      dir,
+			Status:      StatusFail,
+			Duration:    formatDurationASCII(time.Since(start)),
+			Message:     fmt.Sprintf("Directory probe write failed: %v", writeErr),
+			Remediation: "Check available disk space and write permissions for evidence directory",
+		}
+	}
+
+	repo, err := storage.NewFilesystemEvidenceRepository(dir)
+	if err != nil {
+		return DiagnosticCheck{
+			Name:        "Content-Addressable Storage (CAS)",
+			Target:      dir,
+			Status:      StatusFail,
+			Duration:    formatDurationASCII(time.Since(start)),
+			Message:     fmt.Sprintf("Failed to open CAS repository: %v", err),
+			Remediation: "Inspect CAS directory permissions and envelope JSON structure",
+		}
+	}
+	verifiedCount, err := repo.VerifyIntegrity(ctx)
+	if err != nil {
+		return DiagnosticCheck{
+			Name:        "Content-Addressable Storage (CAS)",
+			Target:      dir,
+			Status:      StatusFail,
+			Duration:    formatDurationASCII(time.Since(start)),
+			Message:     fmt.Sprintf("CAS cryptographic integrity check failed: %v", err),
+			Remediation: "Quarantine tampered CAS blobs and restore from signed AirgapBundle",
+		}
+	}
 
 	return DiagnosticCheck{
 		Name:     "Content-Addressable Storage (CAS)",
 		Target:   dir,
 		Status:   StatusPass,
 		Duration: formatDurationASCII(time.Since(start)),
-		Message:  "Evidence directory writable and verified for content-addressable storage",
+		Message:  fmt.Sprintf("Evidence directory writable and verified (%d CAS blobs integrity-checked)", verifiedCount),
 	}
 }
 
@@ -281,12 +318,23 @@ func checkSigstoreInfrastructure(_ context.Context) DiagnosticCheck {
 		}
 	}
 
+	if _, err := os.Stat(tufRoot); err != nil {
+		return DiagnosticCheck{
+			Name:        "Sigstore / Supply-Chain Attestation",
+			Target:      fmt.Sprintf("Private TUF Root: %s", tufRoot),
+			Status:      StatusFail,
+			Duration:    formatDurationASCII(time.Since(start)),
+			Message:     fmt.Sprintf("Configured TUF_ROOT path does not exist or is unreadable: %v", err),
+			Remediation: "Ensure TUF_ROOT points to an existing air-gapped TUF root file or directory",
+		}
+	}
+
 	return DiagnosticCheck{
 		Name:     "Sigstore / Supply-Chain Attestation",
 		Target:   fmt.Sprintf("Private TUF Root: %s", tufRoot),
 		Status:   StatusPass,
 		Duration: formatDurationASCII(time.Since(start)),
-		Message:  "Private air-gapped TUF root configured",
+		Message:  "Private air-gapped TUF root configured and verified on disk",
 	}
 }
 
@@ -309,7 +357,8 @@ func checkKubernetesConnectivity(_ context.Context) DiagnosticCheck {
 		}
 	}
 
-	if _, err := os.Stat(kubeconfig); os.IsNotExist(err) {
+	data, err := os.ReadFile(kubeconfig)
+	if err != nil {
 		return DiagnosticCheck{
 			Name:        "Kubernetes Control Plane",
 			Target:      kubeconfig,
@@ -317,6 +366,18 @@ func checkKubernetesConnectivity(_ context.Context) DiagnosticCheck {
 			Duration:    formatDurationASCII(time.Since(start)),
 			Message:     "No active kubeconfig found (local/offline mode)",
 			Remediation: "Configure KUBECONFIG or run inside a Kubernetes cluster with proper RBAC",
+		}
+	}
+
+	content := string(data)
+	if len(strings.TrimSpace(content)) == 0 || (!strings.Contains(content, "clusters:") && !strings.Contains(content, "server:")) {
+		return DiagnosticCheck{
+			Name:        "Kubernetes Control Plane",
+			Target:      kubeconfig,
+			Status:      StatusWarn,
+			Duration:    formatDurationASCII(time.Since(start)),
+			Message:     "Kubeconfig file is empty or missing cluster server definitions",
+			Remediation: "Populate a valid kubeconfig with 'clusters:' and 'server:' entries",
 		}
 	}
 

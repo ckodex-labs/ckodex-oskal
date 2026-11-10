@@ -396,3 +396,155 @@ func TestSubmitReceipt(t *testing.T) {
 		t.Fatal("expected error for nil receipt, got nil")
 	}
 }
+
+func TestAssuranceFreshnessAndViolations(t *testing.T) {
+	client, _, cleanup := setupTestGRPCServer(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// 1. Stale observation (> 15m old) -> ASSURANCE_STATE_STALE (F-09, F-11)
+	staleSub := &commonv1.SubjectRef{Scheme: "k8s", Id: "payments/stale-service"}
+	_, err := client.SubmitObservation(ctx, &servicesv1.SubmitObservationRequest{
+		Observation: &evidencev1.Observation{
+			Id:      "obs-stale-01",
+			Type:    "admission",
+			Subject: staleSub,
+			Evidence: []*evidencev1.EvidenceRef{
+				{Uri: "evidence://cel/stale", Digest: assurance.ComputeStringDigest("stale-01"), MediaType: "application/json"},
+			},
+			ObservedAt: timestamppb.New(time.Now().UTC().Add(-20 * time.Minute)),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to submit stale observation: %v", err)
+	}
+
+	stStale, err := client.GetAssuranceState(ctx, &servicesv1.GetAssuranceStateRequest{Subject: staleSub})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stStale.State != commonv1.AssuranceState_ASSURANCE_STATE_STALE {
+		t.Fatalf("expected ASSURANCE_STATE_STALE for >15m observation, got %v", stStale.State)
+	}
+
+	expStale, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
+		Subject: staleSub,
+		Control: &controlv1.ControlRef{Namespace: "nist-sp-800-53", Id: "AC-6"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if expStale.AssuranceState != commonv1.AssuranceState_ASSURANCE_STATE_STALE {
+		t.Fatalf("expected ExplainClaim ASSURANCE_STATE_STALE for >15m observation, got %v", expStale.AssuranceState)
+	}
+
+	// 2. Future timestamp observation -> rejected as invalid timestamp -> ASSURANCE_STATE_UNKNOWN (F-09)
+	futureSub := &commonv1.SubjectRef{Scheme: "k8s", Id: "payments/future-service"}
+	_, err = client.SubmitObservation(ctx, &servicesv1.SubmitObservationRequest{
+		Observation: &evidencev1.Observation{
+			Id:      "obs-future-01",
+			Type:    "admission",
+			Subject: futureSub,
+			Evidence: []*evidencev1.EvidenceRef{
+				{Uri: "evidence://cel/future", Digest: assurance.ComputeStringDigest("future-01"), MediaType: "application/json"},
+			},
+			ObservedAt: timestamppb.New(time.Now().UTC().Add(10 * time.Minute)),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to submit future observation: %v", err)
+	}
+
+	stFuture, err := client.GetAssuranceState(ctx, &servicesv1.GetAssuranceStateRequest{Subject: futureSub})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stFuture.State != commonv1.AssuranceState_ASSURANCE_STATE_UNKNOWN {
+		t.Fatalf("expected ASSURANCE_STATE_UNKNOWN for future timestamp observation, got %v", stFuture.State)
+	}
+
+	// 3. Violation observation -> ASSURANCE_STATE_FAILED (F-09)
+	violSub := &commonv1.SubjectRef{Scheme: "k8s", Id: "payments/violating-service"}
+	_, err = client.SubmitObservation(ctx, &servicesv1.SubmitObservationRequest{
+		Observation: &evidencev1.Observation{
+			Id:      "obs-viol-01",
+			Type:    "violation",
+			Subject: violSub,
+			Evidence: []*evidencev1.EvidenceRef{
+				{Uri: "evidence://ebpf/violation", Digest: assurance.ComputeStringDigest("viol-01"), MediaType: "application/json"},
+			},
+			ObservedAt: timestamppb.Now(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to submit violation observation: %v", err)
+	}
+
+	stViol, err := client.GetAssuranceState(ctx, &servicesv1.GetAssuranceStateRequest{Subject: violSub})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stViol.State != commonv1.AssuranceState_ASSURANCE_STATE_FAILED {
+		t.Fatalf("expected ASSURANCE_STATE_FAILED for violation observation, got %v", stViol.State)
+	}
+
+	expViol, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
+		Subject: violSub,
+		Control: &controlv1.ControlRef{Namespace: "nist-sp-800-53", Id: "AC-6"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if expViol.AssuranceState != commonv1.AssuranceState_ASSURANCE_STATE_FAILED {
+		t.Fatalf("expected ExplainClaim ASSURANCE_STATE_FAILED for violation observation, got %v", expViol.AssuranceState)
+	}
+}
+
+func TestMalformedNilSubMessagesDoNotPanic(t *testing.T) {
+	client, _, cleanup := setupTestGRPCServer(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// 1. SubmitReceipt with partially nil sub-messages MUST return InvalidArgument, never panic
+	for _, tc := range []*receiptv1.ControlReceipt{
+		{},
+		{Subject: &commonv1.SubjectRef{Scheme: "k8s", Id: "ns/app"}},
+		{
+			Subject: &commonv1.SubjectRef{Scheme: "k8s", Id: "ns/app"},
+			Control: &controlv1.ControlRef{Namespace: "nist", Id: "AC-6"},
+		},
+		{
+			Subject:   &commonv1.SubjectRef{Scheme: "k8s", Id: "ns/app"},
+			Control:   &controlv1.ControlRef{Namespace: "nist", Id: "AC-6"},
+			Evaluator: &commonv1.AuthorityRef{Scheme: "spiffe", Subject: "eval"},
+		},
+	} {
+		if _, err := client.SubmitReceipt(ctx, &servicesv1.SubmitReceiptRequest{Receipt: tc}); err == nil {
+			t.Fatal("expected InvalidArgument error on incomplete ControlReceipt")
+		}
+	}
+
+	// 2. SubmitObservation with nil Evidence element and EvaluateSubject with nil Control element
+	if _, err := client.SubmitObservation(ctx, &servicesv1.SubmitObservationRequest{
+		Observation: &evidencev1.Observation{
+			Id:         "obs-nil-elem",
+			Type:       "admission",
+			Subject:    &commonv1.SubjectRef{Scheme: "k8s", Id: "ns/app"},
+			Evidence:   []*evidencev1.EvidenceRef{nil, {Uri: "evidence://1", Digest: "sha256:1234"}},
+			ObservedAt: timestamppb.Now(),
+		},
+	}); err != nil {
+		t.Fatalf("expected SubmitObservation with nil evidence element to survive cleanly, got: %v", err)
+	}
+
+	if _, err := client.EvaluateSubject(ctx, &servicesv1.EvaluateSubjectRequest{
+		Subject:  &commonv1.SubjectRef{Scheme: "k8s", Id: "ns/app"},
+		Controls: []*controlv1.ControlRef{nil, {Namespace: "nist", Id: "AC-6"}},
+	}); err != nil {
+		t.Fatalf("expected EvaluateSubject with nil control element to survive cleanly, got: %v", err)
+	}
+}

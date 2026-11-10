@@ -118,13 +118,19 @@ func ExportBundle(
 	return bundle, data, nil
 }
 
-// ImportBundle parses and cryptographically validates an offline evidence package.
+// MaxBundleBytes bounds air-gap bundle import size (64 MiB) to prevent memory exhaustion.
+const MaxBundleBytes = 64 << 20
+
+// ImportBundle parses and cryptographically validates an offline evidence package before mutating targetRepo.
 func ImportBundle(
 	ctx context.Context,
 	bundleData []byte,
 	targetRepo ports.EvidenceRepository,
 	receiptSigner ports.ReceiptSigner,
 ) (*AirgapBundle, error) {
+	if len(bundleData) > MaxBundleBytes {
+		return nil, fmt.Errorf("bundle size (%d bytes) exceeds maximum bound (%d bytes)", len(bundleData), MaxBundleBytes)
+	}
 	var bundle AirgapBundle
 	if err := json.Unmarshal(bundleData, &bundle); err != nil {
 		return nil, fmt.Errorf("invalid bundle JSON: %w", err)
@@ -136,7 +142,18 @@ func ImportBundle(
 		return nil, fmt.Errorf("bundle manifest digest mismatch: got %s, expected %s", bundle.ManifestDigest, expectedManifest)
 	}
 
-	// 2. Verify all receipts if receipt signer is provided
+	// 2. Verify every embedded CAS blob matches its content-addressed SHA-256 key (anti-forgery preflight)
+	for digest, content := range bundle.Blobs {
+		if strings.HasPrefix(digest, "sha256:") {
+			h := sha256.Sum256([]byte(content))
+			computed := "sha256:" + hex.EncodeToString(h[:])
+			if computed != digest {
+				return nil, fmt.Errorf("bundle blob digest mismatch: key %s, computed %s", digest, computed)
+			}
+		}
+	}
+
+	// 3. Verify all receipts if receipt signer is provided (Proof Before Mutation)
 	if receiptSigner != nil {
 		for i, receipt := range bundle.Receipts {
 			valid, err := receiptSigner.VerifyReceipt(ctx, receipt)
@@ -146,7 +163,7 @@ func ImportBundle(
 		}
 	}
 
-	// 3. Load verified envelopes and blobs into target repository
+	// 4. Load verified envelopes and blobs into target repository only after full preflight succeeds
 	if targetRepo != nil {
 		for _, env := range bundle.Envelopes {
 			blobContent := bundle.Blobs[env.Artifact.Digest]

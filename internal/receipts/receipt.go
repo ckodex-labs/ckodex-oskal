@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -25,11 +27,22 @@ type ReceiptManager struct {
 
 // NewReceiptManager creates a receipt manager with an Ed25519 keypair.
 func NewReceiptManager(evaluator assurance.AuthorityRef) (*ReceiptManager, error) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate receipt signing keypair: %w", err)
 	}
+	return NewReceiptManagerFromKey(evaluator, priv)
+}
 
+// NewReceiptManagerFromKey creates a receipt manager from an existing Ed25519 private key.
+func NewReceiptManagerFromKey(evaluator assurance.AuthorityRef, privKey ed25519.PrivateKey) (*ReceiptManager, error) {
+	if len(privKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("invalid private key size: %d, expected %d", len(privKey), ed25519.PrivateKeySize)
+	}
+	pub, ok := privKey.Public().(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("failed to derive public key from Ed25519 private key")
+	}
 	if evaluator.Scheme == "" {
 		evaluator = assurance.AuthorityRef{
 			Scheme:      "spiffe",
@@ -40,9 +53,89 @@ func NewReceiptManager(evaluator assurance.AuthorityRef) (*ReceiptManager, error
 
 	return &ReceiptManager{
 		publicKey:  pub,
-		privateKey: priv,
+		privateKey: privKey,
 		evaluator:  evaluator,
 	}, nil
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".oskal-key-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+// LoadOrCreateReceiptManager loads a persistent Ed25519 receipt signing keypair from dir,
+// or generates and writes one (`receipt-signing.key` and `receipt-signing.pub`) if absent.
+func LoadOrCreateReceiptManager(evaluator assurance.AuthorityRef, dir string) (*ReceiptManager, error) {
+	if dir == "" {
+		return NewReceiptManager(evaluator)
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create receipt key directory: %w", err)
+	}
+	privPath := filepath.Join(dir, "receipt-signing.key")
+	pubPath := filepath.Join(dir, "receipt-signing.pub")
+
+	if data, err := os.ReadFile(privPath); err == nil {
+		privHex := strings.TrimSpace(string(data))
+		privBytes, err := hex.DecodeString(privHex)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode receipt-signing.key: %w", err)
+		}
+		mgr, err := NewReceiptManagerFromKey(evaluator, ed25519.PrivateKey(privBytes))
+		if err != nil {
+			return nil, err
+		}
+		if _, err := os.Stat(pubPath); os.IsNotExist(err) {
+			_ = writeFileAtomic(pubPath, []byte(mgr.PublicKey()+"\n"), 0644)
+		}
+		return mgr, nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to read receipt-signing.key: %w", err)
+	}
+
+	mgr, err := NewReceiptManager(evaluator)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeFileAtomic(privPath, []byte(hex.EncodeToString(mgr.privateKey)+"\n"), 0600); err != nil {
+		return nil, fmt.Errorf("failed to persist receipt-signing.key: %w", err)
+	}
+	if err := writeFileAtomic(pubPath, []byte(mgr.PublicKey()+"\n"), 0644); err != nil {
+		return nil, fmt.Errorf("failed to persist receipt-signing.pub: %w", err)
+	}
+	return mgr, nil
 }
 
 // PublicKey returns the public key hex for independent verifiers.

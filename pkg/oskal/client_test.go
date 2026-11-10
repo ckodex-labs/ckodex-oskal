@@ -3,11 +3,14 @@ package oskal
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -268,5 +271,159 @@ func TestGRPCClientLifecycle(t *testing.T) {
 	}
 	if evalResp.SummaryState != StateAssured {
 		t.Fatalf("expected summary state ASSURED, got %v", evalResp.SummaryState)
+	}
+}
+
+func TestInProcessClientFreshnessAndViolations(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := NewInProcessClient()
+	defer func() { _ = client.Close() }()
+
+	ctrl := ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+
+	// 1. Stale observation (> 15m old) -> StateStale (F-12)
+	staleSub := SubjectRef{Scheme: "k8s", ID: "payments/stale-inproc"}
+	_, err := client.SubmitObservation(ctx, &evidencev1.Observation{
+		Id:   "obs-inproc-stale",
+		Type: "admission",
+		Subject: &commonv1.SubjectRef{
+			Scheme: staleSub.Scheme,
+			Id:     staleSub.ID,
+		},
+		Evidence: []*evidencev1.EvidenceRef{
+			{Uri: "evidence://cel/stale", Digest: ComputeStringDigest("inproc-stale-01"), MediaType: "application/json"},
+		},
+		ObservedAt: timestamppb.New(time.Now().UTC().Add(-20 * time.Minute)),
+	})
+	if err != nil {
+		t.Fatalf("failed to submit stale observation: %v", err)
+	}
+
+	stStale, err := client.GetAssuranceState(ctx, staleSub)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stStale.State != StateStale || stStale.Freshness != "stale" {
+		t.Fatalf("expected StateStale and freshness 'stale', got state=%v freshness=%s", stStale.State, stStale.Freshness)
+	}
+
+	evalStale, err := client.EvaluateSubject(ctx, staleSub, []ControlRef{ctrl})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if evalStale.SummaryState != StateStale {
+		t.Fatalf("expected EvaluateSubject SummaryState StateStale, got %v", evalStale.SummaryState)
+	}
+
+	expStale, err := client.ExplainClaim(ctx, staleSub, ctrl)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if expStale.AssuranceState != StateStale {
+		t.Fatalf("expected ExplainClaim StateStale, got %v", expStale.AssuranceState)
+	}
+
+	// 2. Violation observation -> StateFailed (F-12)
+	violSub := SubjectRef{Scheme: "k8s", ID: "payments/viol-inproc"}
+	_, err = client.SubmitObservation(ctx, &evidencev1.Observation{
+		Id:   "obs-inproc-viol",
+		Type: "admission",
+		Subject: &commonv1.SubjectRef{
+			Scheme: violSub.Scheme,
+			Id:     violSub.ID,
+		},
+		Evidence: []*evidencev1.EvidenceRef{
+			{Uri: "evidence://cel/viol", Digest: ComputeStringDigest("inproc-viol-01"), MediaType: "application/json"},
+		},
+		Attributes: map[string]string{
+			"status": "failed",
+		},
+		ObservedAt: timestamppb.Now(),
+	})
+	if err != nil {
+		t.Fatalf("failed to submit violation observation: %v", err)
+	}
+
+	stViol, err := client.GetAssuranceState(ctx, violSub)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stViol.State != StateFailed {
+		t.Fatalf("expected StateFailed for violation observation, got %v", stViol.State)
+	}
+
+	evalViol, err := client.EvaluateSubject(ctx, violSub, []ControlRef{ctrl})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if evalViol.SummaryState != StateFailed {
+		t.Fatalf("expected EvaluateSubject SummaryState StateFailed, got %v", evalViol.SummaryState)
+	}
+
+	expViol, err := client.ExplainClaim(ctx, violSub, ctrl)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if expViol.AssuranceState != StateFailed {
+		t.Fatalf("expected ExplainClaim StateFailed, got %v", expViol.AssuranceState)
+	}
+
+	// 3. Malformed ControlReceipt missing sub-messages must return error without panicking
+	ok, _, err := client.SubmitReceipt(ctx, &receiptv1.ControlReceipt{})
+	if err == nil || ok {
+		t.Fatal("expected error for incomplete ControlReceipt in InProcessClient")
+	}
+}
+
+func TestGRPCClientBoundedRetryRecovery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var callCount int32
+	lis := bufconn.Listen(1024 * 1024)
+	grpcSrv := grpc.NewServer(grpc.UnaryInterceptor(func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
+		if info.FullMethod == "/"+servicesv1.AssuranceService_ServiceDesc.ServiceName+"/GetAssuranceState" {
+			if atomic.AddInt32(&callCount, 1) == 1 {
+				return nil, status.Error(codes.Unavailable, "simulated transient network blip")
+			}
+		}
+		return handler(ctx, req)
+	}))
+	servicesv1.RegisterAssuranceServiceServer(grpcSrv, service.NewServer(nil))
+	go func() { _ = grpcSrv.Serve(lis) }()
+	defer grpcSrv.Stop()
+
+	client, err := NewClient(
+		ctx,
+		"passthrough:///bufnet",
+		WithDialOptions(
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+				return lis.Dial()
+			}),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		),
+		WithRetry(3, 10*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	st, err := client.GetAssuranceState(ctx, SubjectRef{Scheme: "k8s", ID: "payments/retry-target"})
+	if err != nil {
+		t.Fatalf("expected retry policy to recover from transient Unavailable error, got: %v", err)
+	}
+	if st.State != StateUnknown {
+		t.Fatalf("expected StateUnknown, got %v", st.State)
+	}
+	if atomic.LoadInt32(&callCount) < 2 {
+		t.Fatalf("expected at least 2 RPC attempts, got %d", atomic.LoadInt32(&callCount))
 	}
 }

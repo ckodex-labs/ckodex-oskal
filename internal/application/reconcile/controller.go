@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -10,16 +11,41 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/spire"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/telemetry"
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+func upsertCondition(conds []metav1.Condition, next metav1.Condition) []metav1.Condition {
+	for i, c := range conds {
+		if c.Type == next.Type {
+			if c.Status == next.Status && c.Reason == next.Reason && !c.LastTransitionTime.IsZero() {
+				next.LastTransitionTime = c.LastTransitionTime
+			}
+			conds[i] = next
+			return conds
+		}
+	}
+	return append(conds, next)
+}
+
+func removeCondition(conds []metav1.Condition, condType string) []metav1.Condition {
+	out := make([]metav1.Condition, 0, len(conds))
+	for _, c := range conds {
+		if c.Type != condType {
+			out = append(out, c)
+		}
+	}
+	return out
+}
 
 // ControlBindingReconciler reconciles ControlBinding objects and updates AssuranceState projections.
 type ControlBindingReconciler struct {
@@ -110,54 +136,89 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			subjectDigest = assurance.ComputeStringDigest(subRef.URI())
 		}
 
-		// Build contract from referenced EvidenceContract CRD or directly from binding requirements
+		// Build contract from all referenced EvidenceContract CRDs or directly from binding requirements
 		var contract assurance.EvidenceContract
-		if len(binding.Spec.Requirements) > 0 && binding.Spec.Requirements[0].EvidenceContract != "" {
-			var ecCRD assurancev1alpha1.EvidenceContract
-			ecKey := client.ObjectKey{Namespace: binding.Namespace, Name: binding.Spec.Requirements[0].EvidenceContract}
-			if err := r.Get(ctx, ecKey, &ecCRD); err != nil {
-				log.V(1).Info("unable to fetch referenced EvidenceContract CRD, using inline fallback", "contract", binding.Spec.Requirements[0].EvidenceContract, "err", err)
-			} else {
-				var reqs []assurance.EvidenceRequirement
-				for _, cr := range ecCRD.Spec.Requirements {
-					maxAge := cr.Freshness.Duration
-					if maxAge <= 0 {
-						maxAge = 24 * time.Hour
-					}
-					reqs = append(reqs, assurance.EvidenceRequirement{
-						ID:                cr.ID,
-						EvidenceType:      cr.Type,
-						Required:          cr.Required,
-						MaxAge:            maxAge,
-						AcceptedProducers: cr.AcceptedProducers,
-					})
-				}
-				missingState := assurance.AssuranceStateUnknown
-				if ecCRD.Spec.OnMissingRequiredEvidence.State == "Failed" {
-					missingState = assurance.AssuranceStateFailed
-				}
-				contract = assurance.EvidenceContract{
-					ID:                     ecCRD.Name,
-					Requirements:           reqs,
-					OnMissingRequiredState: missingState,
-				}
-			}
-		}
+		var aggReqs []assurance.EvidenceRequirement
+		seenReqIDs := make(map[string]bool)
+		loadedContracts := make(map[string]bool)
+		missingState := assurance.AssuranceStateUnknown
+		contractID := fmt.Sprintf("contract-%s", binding.Name)
 
-		if len(contract.Requirements) == 0 {
-			var reqs []assurance.EvidenceRequirement
-			for _, req := range binding.Spec.Requirements {
-				reqs = append(reqs, assurance.EvidenceRequirement{
-					ID:           req.ID,
+		for _, reqBinding := range binding.Spec.Requirements {
+			if reqBinding.EvidenceContract != "" {
+				if loadedContracts[reqBinding.EvidenceContract] {
+					continue
+				}
+				var ecCRD assurancev1alpha1.EvidenceContract
+				ecKey := client.ObjectKey{Namespace: binding.Namespace, Name: reqBinding.EvidenceContract}
+				if err := r.Get(ctx, ecKey, &ecCRD); err != nil {
+					log.V(1).Info("unable to fetch referenced EvidenceContract CRD, using inline fallback", "contract", reqBinding.EvidenceContract, "err", err)
+					if reqBinding.ID != "" && !seenReqIDs[reqBinding.ID] {
+						seenReqIDs[reqBinding.ID] = true
+						aggReqs = append(aggReqs, assurance.EvidenceRequirement{
+							ID:           reqBinding.ID,
+							EvidenceType: "admission",
+							Required:     true,
+							MaxAge:       24 * time.Hour,
+						})
+					}
+				} else {
+					loadedContracts[reqBinding.EvidenceContract] = true
+					if contractID == fmt.Sprintf("contract-%s", binding.Name) {
+						contractID = ecCRD.Name
+					}
+					if ecCRD.Spec.OnMissingRequiredEvidence.State == "Failed" {
+						missingState = assurance.AssuranceStateFailed
+					}
+					for _, cr := range ecCRD.Spec.Requirements {
+						if seenReqIDs[cr.ID] {
+							continue
+						}
+						seenReqIDs[cr.ID] = true
+						maxAge := cr.Freshness.Duration
+						if maxAge <= 0 {
+							maxAge = 24 * time.Hour
+						}
+						aggReqs = append(aggReqs, assurance.EvidenceRequirement{
+							ID:                cr.ID,
+							EvidenceType:      cr.Type,
+							Required:          cr.Required,
+							MaxAge:            maxAge,
+							AcceptedProducers: cr.AcceptedProducers,
+						})
+					}
+				}
+			} else if reqBinding.ID != "" && !seenReqIDs[reqBinding.ID] {
+				seenReqIDs[reqBinding.ID] = true
+				aggReqs = append(aggReqs, assurance.EvidenceRequirement{
+					ID:           reqBinding.ID,
 					EvidenceType: "admission",
 					Required:     true,
 					MaxAge:       24 * time.Hour,
 				})
 			}
-			contract = assurance.EvidenceContract{
-				ID:                     fmt.Sprintf("contract-%s", binding.Name),
-				Requirements:           reqs,
-				OnMissingRequiredState: assurance.AssuranceStateUnknown,
+		}
+
+		contract = assurance.EvidenceContract{
+			ID:                     contractID,
+			Requirements:           aggReqs,
+			OnMissingRequiredState: missingState,
+		}
+
+		// Apply namespace AssurancePolicy constraints if present
+		var policyList assurancev1alpha1.AssurancePolicyList
+		if err := r.List(ctx, &policyList, client.InNamespace(binding.Namespace)); err == nil && len(policyList.Items) > 0 {
+			for _, pol := range policyList.Items {
+				if pol.Spec.Behavior.UnknownIsViolation {
+					contract.OnMissingRequiredState = assurance.AssuranceStateFailed
+				}
+				if pol.Spec.Freshness.MaxEvaluationAge.Duration > 0 {
+					for i := range contract.Requirements {
+						if contract.Requirements[i].MaxAge <= 0 || pol.Spec.Freshness.MaxEvaluationAge.Duration < contract.Requirements[i].MaxAge {
+							contract.Requirements[i].MaxAge = pol.Spec.Freshness.MaxEvaluationAge.Duration
+						}
+					}
+				}
 			}
 		}
 
@@ -217,8 +278,32 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		targetState = overallState
 	}
 
-	// Reconcile status conditions
-	binding.Status.ObservedGeneration = binding.Generation
+	// Check active ControlExceptions in namespace (Invariant I-05: Derogation does not erase failure)
+	derogationsByControl := make(map[string]assurancev1alpha1.ControlException)
+	var excList assurancev1alpha1.ControlExceptionList
+	if err := r.List(ctx, &excList, client.InNamespace(binding.Namespace)); err == nil {
+		now := time.Now().UTC()
+		cleanBindingName := strings.TrimSuffix(binding.Name, "-binding")
+		for _, exc := range excList.Items {
+			if exc.Spec.Validity.NotBefore.IsZero() || exc.Spec.Validity.NotAfter.IsZero() {
+				continue
+			}
+			if now.Before(exc.Spec.Validity.NotBefore.Time) || now.After(exc.Spec.Validity.NotAfter.Time) {
+				continue
+			}
+			if exc.Spec.Justification.Ticket == "" || len(exc.Spec.Authority.RequiredApprovers) == 0 {
+				continue
+			}
+			if exc.Spec.Subject.Name != "" && exc.Spec.Subject.Name != binding.Name && exc.Spec.Subject.Name != cleanBindingName {
+				continue
+			}
+			for _, cid := range exc.Spec.Controls {
+				derogationsByControl[cid] = exc
+			}
+		}
+	}
+
+	// Reconcile status conditions deterministically with conflict retry
 	statusMsg := fmt.Sprintf("Binding configured with %d controls; evaluated state: %s", len(binding.Spec.Controls), targetState)
 	if evidenceRoot != "" {
 		statusMsg = fmt.Sprintf("%s; evidenceRoot: %s", statusMsg, evidenceRoot)
@@ -231,20 +316,42 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		Message:            statusMsg,
 	}
 
-	// Update condition in slice
-	updated := false
-	for i, c := range binding.Status.Conditions {
-		if c.Type == metaCondition.Type {
-			binding.Status.Conditions[i] = metaCondition
-			updated = true
-			break
+	var derogCond *metav1.Condition
+	if len(derogationsByControl) > 0 {
+		cids := make([]string, 0, len(derogationsByControl))
+		for cid := range derogationsByControl {
+			cids = append(cids, cid)
 		}
-	}
-	if !updated {
-		binding.Status.Conditions = append(binding.Status.Conditions, metaCondition)
+		sort.Strings(cids)
+		tickets := make([]string, 0, len(cids))
+		for _, cid := range cids {
+			exc := derogationsByControl[cid]
+			tickets = append(tickets, fmt.Sprintf("%s(ticket=%s,expires=%s)", cid, exc.Spec.Justification.Ticket, exc.Spec.Validity.NotAfter.UTC().Format(time.RFC3339)))
+		}
+		dc := metav1.Condition{
+			Type:               "DerogationActive",
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "TemporallyBoundedException",
+			Message:            fmt.Sprintf("Active derogations (underlying state %s preserved per I-05): %s", targetState, strings.Join(tickets, ", ")),
+		}
+		derogCond = &dc
 	}
 
-	if err := r.Status().Update(ctx, &binding); err != nil {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest assurancev1alpha1.ControlBinding
+		if getErr := r.Get(ctx, req.NamespacedName, &latest); getErr != nil {
+			return getErr
+		}
+		latest.Status.ObservedGeneration = latest.Generation
+		latest.Status.Conditions = upsertCondition(latest.Status.Conditions, metaCondition)
+		if derogCond != nil {
+			latest.Status.Conditions = upsertCondition(latest.Status.Conditions, *derogCond)
+		} else {
+			latest.Status.Conditions = removeCondition(latest.Status.Conditions, "DerogationActive")
+		}
+		return r.Status().Update(ctx, &latest)
+	}); err != nil {
 		log.Error(err, "unable to update ControlBinding status")
 		return ctrl.Result{}, err
 	}
@@ -259,21 +366,6 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				item.Name == binding.Name ||
 				item.Name == cleanBindingName ||
 				item.Name == cleanBindingName+"-state" {
-				stateCopy := item
-				stateCopy.Status.State = targetState.String()
-				stateCopy.Status.EvidenceRoot = evidenceRoot
-				if !evalResult.EvaluatedAt.IsZero() {
-					stateCopy.Status.EvaluatedAt = &metav1.Time{Time: evalResult.EvaluatedAt}
-					stateCopy.Status.ValidUntil = &metav1.Time{Time: evalResult.ValidUntil}
-					stateCopy.Status.Epoch = assurancev1alpha1.StateEpoch{
-						Subject:        evalResult.Epoch.SubjectDigest,
-						Policy:         evalResult.Epoch.PolicyDigest,
-						Implementation: evalResult.Epoch.ImplementationDigest,
-						Authority:      evalResult.Epoch.AuthorityDigest,
-						Environment:    evalResult.Epoch.EnvironmentDigest,
-						Composite:      evalResult.Epoch.CompositeDigest(),
-					}
-				}
 				var ctrlStatuses []assurancev1alpha1.ControlStatus
 				for i, c := range binding.Spec.Controls {
 					cState := targetState.String()
@@ -286,15 +378,39 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 						cState = cStateVal.String()
 						summary = fmt.Sprintf("Verified %d/%d requirements", allEvaluations[i].Completeness.Verified, allEvaluations[i].Completeness.Required)
 					}
+					if exc, hasDerog := derogationsByControl[c.Canonical.ID]; hasDerog && cState != assurance.AssuranceStateAssured.String() {
+						summary = fmt.Sprintf("%s [DEROGATION ACTIVE: ticket=%s, expires=%s]", summary, exc.Spec.Justification.Ticket, exc.Spec.Validity.NotAfter.UTC().Format(time.RFC3339))
+					}
 					ctrlStatuses = append(ctrlStatuses, assurancev1alpha1.ControlStatus{
 						ID:              c.Canonical.ID,
 						State:           cState,
 						EvidenceSummary: summary,
 					})
 				}
-				stateCopy.Status.Controls = ctrlStatuses
-				if err := r.Status().Update(ctx, &stateCopy); err != nil {
-					log.Error(err, "unable to update AssuranceState status", "state", stateCopy.Name)
+				itemKey := client.ObjectKey{Namespace: item.Namespace, Name: item.Name}
+				if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+					var stateCopy assurancev1alpha1.AssuranceState
+					if getErr := r.Get(ctx, itemKey, &stateCopy); getErr != nil {
+						return getErr
+					}
+					stateCopy.Status.State = targetState.String()
+					stateCopy.Status.EvidenceRoot = evidenceRoot
+					if !evalResult.EvaluatedAt.IsZero() {
+						stateCopy.Status.EvaluatedAt = &metav1.Time{Time: evalResult.EvaluatedAt}
+						stateCopy.Status.ValidUntil = &metav1.Time{Time: evalResult.ValidUntil}
+						stateCopy.Status.Epoch = assurancev1alpha1.StateEpoch{
+							Subject:        evalResult.Epoch.SubjectDigest,
+							Policy:         evalResult.Epoch.PolicyDigest,
+							Implementation: evalResult.Epoch.ImplementationDigest,
+							Authority:      evalResult.Epoch.AuthorityDigest,
+							Environment:    evalResult.Epoch.EnvironmentDigest,
+							Composite:      evalResult.Epoch.CompositeDigest(),
+						}
+					}
+					stateCopy.Status.Controls = ctrlStatuses
+					return r.Status().Update(ctx, &stateCopy)
+				}); err != nil {
+					log.Error(err, "unable to update AssuranceState status", "state", item.Name)
 				}
 			}
 		}
@@ -318,6 +434,11 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			}
 			signedReceipt, err := r.ReceiptSigner.SignReceipt(ctx, receipt)
 			if err == nil && signedReceipt.Signature != "" {
+				if casRepo, ok := r.EvidenceRepo.(*storage.ContentAddressedEvidenceRepository); ok && casRepo != nil {
+					if _, putErr := casRepo.PutReceipt(ctx, signedReceipt); putErr != nil {
+						log.Error(putErr, "unable to persist signed ControlReceipt to CAS")
+					}
+				}
 				telemetry.RecordReceiptIssued(binding.Name, "VALID")
 			} else {
 				telemetry.RecordReceiptIssued(binding.Name, "FAILED")
@@ -368,6 +489,7 @@ func (r *AssuranceStateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 type ContractEvaluator struct {
 	EvidenceSource []assurance.EvidenceEnvelope
 	EvidenceRepo   ports.EvidenceRepository
+	Verifier       ports.EvidenceVerifier
 }
 
 func (e *ContractEvaluator) Evaluate(ctx context.Context, claim assurance.Claim, contract assurance.EvidenceContract, currentEpoch assurance.AssuranceEpoch) (assurance.ClaimEvaluation, error) {
@@ -377,6 +499,32 @@ func (e *ContractEvaluator) Evaluate(ctx context.Context, claim assurance.Claim,
 		if envs, err := e.EvidenceRepo.ListBySubject(ctx, claim.Subject); err == nil {
 			source = envs
 		}
+	}
+	if e.Verifier != nil && len(source) > 0 {
+		var verifiedSource []assurance.EvidenceEnvelope
+		for _, env := range source {
+			if env.SignatureRef != "" {
+				ok, err := e.Verifier.VerifySignature(ctx, env)
+				if err != nil || !ok {
+					continue
+				}
+			}
+			verifiedSource = append(verifiedSource, env)
+		}
+		source = verifiedSource
+	}
+	if len(source) > 0 && currentEpoch.SubjectDigest != "" {
+		normalized := make([]assurance.EvidenceEnvelope, len(source))
+		copy(normalized, source)
+		for i, env := range normalized {
+			if env.Subject.ID != "" && env.Subject.URI() != claim.Subject.URI() {
+				if env.Epoch.SubjectDigest == env.Subject.Digest() ||
+					env.Epoch.SubjectDigest == assurance.ComputeStringDigest(env.Subject.URI()) {
+					normalized[i].Epoch.SubjectDigest = currentEpoch.SubjectDigest
+				}
+			}
+		}
+		source = normalized
 	}
 	res := contract.Evaluate(source, currentEpoch, now)
 
@@ -427,4 +575,205 @@ func (e *ContractEvaluator) Evaluate(ctx context.Context, claim assurance.Claim,
 		EvaluatedAt:  now,
 		ValidUntil:   now.Add(5 * time.Minute),
 	}, nil
+}
+
+// ControlExceptionReconciler reconciles ControlException objects and enforces temporal validity bounds (Invariant I-05).
+type ControlExceptionReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+	Log    logr.Logger
+}
+
+func (r *ControlExceptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var exc assurancev1alpha1.ControlException
+	if err := r.Get(ctx, req.NamespacedName, &exc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	now := time.Now().UTC()
+	phase := "Active"
+	reason := "TemporallyValid"
+	condStatus := metav1.ConditionTrue
+	msg := fmt.Sprintf("Exception active until %s (ticket: %s)", exc.Spec.Validity.NotAfter.UTC().Format(time.RFC3339), exc.Spec.Justification.Ticket)
+
+	if exc.Spec.Validity.NotBefore.IsZero() || exc.Spec.Validity.NotAfter.IsZero() ||
+		exc.Spec.Justification.Ticket == "" || len(exc.Spec.Authority.RequiredApprovers) == 0 {
+		phase = "Invalid"
+		reason = "MissingMandatoryFields"
+		condStatus = metav1.ConditionFalse
+		msg = "ControlException requires non-zero validity bounds, justification ticket, and required approvers (Invariant I-05)"
+	} else if now.After(exc.Spec.Validity.NotAfter.Time) || now.Before(exc.Spec.Validity.NotBefore.Time) {
+		phase = "Expired"
+		reason = "OutOfBounds"
+		condStatus = metav1.ConditionFalse
+		msg = fmt.Sprintf("ControlException outside validity window [%s, %s]", exc.Spec.Validity.NotBefore.UTC().Format(time.RFC3339), exc.Spec.Validity.NotAfter.UTC().Format(time.RFC3339))
+	}
+
+	excCond := metav1.Condition{
+		Type:               "Ready",
+		Status:             condStatus,
+		LastTransitionTime: metav1.Now(),
+		Reason:             reason,
+		Message:            msg,
+	}
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest assurancev1alpha1.ControlException
+		if getErr := r.Get(ctx, req.NamespacedName, &latest); getErr != nil {
+			return getErr
+		}
+		latest.Status.Phase = phase
+		latest.Status.ObservedGeneration = latest.Generation
+		latest.Status.Conditions = upsertCondition(latest.Status.Conditions, excCond)
+		return r.Status().Update(ctx, &latest)
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+func (r *ControlExceptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&assurancev1alpha1.ControlException{}).
+		Complete(r)
+}
+
+// AssurancePolicyReconciler reconciles AssurancePolicy objects.
+type AssurancePolicyReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+	Log    logr.Logger
+}
+
+func (r *AssurancePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var pol assurancev1alpha1.AssurancePolicy
+	if err := r.Get(ctx, req.NamespacedName, &pol); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	polCond := metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.Now(),
+		Reason:             "PolicyActive",
+		Message:            fmt.Sprintf("AssurancePolicy active (requiredState=%s, unknownIsViolation=%v)", pol.Spec.RequiredState, pol.Spec.Behavior.UnknownIsViolation),
+	}
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest assurancev1alpha1.AssurancePolicy
+		if getErr := r.Get(ctx, req.NamespacedName, &latest); getErr != nil {
+			return getErr
+		}
+		latest.Status.ObservedGeneration = latest.Generation
+		latest.Status.Conditions = upsertCondition(latest.Status.Conditions, polCond)
+		return r.Status().Update(ctx, &latest)
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *AssurancePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&assurancev1alpha1.AssurancePolicy{}).
+		Complete(r)
+}
+
+// CapabilityLeaseReconciler reconciles CapabilityLease objects for bounded AI workcell execution.
+type CapabilityLeaseReconciler struct {
+	client.Client
+	Scheme        *runtime.Scheme
+	Log           logr.Logger
+	ReceiptSigner ports.ReceiptSigner
+	EvidenceRepo  ports.EvidenceRepository
+}
+
+func (r *CapabilityLeaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var lease assurancev1alpha1.CapabilityLease
+	if err := r.Get(ctx, req.NamespacedName, &lease); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	now := metav1.Now()
+	issuedAt := lease.Status.IssuedAt
+	if issuedAt == nil {
+		issuedAt = &now
+	}
+	expiresAt := lease.Status.ExpiresAt
+	if expiresAt == nil && lease.Spec.TTL.Duration > 0 {
+		exp := metav1.NewTime(issuedAt.Add(lease.Spec.TTL.Duration))
+		expiresAt = &exp
+	}
+
+	phase := "Active"
+	if lease.Status.RevocationReason != "" {
+		phase = "Revoked"
+	} else if expiresAt != nil && now.After(expiresAt.Time) {
+		phase = "Expired"
+	} else if lease.Spec.MaxTurns > 0 && lease.Status.CurrentTurn >= lease.Spec.MaxTurns {
+		phase = "Exhausted"
+	}
+
+	lastReceiptHash := lease.Status.LastReceiptHash
+	if phase == "Active" && r.ReceiptSigner != nil {
+		sub := assurance.SubjectRef{
+			Scheme: "k8s",
+			ID:     fmt.Sprintf("%s/CapabilityLease/%s", lease.Namespace, lease.Name),
+		}
+		rcpt := assurance.ControlReceipt{
+			Subject:      sub,
+			Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
+			State:        assurance.AssuranceStateAssured,
+			Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(fmt.Sprintf("%s|%d|%d", sub.URI(), lease.Generation, lease.Status.CurrentTurn))},
+			EvidenceRoot: assurance.ComputeStringDigest(strings.Join(lease.Spec.AllowedCapabilities, ",")),
+			EvaluatedAt:  now.UTC(),
+		}
+		if signed, err := r.ReceiptSigner.SignReceipt(ctx, rcpt); err == nil {
+			lastReceiptHash = signed.Digest()
+			if casRepo, ok := r.EvidenceRepo.(*storage.ContentAddressedEvidenceRepository); ok && casRepo != nil {
+				_, _ = casRepo.PutReceipt(ctx, signed)
+			}
+		}
+	}
+
+	leaseCond := metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: now,
+		Reason:             phase,
+		Message:            fmt.Sprintf("CapabilityLease for %s in phase %s (turn %d/%d)", lease.Spec.Principal, phase, lease.Status.CurrentTurn, lease.Spec.MaxTurns),
+	}
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest assurancev1alpha1.CapabilityLease
+		if getErr := r.Get(ctx, req.NamespacedName, &latest); getErr != nil {
+			return getErr
+		}
+		if latest.Status.IssuedAt == nil {
+			latest.Status.IssuedAt = issuedAt
+		}
+		if latest.Status.ExpiresAt == nil && expiresAt != nil {
+			latest.Status.ExpiresAt = expiresAt
+		}
+		latest.Status.LastReceiptHash = lastReceiptHash
+		latest.Status.Phase = phase
+		latest.Status.ObservedGeneration = latest.Generation
+		latest.Status.Conditions = upsertCondition(latest.Status.Conditions, leaseCond)
+		return r.Status().Update(ctx, &latest)
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+}
+
+func (r *CapabilityLeaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&assurancev1alpha1.CapabilityLease{}).
+		Complete(r)
 }

@@ -121,7 +121,7 @@ func ingestComponentDefinition(doc *proj.ComponentDefinitionWrapper, targetNames
 					Type:              evType,
 					Required:          true,
 					Freshness:         metav1.Duration{Duration: freshnessDuration},
-					AcceptedProducers: []string{producer},
+					AcceptedProducers: buildAcceptedProducers(producer),
 				})
 
 				reqBindings = append(reqBindings, assurancev1alpha1.RequirementBinding{
@@ -199,6 +199,25 @@ func ingestComponentDefinition(doc *proj.ComponentDefinitionWrapper, targetNames
 	return res, nil
 }
 
+func buildAcceptedProducers(primary string) []string {
+	defaults := []string{
+		primary,
+		"k8s:admission-controller://",
+		"spiffe://",
+		"oskal-engine",
+		"oskal-ssp-auditor",
+	}
+	seen := make(map[string]bool, len(defaults))
+	var out []string
+	for _, p := range defaults {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func ingestSSP(doc *proj.SSPWrapper, targetNamespace string) (*IngestionResult, error) {
 	ssp := doc.SystemSecurityPlan
 	res := &IngestionResult{
@@ -258,7 +277,7 @@ func ingestSSP(doc *proj.SSPWrapper, targetNamespace string) (*IngestionResult, 
 			Type:              evType,
 			Required:          true,
 			Freshness:         metav1.Duration{Duration: freshnessDuration},
-			AcceptedProducers: []string{producer},
+			AcceptedProducers: buildAcceptedProducers(producer),
 		})
 
 		reqBindings = append(reqBindings, assurancev1alpha1.RequirementBinding{

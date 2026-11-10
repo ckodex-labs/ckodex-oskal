@@ -238,10 +238,10 @@ func (v *SVIDValidator) WorkloadIdentityAttestation(
 	}
 
 	// Validate expected namespace and service account against SVID selectors
-	if expectedNamespace != "" && svidInfo.Namespace != "" && svidInfo.Namespace != expectedNamespace {
+	if expectedNamespace != "" && svidInfo.Namespace != expectedNamespace {
 		return nil, svidInfo, fmt.Errorf("workload namespace mismatch: expected %s, SVID asserts %s", expectedNamespace, svidInfo.Namespace)
 	}
-	if expectedServiceAccount != "" && svidInfo.ServiceAcct != "" && svidInfo.ServiceAcct != expectedServiceAccount {
+	if expectedServiceAccount != "" && svidInfo.ServiceAcct != expectedServiceAccount {
 		return nil, svidInfo, fmt.Errorf("workload service account mismatch: expected %s, SVID asserts %s", expectedServiceAccount, svidInfo.ServiceAcct)
 	}
 
@@ -258,7 +258,7 @@ func (v *SVIDValidator) WorkloadIdentityAttestation(
 
 	producerAuth := assurance.AuthorityRef{
 		Scheme:      "spiffe",
-		Subject:     svidInfo.SPIFFEID,
+		Subject:     strings.TrimPrefix(svidInfo.SPIFFEID, "spiffe://"),
 		TrustDomain: svidInfo.TrustDomain,
 	}
 

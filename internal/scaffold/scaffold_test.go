@@ -23,6 +23,16 @@ func TestGenerateScaffoldProfiles(t *testing.T) {
 		if len(plan.ControlBindings) == 0 {
 			t.Fatalf("GenerateScaffold(%s) expected at least 1 ControlBinding", p)
 		}
+		for _, cb := range plan.ControlBindings {
+			if len(cb.Spec.Requirements) == 0 {
+				t.Fatalf("GenerateScaffold(%s) expected non-empty Spec.Requirements on ControlBinding %s", p, cb.Name)
+			}
+			for _, req := range cb.Spec.Requirements {
+				if len(req.Implementations) == 0 || req.Implementations[0].Ref.Name == "" {
+					t.Fatalf("GenerateScaffold(%s) expected non-empty Implementations Ref.Name on requirement %s", p, req.ID)
+				}
+			}
+		}
 		if len(plan.EvidenceContracts) == 0 {
 			t.Fatalf("GenerateScaffold(%s) expected at least 1 EvidenceContract", p)
 		}
@@ -91,7 +101,10 @@ func TestScaffoldWriteToDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read CRD file: %v", err)
 	}
-	if !strings.Contains(string(crdContent), "kind: ControlBinding") || !strings.Contains(string(crdContent), "kind: EvidenceContract") {
+	if !strings.Contains(string(crdContent), "kind: ControlBinding") || !strings.Contains(string(crdContent), "kind: EvidenceContract") || !strings.Contains(string(crdContent), "kind: ConfigMap") {
 		t.Fatalf("CRD file missing expected kinds:\n%s", string(crdContent))
+	}
+	if strings.Contains(string(crdContent), "CelPolicySet") {
+		t.Fatalf("CRD file must not contain unregistered CelPolicySet kind:\n%s", string(crdContent))
 	}
 }

@@ -404,9 +404,13 @@ func TestAdmissionWebhook_DegradedModes_AuditAndWarn(t *testing.T) {
 	}
 	body, _ := json.Marshal(review)
 
-	// 1. ModeAudit allows admission and adds degraded mode audit annotations
+	// 1. ModeAudit allows admission and adds degraded mode audit annotations + emits adverse evidence
+	var sinkEnvelopes []assurance.EvidenceEnvelope
 	auditServer := NewAdmissionWebhookServer(ServerConfig{
 		Mode: ModeAudit,
+		EvidenceSink: func(env assurance.EvidenceEnvelope) {
+			sinkEnvelopes = append(sinkEnvelopes, env)
+		},
 	})
 	reqAudit := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
 	wAudit := httptest.NewRecorder()
@@ -425,6 +429,17 @@ func TestAdmissionWebhook_DegradedModes_AuditAndWarn(t *testing.T) {
 	}
 	if len(respAudit.Response.Warnings) > 0 {
 		t.Errorf("expected no admission warnings in pure audit mode")
+	}
+	if len(sinkEnvelopes) != 1 || sinkEnvelopes[0].ObservationType != "kubernetes.admission.violation" {
+		t.Fatalf("expected ModeAudit to emit adverse kubernetes.admission.violation envelope, got: %+v", sinkEnvelopes)
+	}
+
+	// Oversized request (> MaxWebhookBodyBytes) must return 413 Request Entity Too Large
+	reqHuge := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(make([]byte, MaxWebhookBodyBytes+64)))
+	wHuge := httptest.NewRecorder()
+	auditServer.Handler().ServeHTTP(wHuge, reqHuge)
+	if wHuge.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 Request Entity Too Large on oversized AdmissionReview, got %d", wHuge.Code)
 	}
 
 	// 2. ModeWarn allows admission, adds audit annotations AND admission warnings
@@ -445,5 +460,122 @@ func TestAdmissionWebhook_DegradedModes_AuditAndWarn(t *testing.T) {
 	}
 	if len(respWarn.Response.Warnings) == 0 {
 		t.Errorf("expected admission warnings in warn mode")
+	}
+}
+
+func TestAdmissionWebhook_EphemeralContainerViolation(t *testing.T) {
+	server := NewAdmissionWebhookServer(ServerConfig{})
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "debug-target", Namespace: "payments"},
+		Spec: corev1.PodSpec{
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: ptrBool(true),
+				RunAsUser:    ptrInt64(65532),
+			},
+			Containers: []corev1.Container{
+				{
+					Name:  "app",
+					Image: "payments:v1",
+					SecurityContext: &corev1.SecurityContext{
+						AllowPrivilegeEscalation: ptrBool(false),
+						ReadOnlyRootFilesystem:   ptrBool(true),
+						Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+					},
+				},
+			},
+			EphemeralContainers: []corev1.EphemeralContainer{
+				{
+					EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+						Name:  "debugger",
+						Image: "busybox:latest",
+						SecurityContext: &corev1.SecurityContext{
+							Privileged: ptrBool(true),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	podRaw, _ := json.Marshal(pod)
+	review := admissionv1.AdmissionReview{
+		Request: &admissionv1.AdmissionRequest{
+			UID:       "req-ephemeral",
+			Kind:      metav1.GroupVersionKind{Kind: "Pod", Version: "v1"},
+			Namespace: "payments",
+			Name:      "debug-target",
+			Object:    runtime.RawExtension{Raw: podRaw},
+		},
+	}
+	body, _ := json.Marshal(review)
+
+	req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	var resp admissionv1.AdmissionReview
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Response == nil || resp.Response.Allowed {
+		t.Fatal("expected pod with privileged EphemeralContainer to be denied")
+	}
+	if !strings.Contains(resp.Response.Result.Message, "debugger") {
+		t.Fatalf("expected violation message to reference ephemeral container 'debugger', got: %s", resp.Response.Result.Message)
+	}
+}
+
+func TestAdmissionWebhook_ExpandedDangerousCapabilities(t *testing.T) {
+	server := NewAdmissionWebhookServer(ServerConfig{})
+
+	for _, dangerousCap := range []corev1.Capability{"CAP_SYS_PTRACE", "SYS_MODULE", "DAC_OVERRIDE", "NET_RAW"} {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "cap-test", Namespace: "payments"},
+			Spec: corev1.PodSpec{
+				SecurityContext: &corev1.PodSecurityContext{
+					RunAsNonRoot: ptrBool(true),
+					RunAsUser:    ptrInt64(10001),
+				},
+				Containers: []corev1.Container{
+					{
+						Name:  "worker",
+						Image: "payments:v1",
+						SecurityContext: &corev1.SecurityContext{
+							RunAsNonRoot:             ptrBool(true),
+							RunAsUser:                ptrInt64(10001),
+							AllowPrivilegeEscalation: ptrBool(false),
+							Privileged:               ptrBool(false),
+							Capabilities: &corev1.Capabilities{
+								Drop: []corev1.Capability{"ALL"},
+								Add:  []corev1.Capability{dangerousCap},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		podRaw, _ := json.Marshal(pod)
+		review := admissionv1.AdmissionReview{
+			Request: &admissionv1.AdmissionRequest{
+				UID:       "req-cap",
+				Kind:      metav1.GroupVersionKind{Kind: "Pod", Version: "v1"},
+				Namespace: "payments",
+				Name:      "cap-test",
+				Object:    runtime.RawExtension{Raw: podRaw},
+			},
+		}
+		body, _ := json.Marshal(review)
+		req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		server.Handler().ServeHTTP(w, req)
+
+		var resp admissionv1.AdmissionReview
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		if resp.Response == nil || resp.Response.Allowed {
+			t.Fatalf("expected pod requesting dangerous capability %s to be denied", dangerousCap)
+		}
+		if !strings.Contains(resp.Response.Result.Message, string(dangerousCap)) {
+			t.Fatalf("expected rejection message to mention %s, got: %s", dangerousCap, resp.Response.Result.Message)
+		}
 	}
 }

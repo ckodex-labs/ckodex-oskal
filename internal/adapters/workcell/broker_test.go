@@ -2,6 +2,7 @@ package workcell_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -78,4 +79,57 @@ func TestEffectBrokerRevocation(t *testing.T) {
 	if rcpt.Disposition != "DENY" {
 		t.Errorf("expected DENY after revocation, got %s", rcpt.Disposition)
 	}
+}
+
+func TestEffectBrokerConcurrentSnapshotIsolationAndNilSafety(t *testing.T) {
+	broker := workcell.NewEffectBroker()
+	broker.RegisterLease(nil)
+
+	lease := assurance.NewCapabilityLease(
+		"lease-concurrent",
+		"workcell:agent",
+		"namespace:prod",
+		[]string{"tool:read"},
+		500,
+		1*time.Hour,
+	)
+	broker.RegisterLease(lease)
+
+	snap, ok := broker.GetLease("lease-concurrent")
+	if !ok || snap == nil {
+		t.Fatal("expected GetLease to return snapshot")
+	}
+	snap.AllowedCapabilities[0] = "mutated-outside"
+
+	snap2, _ := broker.GetLease("lease-concurrent")
+	if snap2.AllowedCapabilities[0] != "tool:read" {
+		t.Fatalf("expected defensive copy isolation in GetLease, got %v", snap2.AllowedCapabilities)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				if cur, exists := broker.GetLease("lease-concurrent"); exists {
+					_ = cur.CurrentTurn
+					_ = cur.LastReceiptHash
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		prev := lease.LastReceiptHash
+		for j := 0; j < 25; j++ {
+			r, err := broker.RequestExecution(context.Background(), "lease-concurrent", "tool:read", []byte("x"), prev)
+			if err != nil {
+				return
+			}
+			prev = r.ReceiptHash
+		}
+	}()
+	wg.Wait()
 }

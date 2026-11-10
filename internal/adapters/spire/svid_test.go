@@ -225,6 +225,9 @@ func TestSVIDValidator_WorkloadIdentityAttestation(t *testing.T) {
 	if envelope.Artifact.MediaType != "application/vnd.spiffe.svid+json" {
 		t.Errorf("unexpected artifact media type: %s", envelope.Artifact.MediaType)
 	}
+	if envelope.Producer.Canonical() != "spiffe://prod/ns/checkout/sa/cart-worker" {
+		t.Errorf("expected canonical producer URI without duplicate scheme, got: %s", envelope.Producer.Canonical())
+	}
 
 	// 2. Namespace mismatch
 	_, _, errNS := validator.WorkloadIdentityAttestation(
@@ -248,6 +251,15 @@ func TestSVIDValidator_WorkloadIdentityAttestation(t *testing.T) {
 	)
 	if errSA == nil {
 		t.Errorf("expected error on service account mismatch, got nil")
+	}
+
+	// 4. SVID missing /ns/ and /sa/ segments must fail when expectedNamespace or expectedServiceAccount is non-empty
+	bareSVID := generateTestSVID(t, caCert, caKey, "spiffe://prod/bare-workload", now.Add(-5*time.Minute), now.Add(2*time.Hour))
+	if _, _, errBareNS := validator.WorkloadIdentityAttestation(context.Background(), subject, bareSVID, "checkout", ""); errBareNS == nil {
+		t.Errorf("expected error when SVID lacks namespace but expectedNamespace is specified")
+	}
+	if _, _, errBareSA := validator.WorkloadIdentityAttestation(context.Background(), subject, bareSVID, "", "cart-worker"); errBareSA == nil {
+		t.Errorf("expected error when SVID lacks service account but expectedServiceAccount is specified")
 	}
 }
 

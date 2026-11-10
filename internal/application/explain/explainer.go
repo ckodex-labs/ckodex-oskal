@@ -3,6 +3,7 @@ package explain
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
@@ -30,13 +31,59 @@ func (e *Explainer) BuildExplainGraph(
 	isStale := eval.State == assurance.AssuranceStateStale
 	isFailed := eval.State == assurance.AssuranceStateFailed
 
-	// If the evaluation has specific evidence references, reflect them
+	// If the evaluation has specific evidence references, reflect them proportionally
 	hasAdmission := isAssured || isStale
 	hasArtifact := isAssured || isStale
 	hasIdentity := isAssured || isStale
 	hasNetwork := isAssured || isStale
 	hasProcess := isAssured || isStale
 	hasCap := isAssured || isStale
+
+	var admDigest, artDigest, idDigest, netDigest, procDigest, capDigest string
+
+	if len(eval.Evidence) > 0 && (isAssured || isStale) {
+		hasAdmission = false
+		hasArtifact = false
+		hasIdentity = false
+		hasNetwork = false
+		hasProcess = false
+		hasCap = false
+
+		for _, ev := range eval.Evidence {
+			u := strings.ToLower(ev.URI)
+			mt := strings.ToLower(ev.MediaType)
+			matched := false
+			if strings.Contains(u, "sigstore") || strings.Contains(u, "cosign") || strings.Contains(u, "oci") {
+				hasArtifact = true
+				artDigest = ev.Digest
+				matched = true
+			}
+			if strings.Contains(u, "spiffe") || strings.Contains(u, "svid") || strings.Contains(u, "spire") {
+				hasIdentity = true
+				idDigest = ev.Digest
+				matched = true
+			}
+			if strings.Contains(u, "cilium") || strings.Contains(u, "network") || strings.Contains(u, "netpol") {
+				hasNetwork = true
+				netDigest = ev.Digest
+				matched = true
+			}
+			if strings.Contains(u, "tetragon") || strings.Contains(u, "ebpf") || strings.Contains(u, "process") {
+				hasProcess = true
+				procDigest = ev.Digest
+				matched = true
+			}
+			if strings.Contains(u, "capability") || strings.Contains(u, "cap") {
+				hasCap = true
+				capDigest = ev.Digest
+				matched = true
+			}
+			if !matched || strings.Contains(u, "admission") || strings.Contains(u, "cel") || strings.Contains(u, "webhook") || strings.Contains(mt, "yaml") {
+				hasAdmission = true
+				admDigest = ev.Digest
+			}
+		}
+	}
 
 	if isFailed {
 		// In a failed state, non-root execution was violated
@@ -106,12 +153,12 @@ func (e *Explainer) BuildExplainGraph(
 	}
 
 	evidenceItems := []assurance.ExplainEvidenceItem{
-		{Type: "admission decision", Verified: hasAdmission, Producer: mapProducer(hasAdmission, "spiffe://prod/ns/ckodex-assurance/sa/cel-admission-observer")},
-		{Type: "signed OCI artifact", Verified: hasArtifact, Producer: mapProducer(hasArtifact, "spiffe://prod/ns/ckodex-evidence/sa/sigstore-verifier")},
-		{Type: "workload identity", Verified: hasIdentity, Producer: mapProducer(hasIdentity, "spiffe://prod/ns/ckodex-assurance/sa/spire-server")},
-		{Type: "network configuration", Verified: hasNetwork, Producer: mapProducer(hasNetwork, "spiffe://prod/ns/ckodex-evidence/sa/cilium-collector")},
-		{Type: "runtime process observation", Verified: hasProcess, Producer: mapProducer(hasProcess, "spiffe://prod/ns/ckodex-evidence/sa/tetragon-collector")},
-		{Type: "capability observation", Verified: hasCap, Producer: mapProducer(hasCap, "spiffe://prod/ns/ckodex-evidence/sa/tetragon-collector")},
+		{Type: "admission decision", Verified: hasAdmission, Digest: admDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasAdmission, "spiffe://prod/ns/ckodex-assurance/sa/cel-admission-observer")},
+		{Type: "signed OCI artifact", Verified: hasArtifact, Digest: artDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasArtifact, "spiffe://prod/ns/ckodex-evidence/sa/sigstore-verifier")},
+		{Type: "workload identity", Verified: hasIdentity, Digest: idDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasIdentity, "spiffe://prod/ns/ckodex-assurance/sa/spire-server")},
+		{Type: "network configuration", Verified: hasNetwork, Digest: netDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasNetwork, "spiffe://prod/ns/ckodex-evidence/sa/cilium-collector")},
+		{Type: "runtime process observation", Verified: hasProcess, Digest: procDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasProcess, "spiffe://prod/ns/ckodex-evidence/sa/tetragon-collector")},
+		{Type: "capability observation", Verified: hasCap, Digest: capDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasCap, "spiffe://prod/ns/ckodex-evidence/sa/tetragon-collector")},
 	}
 
 	verifiedCount := 0

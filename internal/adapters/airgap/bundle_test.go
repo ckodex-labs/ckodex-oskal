@@ -3,6 +3,7 @@ package airgap
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -103,5 +104,22 @@ func TestAirgapBundleExportAndImport(t *testing.T) {
 	_, err = ImportBundle(ctx, tamperedData, targetRepo, receiptMgr)
 	if err == nil {
 		t.Fatal("expected error when importing tampered bundle, got nil")
+	}
+
+	// 5. Verify self-consistent manifest with forged blob content (digest != sha256(content)) is rejected before mutating targetRepo
+	forgedBundle := *bundle
+	forgedBundle.Blobs = map[string]string{
+		blobDigest: `{"admission":"forged-with-recomputed-manifest"}`,
+	}
+	forgedBundle.ManifestDigest = forgedBundle.ComputeManifestDigest()
+	forgedBytes, _ := json.Marshal(forgedBundle)
+
+	cleanTarget := storage.NewMemoryEvidenceRepository()
+	if _, err := ImportBundle(ctx, forgedBytes, cleanTarget, receiptMgr); err == nil {
+		t.Fatal("expected ImportBundle to reject self-consistent manifest when blob content does not match its SHA-256 key")
+	}
+	afterForged, _ := cleanTarget.ListAll(ctx)
+	if len(afterForged) != 0 {
+		t.Fatalf("expected cleanTarget to remain untouched after preflight rejection, got %d envelopes", len(afterForged))
 	}
 }
