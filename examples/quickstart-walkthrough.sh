@@ -40,14 +40,53 @@ echo ">> Step 3: Scaffolding NIST SP 800-53 CRD contracts for workload 'payments
 echo "... (truncated for walkthrough output) ..."
 echo ""
 
-# 5. Step 4: Reconstruct 4 Truth Channels
-echo ">> Step 4: Inspecting workload and reconstructing 4 Truth Channels..."
-./bin/oskal inspect k8s://prod/payments/Deployment/payments-api
+# 5. Step 4: Record Admission Evidence & Verify Cryptographic Receipt
+WALKTHROUGH_EV_DIR="$(mktemp -d)"
+WALKTHROUGH_MANIFEST="${WALKTHROUGH_EV_DIR}/payments-api.yaml"
+trap 'rm -rf "${WALKTHROUGH_EV_DIR}"' EXIT
+cat << 'EOF' > "${WALKTHROUGH_MANIFEST}"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  namespace: payments
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payments-api
+  template:
+    metadata:
+      labels:
+        app: payments-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: payments-api
+          image: ghcr.io/ckodex-labs/payments-api:v1.0.0
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - "ALL"
+EOF
+
+echo ">> Step 4: Recording admission evidence and verifying Ed25519 receipt..."
+./bin/oskal record admission --file "${WALKTHROUGH_MANIFEST}" --evidence-dir "${WALKTHROUGH_EV_DIR}"
+./bin/oskal --evidence-dir "${WALKTHROUGH_EV_DIR}" assurance receipt verify --receipt-id rcpt-AC-6
 echo ""
 
-# 6. Step 5: Real-time Cockpit
-echo ">> Step 5: Displaying live assurance cockpit state..."
-./bin/oskal cockpit --once
+# 6. Step 5: Reconstruct 4 Truth Channels
+echo ">> Step 5: Inspecting workload and reconstructing 4 Truth Channels..."
+./bin/oskal --evidence-dir "${WALKTHROUGH_EV_DIR}" inspect k8s://prod/payments/Deployment/payments-api
+echo ""
+
+# 7. Step 6: Real-time Cockpit
+echo ">> Step 6: Displaying live assurance cockpit state..."
+./bin/oskal --evidence-dir "${WALKTHROUGH_EV_DIR}" cockpit --once
 echo ""
 
 echo "========================================================================"

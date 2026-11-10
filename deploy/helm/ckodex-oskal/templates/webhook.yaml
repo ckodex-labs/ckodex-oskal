@@ -20,6 +20,10 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
   name: {{ include "ckodex-oskal.fullname" . }}-webhook
+  {{- if and .Values.webhook.certManager .Values.webhook.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Values.webhook.certManager.issuerRef | default (printf "%s/%s-serving-cert" .Release.Namespace (include "ckodex-oskal.fullname" .)) }}
+  {{- end }}
   labels:
     {{- include "ckodex-oskal.labels" . | nindent 4 }}
 webhooks:
@@ -29,6 +33,9 @@ webhooks:
     timeoutSeconds: 5
     failurePolicy: {{ .Values.webhook.failurePolicy | default "Fail" }}
     clientConfig:
+      {{- if .Values.webhook.caBundle }}
+      caBundle: {{ .Values.webhook.caBundle | quote }}
+      {{- end }}
       service:
         name: {{ include "ckodex-oskal.fullname" . }}-webhook
         namespace: {{ .Release.Namespace }}
@@ -38,7 +45,7 @@ webhooks:
       - operations: ["CREATE", "UPDATE"]
         apiGroups: [""]
         apiVersions: ["v1"]
-        resources: ["pods"]
+        resources: ["pods", "pods/ephemeralcontainers"]
         scope: "Namespaced"
     namespaceSelector:
       {{- toYaml .Values.webhook.namespaceSelector | nindent 6 }}

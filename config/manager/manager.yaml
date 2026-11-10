@@ -24,7 +24,7 @@ spec:
       serviceAccountName: oskal-controller-manager
       containers:
         - name: manager
-          image: ghcr.io/ckodex-labs/oskal-controller:v0.1.0
+          image: ghcr.io/ckodex-labs/oskal-controller:v1.0.0
           imagePullPolicy: IfNotPresent
           command:
             - /oskal-controller
@@ -32,12 +32,18 @@ spec:
             - --leader-elect=true
             - --health-probe-bind-address=:8081
             - --metrics-bind-address=:8080
+            - --evidence-dir=/var/lib/oskal/evidence
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - "ALL"
+          volumeMounts:
+            - name: evidence-store
+              mountPath: /var/lib/oskal/evidence
+            - name: tmp
+              mountPath: /tmp
           livenessProbe:
             httpGet:
               path: /healthz
@@ -64,3 +70,13 @@ spec:
             - containerPort: 8081
               name: health
               protocol: TCP
+            - containerPort: 8443
+              name: webhook
+              protocol: TCP
+      volumes:
+        - name: evidence-store
+          emptyDir:
+            sizeLimit: "1Gi"
+        - name: tmp
+          emptyDir:
+            sizeLimit: "64Mi"

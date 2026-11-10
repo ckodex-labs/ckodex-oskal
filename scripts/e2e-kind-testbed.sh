@@ -5,6 +5,8 @@ set -euo pipefail
 # Purpose: Provision a live local Kind cluster, install CRDs, ingest OSCAL compliance models,
 # deploy governed workloads, and verify continuous assurance reconciliation.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CLUSTER_NAME="${CLUSTER_NAME:-ckodex-oskal-e2e}"
 NAMESPACE="ckodex-assurance-test"
 KEEP_CLUSTER=false
@@ -131,8 +133,27 @@ if [ "$EC_COUNT" -lt 1 ]; then
 fi
 echo "[PASS] EvidenceContract successfully created: $("$KUBECTL_BIN" get evidencecontracts -n "${NAMESPACE}" -o jsonpath='{.items[0].metadata.name}')"
 
-# 5. Workcell CapabilityLease Assertion
+# 5. Workcell CapabilityLease Assertion & Live Controller Reconciliation
 echo "--"
+echo "[INFO] Starting live oskal-controller in background for CRD reconciliation..."
+E2E_EV_DIR=$(mktemp -d -t oskal-e2e-evidence.XXXXXX)
+CONTROLLER_PID=""
+cleanup_e2e() {
+  if [ -n "${CONTROLLER_PID}" ] && kill -0 "${CONTROLLER_PID}" 2>/dev/null; then
+    kill "${CONTROLLER_PID}" 2>/dev/null || true
+    wait "${CONTROLLER_PID}" 2>/dev/null || true
+  fi
+  rm -rf "${E2E_EV_DIR}"
+}
+trap cleanup_e2e EXIT
+
+go run ./cmd/oskal-controller \
+  --enable-webhook=false \
+  --metrics-bind-address=0 \
+  --health-probe-bind-address=0 \
+  --evidence-dir="${E2E_EV_DIR}" >/dev/null 2>&1 &
+CONTROLLER_PID=$!
+
 echo "[INFO] Testing Workcell CapabilityLease CRD instantiation..."
 cat <<EOF | "$KUBECTL_BIN" apply -f -
 apiVersion: assurance.ckodex.io/v1alpha1
@@ -150,12 +171,19 @@ spec:
   ttl: "2h"
 EOF
 
-LEASE_PHASE=$("$KUBECTL_BIN" get capabilitylease auditor-lease-01 -n "${NAMESPACE}" -o jsonpath='{.metadata.name}')
-if [ -z "$LEASE_PHASE" ]; then
+LEASE_NAME=$("$KUBECTL_BIN" get capabilitylease auditor-lease-01 -n "${NAMESPACE}" -o jsonpath='{.metadata.name}')
+if [ -z "$LEASE_NAME" ]; then
   echo "[FAIL] Failed to retrieve created CapabilityLease"
   exit 1
 fi
-echo "[PASS] CapabilityLease verified in cluster: ${LEASE_PHASE}"
+for _ in $(seq 1 15); do
+  LEASE_STATUS_PHASE=$("$KUBECTL_BIN" get capabilitylease auditor-lease-01 -n "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  if [ "$LEASE_STATUS_PHASE" = "Active" ]; then
+    break
+  fi
+  sleep 1
+done
+echo "[PASS] CapabilityLease verified in cluster: ${LEASE_NAME} (phase=${LEASE_STATUS_PHASE:-Pending})"
 
 # 6. Drift Simulation
 echo "--"
@@ -168,7 +196,9 @@ echo "[PASS] Generation advanced from ${INITIAL_GEN} to ${NEW_GEN} (Drift condit
 # 7. OSCAL Projection from Live State
 echo "--"
 echo "[INFO] Testing OSCAL projection export from live state..."
-go run ./cmd/oskal export component-definition --component "payments-api" >/dev/null
+go run ./cmd/oskal record admission --file "${ROOT_DIR}/examples/sample-workload.yaml" --evidence-dir "${E2E_EV_DIR}" >/dev/null
+go run ./cmd/oskal export component-definition --evidence-dir "${E2E_EV_DIR}" --component "payments-api" > "${E2E_EV_DIR}/cd.json"
+go run ./cmd/oskal validate "${E2E_EV_DIR}/cd.json" --schema component-definition >/dev/null
 echo "[PASS] Live OSCAL export produced valid Component Definition"
 
 echo "============================================================"

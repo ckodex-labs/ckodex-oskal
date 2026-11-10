@@ -26,10 +26,15 @@ help:
 	@echo "  clean            Remove compiled binaries and test artifacts"
 	@echo "  e2e              Run local Kind end-to-end testbed script"
 
+VERSION ?= v1.0.0
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
+BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(BUILD_DATE)
+
 build:
 	@mkdir -p $(BIN_DIR)
-	$(GO) build -trimpath -buildvcs=false -o $(BIN_DIR)/oskal ./cmd/oskal
-	$(GO) build -trimpath -buildvcs=false -o $(BIN_DIR)/oskal-controller ./cmd/oskal-controller
+	$(GO) build -trimpath -buildvcs=false -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/oskal ./cmd/oskal
+	$(GO) build -trimpath -buildvcs=false -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/oskal-controller ./cmd/oskal-controller
 
 test:
 	$(GO) test -count=1 -race ./...

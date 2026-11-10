@@ -17,9 +17,9 @@ import (
 
 const (
 	golangVersion   = "1.27"
-	golangciVersion = "v2.14.0"
-	syftImage       = "anchore/syft:v1.52.0"
-	grypeImage      = "anchore/grype:v0.119.0"
+	golangciVersion = "v2.11.4"
+	syftImage       = "anchore/syft:v1.20.0"
+	grypeImage      = "anchore/grype:v0.87.0"
 	bufImage        = "bufbuild/buf:1.50.0"
 	cosignImage     = "gcr.io/projectsigstore/cosign:v2.4.1"
 )
@@ -61,7 +61,7 @@ func (m *Oskal) Test(ctx context.Context, source *dagger.Directory) (*dagger.Con
 		WithWorkdir("/src").
 		WithMountedCache("/root/.cache/go-build", goCache).
 		WithMountedCache("/go/pkg/mod", modCache).
-		WithExec([]string{"go", "test", "-v", "-race", "-coverprofile=coverage.out", "./core/...", "./pkg/...", "./internal/...", "./tests/..."}), nil
+		WithExec([]string{"go", "test", "-v", "-race", "-coverprofile=coverage.out", "./core/...", "./pkg/...", "./internal/...", "./cmd/...", "./api/...", "./tests/..."}), nil
 }
 
 // Scan generates a CycloneDX Software Bill of Materials (SBOM) using Syft.

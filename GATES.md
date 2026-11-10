@@ -28,10 +28,16 @@
   Evidence: 0 issues reported across entire codebase under strict golangci-lint configuration.
 
 - [x] G10 Complete Test Suite with Race Detection ;; go test -count=1 -race ./... ;; ok
-  Evidence: 25 of 25 packages pass with race detection enabled in 22.8 seconds.
+  Evidence: 30 of 30 testable packages pass with race detection enabled.
 
 - [x] G11 Production Binary Compilation ;; make build && ls -lh bin/oskal bin/oskal-controller ;; bin/oskal
-  Evidence: Built bin/oskal (31MB) and bin/oskal-controller (56MB) cleanly with -trimpath.
+  Evidence: Built bin/oskal and bin/oskal-controller cleanly with -trimpath and version ldflags.
 
 - [x] G12 Pure ASCII Invariant ;; python3 scripts/check_ascii.py ;; 100% PURE ASCII
   Evidence: 100% pure ASCII (0x00-0x7F) verified across all source files, documentation, and manifests.
+
+- [x] G13 Honest CLI, CAS Receipt Persistence & Derogation Invariants ;; go test -v ./tests/integration ./internal/application/reconcile ./internal/ui/cockpit ./internal/adapters/mcp ;; PASS
+  Evidence: Verified Ed25519 receipt verification in CLI, CAS receipt persistence in reconciler, Invariant I-02 (UNKNOWN without evidence across CLI/MCP/Cockpit/SSP), and Invariant I-05 (ControlException derogation preserves historical truth).
+
+- [x] G14 UTCP v1.0.1 Multi-SDK & Bounded Resilience Conformance ;; go test -count=1 -race ./internal/adapters/utcp ./pkg/utcp ./internal/adapters/mcp ./pkg/oskal ;; PASS
+  Evidence: Verified full wire compatibility across utcp-specification, utcp-mcp, go-utcp, rs-utcp, typescript-utcp, and python-utcp, plus SSRF protection, bounded HTTP/gRPC retry with jitter, atomic CAS persistence, and concurrency backpressure.

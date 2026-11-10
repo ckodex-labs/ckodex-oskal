@@ -35,17 +35,35 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
-            - /manager
+            - /oskal-controller
           args:
             - --leader-elect={{ .Values.leaderElection.enabled }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             - --health-probe-bind-address=:{{ .Values.probes.port }}
+            - --evidence-dir={{ .Values.evidenceStorage.mountPath | default "/var/lib/oskal/evidence" }}
             {{- if .Values.webhook.enabled }}
             - --enable-webhook=true
             - --webhook-port={{ .Values.webhook.port }}
+            - --webhook-service-name={{ include "ckodex-oskal.fullname" . }}-webhook
+            - --webhook-namespace={{ .Release.Namespace }}
+            - --webhook-mode={{ .Values.webhook.mode | default "enforcing" }}
+            {{- if or .Values.webhook.tlsSecretName .Values.webhook.certManager.enabled }}
+            - --webhook-tls-cert-file=/var/run/oskal-webhook/tls/tls.crt
+            - --webhook-tls-key-file=/var/run/oskal-webhook/tls/tls.key
+            {{- end }}
             {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: evidence-store
+              mountPath: {{ .Values.evidenceStorage.mountPath | default "/var/lib/oskal/evidence" }}
+            - name: tmp
+              mountPath: /tmp
+            {{- if and .Values.webhook.enabled (or .Values.webhook.tlsSecretName .Values.webhook.certManager.enabled) }}
+            - name: webhook-tls
+              mountPath: /var/run/oskal-webhook/tls
+              readOnly: true
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
@@ -72,6 +90,18 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: evidence-store
+          emptyDir:
+            sizeLimit: {{ .Values.evidenceStorage.sizeLimit | default "1Gi" }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: "64Mi"
+        {{- if and .Values.webhook.enabled (or .Values.webhook.tlsSecretName .Values.webhook.certManager.enabled) }}
+        - name: webhook-tls
+          secret:
+            secretName: {{ .Values.webhook.tlsSecretName | default (printf "%s-webhook-tls" (include "ckodex-oskal.fullname" .)) }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
