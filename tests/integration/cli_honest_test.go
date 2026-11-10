@@ -123,8 +123,113 @@ func TestCLIHonestStateReporting(t *testing.T) {
 		t.Errorf("expected envelope listing, got:\n%s", listEvStr)
 	}
 
-	// 9. Verify zero non-ASCII characters across all outputs
-	allOutputs := []string{stateStr, explainStr, string(outEvidence), stateEvStr, explainEvStr, listEvStr}
+	// 9. Test receipt verify fails when receipt is missing or tampered (Invariant I-04)
+	cmdVerifyMissing := exec.Command(binPath, "--evidence-dir", evidenceDir, "assurance", "receipt", "verify", "--receipt-id", "nonexistent-receipt")
+	if outVerifyMissing, err := cmdVerifyMissing.CombinedOutput(); err == nil {
+		t.Fatalf("expected oskal assurance receipt verify to fail on nonexistent receipt, got success:\n%s", string(outVerifyMissing))
+	}
+
+	// 10. Test record admission produces a real Ed25519-signed receipt that passes independent verification
+	manifestPath := filepath.Join(t.TempDir(), "workload.yaml")
+	manifestYAML := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: payment-service\n  namespace: production\n"
+	if err := os.WriteFile(manifestPath, []byte(manifestYAML), 0644); err != nil {
+		t.Fatalf("failed to write workload manifest: %v", err)
+	}
+	recDir := t.TempDir()
+	cmdRec := exec.Command(binPath, "record", "admission", "--file", manifestPath, "--evidence-dir", recDir)
+	if outRec, err := cmdRec.CombinedOutput(); err != nil {
+		t.Fatalf("oskal record admission failed: %v, output: %s", err, string(outRec))
+	}
+
+	cmdVerifyValid := exec.Command(binPath, "--evidence-dir", recDir, "assurance", "receipt", "verify", "--receipt-id", "rcpt-AC-6")
+	outVerifyValid, err := cmdVerifyValid.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected valid receipt verification to succeed, got err: %v, output:\n%s", err, string(outVerifyValid))
+	}
+	if !strings.Contains(string(outVerifyValid), "[VERIFIED]") {
+		t.Fatalf("expected [VERIFIED] in output, got:\n%s", string(outVerifyValid))
+	}
+
+	// Tamper with the receipt file and verify that verification fails
+	rcptPath := filepath.Join(recDir, "rcpt-AC-6.json")
+	rawRcpt, err := os.ReadFile(rcptPath)
+	if err != nil {
+		t.Fatalf("failed to read generated receipt: %v", err)
+	}
+	tamperedRcpt := strings.Replace(string(rawRcpt), "payment-service", "attacker-service", 1)
+	if err := os.WriteFile(rcptPath, []byte(tamperedRcpt), 0644); err != nil {
+		t.Fatalf("failed to write tampered receipt: %v", err)
+	}
+	cmdVerifyTampered := exec.Command(binPath, "assurance", "receipt", "verify", "--receipt-file", rcptPath)
+	if outTampered, err := cmdVerifyTampered.CombinedOutput(); err == nil {
+		t.Fatalf("expected tampered receipt verification to fail, got success:\n%s", string(outTampered))
+	}
+
+	// 11. Test export ssp without evidence reports UNKNOWN (Invariant I-02)
+	emptyEvDir := t.TempDir()
+	cmdSSPUnknown := exec.Command(binPath, "--evidence-dir", emptyEvDir, "export", "ssp", "--subject", subjectURI)
+	outSSPUnknown, err := cmdSSPUnknown.CombinedOutput()
+	if err != nil {
+		t.Fatalf("export ssp failed: %v", err)
+	}
+	if !strings.Contains(string(outSSPUnknown), `"value": "UNKNOWN"`) {
+		t.Fatalf("expected export ssp without evidence to report UNKNOWN, got:\n%s", string(outSSPUnknown))
+	}
+
+	// 12. Test oskal record admission rejects privileged / insecure manifests (including multi-document YAML)
+	privManifest := filepath.Join(t.TempDir(), "privileged-pod.yaml")
+	privYAML := `apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-pod
+  namespace: payments
+spec:
+  containers:
+    - name: root-c
+      image: nginx:latest
+      securityContext:
+        privileged: true
+        runAsUser: 0
+`
+	if err := os.WriteFile(privManifest, []byte(privYAML), 0600); err != nil {
+		t.Fatalf("failed to write privileged manifest: %v", err)
+	}
+	cmdPriv := exec.Command(binPath, "--evidence-dir", t.TempDir(), "record", "admission", "--file", privManifest)
+	if outPriv, err := cmdPriv.CombinedOutput(); err == nil {
+		t.Fatalf("expected oskal record admission to reject privileged manifest, got success:\n%s", string(outPriv))
+	}
+
+	multiDocManifest := filepath.Join(t.TempDir(), "multi-doc.yaml")
+	multiDocYAML := `apiVersion: v1
+kind: Namespace
+metadata:
+  name: payments
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sneaky-deployment
+  namespace: payments
+spec:
+  template:
+    spec:
+      containers:
+        - name: sneaky
+          image: nginx:latest
+          securityContext:
+            privileged: true
+            runAsNonRoot: true
+`
+	if err := os.WriteFile(multiDocManifest, []byte(multiDocYAML), 0600); err != nil {
+		t.Fatalf("failed to write multi-doc manifest: %v", err)
+	}
+	cmdMultiDoc := exec.Command(binPath, "--evidence-dir", t.TempDir(), "record", "admission", "--file", multiDocManifest)
+	if outMultiDoc, err := cmdMultiDoc.CombinedOutput(); err == nil {
+		t.Fatalf("expected oskal record admission to reject privileged second document in multi-doc YAML, got success:\n%s", string(outMultiDoc))
+	}
+
+	// 13. Verify zero non-ASCII characters across all outputs
+	allOutputs := []string{stateStr, explainStr, string(outEvidence), stateEvStr, explainEvStr, listEvStr, string(outVerifyValid), string(outSSPUnknown)}
 	for i, out := range allOutputs {
 		for _, r := range out {
 			if r > 127 {

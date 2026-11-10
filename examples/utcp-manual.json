@@ -1,0 +1,1069 @@
+{
+  "version": "1.0.0",
+  "utcp_version": "1.0.1",
+  "manual_version": "1.0.0",
+  "info": {
+    "title": "CKODEX OSKAL Continuous Assurance UTCP Manual",
+    "version": "v1.0.0",
+    "description": "Universal Tool Calling Protocol (UTCP) manual for CKODEX OSKAL Continuous Kubernetes Assurance \u0026 NIST OSCAL v1.2.3 Runtime.",
+    "homepage": "https://github.com/ckodex-labs/ckodex-oskal"
+  },
+  "allowed_communication_protocols": [
+    "cli",
+    "http",
+    "streamable_http",
+    "grpc",
+    "sse",
+    "mcp",
+    "text"
+  ],
+  "tools": [
+    {
+      "name": "get_assurance_state",
+      "description": "Retrieve the continuous assurance 6D state vector \u003cP, V, C, E, L, tau\u003e for a Kubernetes workload subject.",
+      "tags": [
+        "assurance",
+        "state",
+        "vector",
+        "kubernetes",
+        "compliance"
+      ],
+      "inputs": {
+        "properties": {
+          "subject": {
+            "description": "Subject URI (e.g. k8s://prod/payments/Deployment/payments-api)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "type": "object"
+      },
+      "outputs": {
+        "properties": {
+          "evidence_root": {
+            "type": "string"
+          },
+          "freshness": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "vector_state": {
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema": {
+        "properties": {
+          "subject": {
+            "description": "Subject URI (e.g. k8s://prod/payments/Deployment/payments-api)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "properties": {
+          "evidence_root": {
+            "type": "string"
+          },
+          "freshness": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "vector_state": {
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call get_assurance_state --subject UTCP_ARG_subject_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call get_assurance_state --subject UTCP_ARG_subject_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "get_assurance_state"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call get_assurance_state --subject UTCP_ARG_subject_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call get_assurance_state --subject UTCP_ARG_subject_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "get_assurance_state"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_provider": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call get_assurance_state --subject UTCP_ARG_subject_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call get_assurance_state --subject UTCP_ARG_subject_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "get_assurance_state"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "average_response_size": 512,
+      "required_capability": "tool:read-evidence"
+    },
+    {
+      "name": "explain_claim",
+      "description": "Explain why an assurance claim is justified or failing using a deterministic reverse-traceable decision graph.",
+      "tags": [
+        "assurance",
+        "explain",
+        "decision-trace",
+        "evidence",
+        "nist"
+      ],
+      "inputs": {
+        "properties": {
+          "control": {
+            "default": "nist-sp-800-53:AC-6",
+            "description": "Control identifier (e.g. nist-sp-800-53:AC-6)",
+            "type": "string"
+          },
+          "subject": {
+            "description": "Subject URI (e.g. k8s://prod/payments/Deployment/payments-api)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "type": "object"
+      },
+      "outputs": {
+        "properties": {
+          "assurance_state": {
+            "type": "string"
+          },
+          "rendered_text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema": {
+        "properties": {
+          "control": {
+            "default": "nist-sp-800-53:AC-6",
+            "description": "Control identifier (e.g. nist-sp-800-53:AC-6)",
+            "type": "string"
+          },
+          "subject": {
+            "description": "Subject URI (e.g. k8s://prod/payments/Deployment/payments-api)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "properties": {
+          "assurance_state": {
+            "type": "string"
+          },
+          "rendered_text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call explain_claim --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call explain_claim --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "explain_claim"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call explain_claim --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call explain_claim --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "explain_claim"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_provider": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call explain_claim --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call explain_claim --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "explain_claim"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "average_response_size": 1536,
+      "required_capability": "tool:read-evidence"
+    },
+    {
+      "name": "validate_oscal",
+      "description": "Validate a NIST OSCAL v1.2.3 document (AR, CD, SSP, AP, POAM) against embedded JSON schemas.",
+      "tags": [
+        "oscal",
+        "validate",
+        "nist",
+        "schema",
+        "compliance"
+      ],
+      "inputs": {
+        "properties": {
+          "content": {
+            "description": "Raw OSCAL JSON or YAML string",
+            "type": "string"
+          },
+          "schema": {
+            "default": "auto",
+            "description": "Optional schema type override: auto, assessment-results, component-definition, ssp, assessment-plan, poam",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "outputs": {
+        "properties": {
+          "document_type": {
+            "type": "string"
+          },
+          "oscal_version": {
+            "type": "string"
+          },
+          "valid": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema": {
+        "properties": {
+          "content": {
+            "description": "Raw OSCAL JSON or YAML string",
+            "type": "string"
+          },
+          "schema": {
+            "default": "auto",
+            "description": "Optional schema type override: auto, assessment-results, component-definition, ssp, assessment-plan, poam",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "properties": {
+          "document_type": {
+            "type": "string"
+          },
+          "oscal_version": {
+            "type": "string"
+          },
+          "valid": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call validate_oscal --content UTCP_ARG_content_UTCP_END --schema UTCP_ARG_schema_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call validate_oscal --content UTCP_ARG_content_UTCP_END --schema UTCP_ARG_schema_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "validate_oscal"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call validate_oscal --content UTCP_ARG_content_UTCP_END --schema UTCP_ARG_schema_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call validate_oscal --content UTCP_ARG_content_UTCP_END --schema UTCP_ARG_schema_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "validate_oscal"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_provider": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call validate_oscal --content UTCP_ARG_content_UTCP_END --schema UTCP_ARG_schema_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call validate_oscal --content UTCP_ARG_content_UTCP_END --schema UTCP_ARG_schema_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "validate_oscal"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "average_response_size": 384,
+      "required_capability": "tool:validate-oscal"
+    },
+    {
+      "name": "detect_drift",
+      "description": "Detect semantic decoherence and drift between observed runtime state and recorded epoch digests.",
+      "tags": [
+        "drift",
+        "decoherence",
+        "reconcile",
+        "epoch",
+        "assurance"
+      ],
+      "inputs": {
+        "properties": {
+          "subject": {
+            "description": "Subject URI (e.g. k8s://prod/payments/Deployment/payments-api)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "type": "object"
+      },
+      "outputs": {
+        "properties": {
+          "assurance_status": {
+            "type": "string"
+          },
+          "drift_dimensions": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema": {
+        "properties": {
+          "subject": {
+            "description": "Subject URI (e.g. k8s://prod/payments/Deployment/payments-api)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "properties": {
+          "assurance_status": {
+            "type": "string"
+          },
+          "drift_dimensions": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call detect_drift --subject UTCP_ARG_subject_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call detect_drift --subject UTCP_ARG_subject_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "detect_drift"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call detect_drift --subject UTCP_ARG_subject_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call detect_drift --subject UTCP_ARG_subject_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "detect_drift"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_provider": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call detect_drift --subject UTCP_ARG_subject_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call detect_drift --subject UTCP_ARG_subject_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "detect_drift"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "average_response_size": 512,
+      "required_capability": "tool:read-evidence"
+    },
+    {
+      "name": "scaffold_compliance",
+      "description": "Scaffold Kubernetes ControlBinding, EvidenceContract, and OSCAL Component Definition manifests.",
+      "tags": [
+        "scaffold",
+        "kubernetes",
+        "crd",
+        "nist-sp-800-53",
+        "pci-dss",
+        "soc2",
+        "iso27001"
+      ],
+      "inputs": {
+        "properties": {
+          "namespace": {
+            "default": "default",
+            "description": "Target Kubernetes namespace",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Compliance profile (nist-sp-800-53, pci-dss, soc-2, iso-27001)",
+            "type": "string"
+          },
+          "workload": {
+            "default": "example-app",
+            "description": "Target workload name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile"
+        ],
+        "type": "object"
+      },
+      "outputs": {
+        "properties": {
+          "manifests_yaml": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema": {
+        "properties": {
+          "namespace": {
+            "default": "default",
+            "description": "Target Kubernetes namespace",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Compliance profile (nist-sp-800-53, pci-dss, soc-2, iso-27001)",
+            "type": "string"
+          },
+          "workload": {
+            "default": "example-app",
+            "description": "Target workload name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "properties": {
+          "manifests_yaml": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call scaffold_compliance --profile UTCP_ARG_profile_UTCP_END --workload UTCP_ARG_workload_UTCP_END --namespace UTCP_ARG_namespace_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call scaffold_compliance --profile UTCP_ARG_profile_UTCP_END --workload UTCP_ARG_workload_UTCP_END --namespace UTCP_ARG_namespace_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "scaffold_compliance"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call scaffold_compliance --profile UTCP_ARG_profile_UTCP_END --workload UTCP_ARG_workload_UTCP_END --namespace UTCP_ARG_namespace_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call scaffold_compliance --profile UTCP_ARG_profile_UTCP_END --workload UTCP_ARG_workload_UTCP_END --namespace UTCP_ARG_namespace_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "scaffold_compliance"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_provider": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call scaffold_compliance --profile UTCP_ARG_profile_UTCP_END --workload UTCP_ARG_workload_UTCP_END --namespace UTCP_ARG_namespace_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call scaffold_compliance --profile UTCP_ARG_profile_UTCP_END --workload UTCP_ARG_workload_UTCP_END --namespace UTCP_ARG_namespace_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "scaffold_compliance"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "average_response_size": 4096,
+      "required_capability": "tool:scaffold-policy"
+    },
+    {
+      "name": "project_oscal",
+      "description": "Project continuous assurance state into a standard NIST OSCAL v1.2.3 document (AR, CD, SSP, AP, POAM).",
+      "tags": [
+        "oscal",
+        "export",
+        "projection",
+        "ssp",
+        "assessment-results",
+        "poam"
+      ],
+      "inputs": {
+        "properties": {
+          "document_type": {
+            "description": "Document type: assessment-results, component-definition, ssp, assessment-plan, poam",
+            "type": "string"
+          },
+          "subject": {
+            "description": "Subject URI",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "document_type"
+        ],
+        "type": "object"
+      },
+      "outputs": {
+        "properties": {
+          "oscal_json": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema": {
+        "properties": {
+          "document_type": {
+            "description": "Document type: assessment-results, component-definition, ssp, assessment-plan, poam",
+            "type": "string"
+          },
+          "subject": {
+            "description": "Subject URI",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject",
+          "document_type"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "properties": {
+          "oscal_json": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call project_oscal --subject UTCP_ARG_subject_UTCP_END --document_type UTCP_ARG_document_type_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call project_oscal --subject UTCP_ARG_subject_UTCP_END --document_type UTCP_ARG_document_type_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "project_oscal"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call project_oscal --subject UTCP_ARG_subject_UTCP_END --document_type UTCP_ARG_document_type_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call project_oscal --subject UTCP_ARG_subject_UTCP_END --document_type UTCP_ARG_document_type_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "project_oscal"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_provider": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call project_oscal --subject UTCP_ARG_subject_UTCP_END --document_type UTCP_ARG_document_type_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call project_oscal --subject UTCP_ARG_subject_UTCP_END --document_type UTCP_ARG_document_type_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "project_oscal"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "average_response_size": 8192,
+      "required_capability": "tool:read-evidence"
+    },
+    {
+      "name": "run_doctor",
+      "description": "Run deep system preflight diagnostics across Kubernetes, SPIFFE/SPIRE, Sigstore, CAS, and NIST OSCAL schemas.",
+      "tags": [
+        "doctor",
+        "diagnostics",
+        "preflight",
+        "health",
+        "day2"
+      ],
+      "inputs": {
+        "properties": {},
+        "type": "object"
+      },
+      "outputs": {
+        "properties": {
+          "checks": {
+            "type": "array"
+          },
+          "overall_status": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "output_schema": {
+        "properties": {
+          "checks": {
+            "type": "array"
+          },
+          "overall_status": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call run_doctor",
+        "commands": [
+          {
+            "command": "oskal utcp call run_doctor",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "run_doctor"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call run_doctor",
+        "commands": [
+          {
+            "command": "oskal utcp call run_doctor",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "run_doctor"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_provider": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call run_doctor",
+        "commands": [
+          {
+            "command": "oskal utcp call run_doctor",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "run_doctor"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "average_response_size": 2048,
+      "required_capability": "tool:query-metrics"
+    },
+    {
+      "name": "inspect_subject",
+      "description": "Reconstruct all 4 Truth Channels (Telemetry, Execution, Decision, Evidence) for a governed workload subject.",
+      "tags": [
+        "inspect",
+        "truth-channels",
+        "forensics",
+        "evidence",
+        "trace"
+      ],
+      "inputs": {
+        "properties": {
+          "control": {
+            "default": "nist-sp-800-53:AC-6",
+            "description": "Control ID (e.g. nist-sp-800-53:AC-6)",
+            "type": "string"
+          },
+          "subject": {
+            "description": "Subject URI (e.g. k8s://prod/payments/Deployment/payments-api)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "type": "object"
+      },
+      "outputs": {
+        "properties": {
+          "assurance_state": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "object"
+          },
+          "evidence": {
+            "type": "object"
+          },
+          "execution": {
+            "type": "object"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "telemetry": {
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "input_schema": {
+        "properties": {
+          "control": {
+            "default": "nist-sp-800-53:AC-6",
+            "description": "Control ID (e.g. nist-sp-800-53:AC-6)",
+            "type": "string"
+          },
+          "subject": {
+            "description": "Subject URI (e.g. k8s://prod/payments/Deployment/payments-api)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "type": "object"
+      },
+      "output_schema": {
+        "properties": {
+          "assurance_state": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "object"
+          },
+          "evidence": {
+            "type": "object"
+          },
+          "execution": {
+            "type": "object"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "telemetry": {
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call inspect_subject --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call inspect_subject --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "inspect_subject"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call inspect_subject --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call inspect_subject --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "inspect_subject"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "tool_provider": {
+        "call_template_type": "cli",
+        "provider_type": "cli",
+        "name": "oskal_cli",
+        "command": "oskal utcp call inspect_subject --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+        "commands": [
+          {
+            "command": "oskal utcp call inspect_subject --subject UTCP_ARG_subject_UTCP_END --control UTCP_ARG_control_UTCP_END",
+            "append_to_final_output": true
+          }
+        ],
+        "command_name": "oskal",
+        "args": [
+          "utcp",
+          "call",
+          "inspect_subject"
+        ],
+        "param_style": "named",
+        "output_format": "json"
+      },
+      "average_response_size": 3072,
+      "required_capability": "tool:read-evidence"
+    }
+  ]
+}

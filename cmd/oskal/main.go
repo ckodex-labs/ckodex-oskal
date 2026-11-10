@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,15 +18,23 @@ import (
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/mcp"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/utcp"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/webhook"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/diagnostics"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
 	"github.com/ckodex-labs/ckodex-oskal/internal/config"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	recoscal "github.com/ckodex-labs/ckodex-oskal/internal/reconciler/oscal"
@@ -40,12 +49,24 @@ import (
 )
 
 var (
+	version     = "v1.0.0"
+	commit      = "dev"
+	date        = "unknown"
 	serverAddr  string
 	evidenceDir string
+	tlsCAFile   string
 )
 
 func getGRPCClient(ctx context.Context, addr string) (servicesv1.AssuranceServiceClient, *grpc.ClientConn, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds := insecure.NewCredentials()
+	if tlsCAFile != "" {
+		tlsCreds, err := credentials.NewClientTLSFromFile(tlsCAFile, "")
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to load TLS CA file %s: %w", tlsCAFile, err)
+		}
+		creds = tlsCreds
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to gRPC server at %s: %w", addr, err)
 	}
@@ -91,10 +112,278 @@ func resolveSubjectFromArgsOrFlags(args []string, kind, name, namespace string) 
 	return assurance.SubjectRef{}, errors.New("must specify subject URI as positional argument or via --subject-name")
 }
 
+const defaultMaxEvidenceAge = 15 * time.Minute
+
+func isLocalViolationType(obsType string) bool {
+	lower := strings.ToLower(strings.TrimSpace(obsType))
+	return strings.Contains(lower, "violation") ||
+		strings.Contains(lower, "denied") ||
+		strings.Contains(lower, "fail") ||
+		strings.Contains(lower, "adverse")
+}
+
+func evaluateLocalEnvelopes(
+	sub assurance.SubjectRef,
+	ctrl assurance.ControlRef,
+	envelopes []assurance.EvidenceEnvelope,
+	now time.Time,
+) (assurance.ClaimEvaluation, string, []assurance.EvidenceEnvelope) {
+	var validEnvelopes []assurance.EvidenceEnvelope
+	isStale := false
+	isViolation := false
+	for _, env := range envelopes {
+		if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
+			continue
+		}
+		if isLocalViolationType(env.ObservationType) {
+			isViolation = true
+		}
+		if now.Sub(env.CapturedAt) > defaultMaxEvidenceAge {
+			isStale = true
+		}
+		validEnvelopes = append(validEnvelopes, env)
+	}
+
+	if len(validEnvelopes) == 0 {
+		freshness := "unknown"
+		if len(envelopes) > 0 {
+			freshness = "invalid (future-dated)"
+		}
+		return assurance.ClaimEvaluation{
+			ID:           fmt.Sprintf("eval-unknown-%s", ctrl.ID),
+			Subject:      sub,
+			Control:      ctrl,
+			State:        assurance.AssuranceStateUnknown,
+			Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(sub.URI())},
+			Evidence:     nil,
+			Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 0, Missing: 1},
+			EvidenceRoot: "",
+			EvaluatedAt:  now,
+			ValidUntil:   now.Add(5 * time.Minute),
+		}, freshness, nil
+	}
+
+	var evRefs []assurance.EvidenceRef
+	for _, env := range validEnvelopes {
+		evRefs = append(evRefs, env.Artifact)
+	}
+	evRoot := receipts.ComputeEvidenceRoot(evRefs)
+	policyDigest := assurance.ComputeStringDigest(sub.URI() + ":" + evRoot)
+
+	state := assurance.AssuranceStateAssured
+	freshness := "current"
+	comp := assurance.EvidenceCompleteness{
+		Required: len(evRefs),
+		Present:  len(evRefs),
+		Verified: len(evRefs),
+	}
+	if isViolation {
+		state = assurance.AssuranceStateFailed
+		comp = assurance.EvidenceCompleteness{
+			Required: len(evRefs),
+			Present:  len(evRefs),
+			Verified: 0,
+			Missing:  1,
+		}
+	} else if isStale {
+		state = assurance.AssuranceStateStale
+		freshness = "stale"
+		comp = assurance.EvidenceCompleteness{
+			Required: len(evRefs),
+			Present:  len(evRefs),
+			Verified: 0,
+			Stale:    len(evRefs),
+		}
+	}
+
+	return assurance.ClaimEvaluation{
+		ID:      fmt.Sprintf("eval-%s", ctrl.ID),
+		Subject: sub,
+		Control: ctrl,
+		State:   state,
+		Epoch: assurance.AssuranceEpoch{
+			SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
+			ImplementationDigest: assurance.ComputeStringDigest("kubernetes:admission-policy"),
+			PolicyDigest:         policyDigest,
+			AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/operator"),
+			EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
+		},
+		Evidence:     evRefs,
+		Completeness: comp,
+		EvidenceRoot: evRoot,
+		EvaluatedAt:  now,
+		ValidUntil:   now.Add(5 * time.Minute),
+	}, freshness, validEnvelopes
+}
+
+type manifestSecurityContext struct {
+	Privileged               *bool  `yaml:"privileged"`
+	RunAsNonRoot             *bool  `yaml:"runAsNonRoot"`
+	RunAsUser                *int64 `yaml:"runAsUser"`
+	AllowPrivilegeEscalation *bool  `yaml:"allowPrivilegeEscalation"`
+	Capabilities             *struct {
+		Add  []string `yaml:"add"`
+		Drop []string `yaml:"drop"`
+	} `yaml:"capabilities"`
+}
+
+type manifestContainer struct {
+	Name            string                   `yaml:"name"`
+	SecurityContext *manifestSecurityContext `yaml:"securityContext"`
+}
+
+type manifestPodSpec struct {
+	SecurityContext     *manifestSecurityContext `yaml:"securityContext"`
+	Containers          []manifestContainer      `yaml:"containers"`
+	InitContainers      []manifestContainer      `yaml:"initContainers"`
+	EphemeralContainers []manifestContainer      `yaml:"ephemeralContainers"`
+}
+
+func splitYAMLDocuments(data []byte) [][]byte {
+	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	var docs [][]byte
+	var current []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "---" {
+			doc := strings.TrimSpace(strings.Join(current, "\n"))
+			if doc != "" {
+				docs = append(docs, []byte(doc))
+			}
+			current = nil
+			continue
+		}
+		current = append(current, line)
+	}
+	if doc := strings.TrimSpace(strings.Join(current, "\n")); doc != "" {
+		docs = append(docs, []byte(doc))
+	}
+	if len(docs) == 0 {
+		return [][]byte{data}
+	}
+	return docs
+}
+
+func validateSingleManifestDoc(doc []byte) error {
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(doc, &raw); err != nil {
+		return err
+	}
+	if _, hasSpec := raw["spec"]; !hasSpec {
+		return nil
+	}
+
+	var parsed struct {
+		Kind string `yaml:"kind"`
+		Spec struct {
+			SecurityContext     *manifestSecurityContext `yaml:"securityContext"`
+			Containers          []manifestContainer      `yaml:"containers"`
+			InitContainers      []manifestContainer      `yaml:"initContainers"`
+			EphemeralContainers []manifestContainer      `yaml:"ephemeralContainers"`
+			Template            *struct {
+				Spec manifestPodSpec `yaml:"spec"`
+			} `yaml:"template"`
+			JobTemplate *struct {
+				Spec struct {
+					Template *struct {
+						Spec manifestPodSpec `yaml:"spec"`
+					} `yaml:"template"`
+				} `yaml:"spec"`
+			} `yaml:"jobTemplate"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(doc, &parsed); err != nil {
+		return err
+	}
+
+	podSpec := manifestPodSpec{
+		SecurityContext:     parsed.Spec.SecurityContext,
+		Containers:          parsed.Spec.Containers,
+		InitContainers:      parsed.Spec.InitContainers,
+		EphemeralContainers: parsed.Spec.EphemeralContainers,
+	}
+	if parsed.Spec.Template != nil {
+		podSpec = parsed.Spec.Template.Spec
+	} else if parsed.Spec.JobTemplate != nil && parsed.Spec.JobTemplate.Spec.Template != nil {
+		podSpec = parsed.Spec.JobTemplate.Spec.Template.Spec
+	}
+
+	var violations []string
+	podNonRoot := false
+	if podSpec.SecurityContext != nil {
+		if podSpec.SecurityContext.RunAsUser != nil && *podSpec.SecurityContext.RunAsUser == 0 {
+			violations = append(violations, "pod securityContext sets runAsUser=0 (root)")
+		}
+		if podSpec.SecurityContext.RunAsNonRoot != nil {
+			if !*podSpec.SecurityContext.RunAsNonRoot {
+				violations = append(violations, "pod securityContext explicitly sets runAsNonRoot=false")
+			} else {
+				podNonRoot = true
+			}
+		}
+	}
+
+	var allContainers []manifestContainer
+	allContainers = append(allContainers, podSpec.Containers...)
+	allContainers = append(allContainers, podSpec.InitContainers...)
+	allContainers = append(allContainers, podSpec.EphemeralContainers...)
+
+	for _, c := range allContainers {
+		cName := c.Name
+		if cName == "" {
+			cName = "unnamed"
+		}
+		if c.SecurityContext == nil {
+			if !podNonRoot {
+				violations = append(violations, fmt.Sprintf("container %s missing securityContext with runAsNonRoot=true", cName))
+			}
+			continue
+		}
+		if c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged {
+			violations = append(violations, fmt.Sprintf("container %s sets privileged=true", cName))
+		}
+		if c.SecurityContext.RunAsUser != nil && *c.SecurityContext.RunAsUser == 0 {
+			violations = append(violations, fmt.Sprintf("container %s sets runAsUser=0 (root)", cName))
+		}
+		if c.SecurityContext.RunAsNonRoot != nil && !*c.SecurityContext.RunAsNonRoot {
+			violations = append(violations, fmt.Sprintf("container %s sets runAsNonRoot=false", cName))
+		}
+		if c.SecurityContext.RunAsNonRoot == nil && !podNonRoot {
+			violations = append(violations, fmt.Sprintf("container %s does not enforce runAsNonRoot=true", cName))
+		}
+		if c.SecurityContext.AllowPrivilegeEscalation != nil && *c.SecurityContext.AllowPrivilegeEscalation {
+			violations = append(violations, fmt.Sprintf("container %s sets allowPrivilegeEscalation=true", cName))
+		}
+		if c.SecurityContext.Capabilities != nil {
+			for _, capName := range c.SecurityContext.Capabilities.Add {
+				upper := strings.ToUpper(strings.TrimSpace(capName))
+				if upper == "CAP_SYS_ADMIN" || upper == "SYS_ADMIN" || upper == "CAP_NET_ADMIN" || upper == "NET_ADMIN" {
+					violations = append(violations, fmt.Sprintf("container %s adds prohibited capability %s", cName, capName))
+				}
+			}
+		}
+	}
+
+	if len(violations) > 0 {
+		return fmt.Errorf("[DENIED] workload manifest violates admission security invariants: %s", strings.Join(violations, "; "))
+	}
+	return nil
+}
+
+func validateManifestSecurity(data []byte) error {
+	for _, doc := range splitYAMLDocuments(data) {
+		if err := validateSingleManifestDoc(doc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func NewRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:   "oskal",
-		Short: "OSKAL -- Continuous Kubernetes Assurance CLI",
+		Use:     "oskal",
+		Version: fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, date),
+		Short:   "OSKAL -- Continuous Kubernetes Assurance CLI",
 		Long: `OSKAL is the Continuous Kubernetes Assurance Runtime for CKODEX.
 It evaluates continuous evidence contracts, tracks semantic drift,
 and projects defensible results into standard OSCAL artifacts.`,
@@ -104,6 +393,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 	rootCmd.PersistentFlags().StringVar(&configFileFlag, "config", "", "Path to OSKAL configuration file (default .oskal.yaml)")
 	rootCmd.PersistentFlags().StringVar(&serverAddr, "server", "", "AssuranceService gRPC address (e.g. localhost:9090)")
 	rootCmd.PersistentFlags().StringVar(&evidenceDir, "evidence-dir", "", "Path to directory containing local EvidenceEnvelope JSON files")
+	rootCmd.PersistentFlags().StringVar(&tlsCAFile, "tls-ca-file", "", "Optional path to TLS CA certificate for gRPC client connections")
 
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		cfg, _, err := config.LoadConfig(configFileFlag)
@@ -179,7 +469,11 @@ and projects defensible results into standard OSCAL artifacts.`,
 				}
 				fmt.Printf("EVIDENCE ROOT:   %s\n", resp.EvidenceRoot)
 				fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
-				fmt.Printf("FRESHNESS:       current\n")
+				freshness := "current"
+				if resp.State == commonv1.AssuranceState_ASSURANCE_STATE_STALE {
+					freshness = "stale"
+				}
+				fmt.Printf("FRESHNESS:       %s\n", freshness)
 				return nil
 			}
 
@@ -188,30 +482,31 @@ and projects defensible results into standard OSCAL artifacts.`,
 				if err != nil {
 					return err
 				}
+				now := time.Now().UTC()
+				ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+				eval, freshness, validEnvelopes := evaluateLocalEnvelopes(sub, ctrl, envelopes, now)
+
 				fmt.Printf("SUBJECT:         %s\n", sub.URI())
-				if len(envelopes) == 0 {
+				if len(validEnvelopes) == 0 {
 					fmt.Printf("STATE:           UNKNOWN\n")
-					fmt.Printf("STATUS:          No matching evidence envelopes found in %s\n", evidenceDir)
+					if len(envelopes) > 0 {
+						fmt.Printf("STATUS:          All matching evidence envelopes in %s were rejected (future-dated or invalid)\n", evidenceDir)
+					} else {
+						fmt.Printf("STATUS:          No matching evidence envelopes found in %s\n", evidenceDir)
+					}
 					fmt.Printf("EVIDENCE ROOT:   none\n")
-					fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
-					fmt.Printf("FRESHNESS:       unknown\n")
+					fmt.Printf("LAST EVALUATED:  %s\n", now.Format(time.RFC3339))
+					fmt.Printf("FRESHNESS:       %s\n", freshness)
 					fmt.Printf("MISSING SIGNALS: kubernetes.admission, runtime.ebpf, spiffe.svid\n")
 					fmt.Printf("REMEDIATION:     oskal record admission --file <manifest.yaml> OR specify --server\n")
 					return nil
 				}
 
-				var evRefs []assurance.EvidenceRef
-				for _, env := range envelopes {
-					evRefs = append(evRefs, env.Artifact)
-				}
-				evRoot := receipts.ComputeEvidenceRoot(evRefs)
-				policyDigest := assurance.ComputeStringDigest(sub.URI() + ":" + evRoot)
-
-				fmt.Printf("STATE:           ASSURED\n")
-				fmt.Printf("EPOCH:           %s\n", policyDigest)
-				fmt.Printf("EVIDENCE ROOT:   %s\n", evRoot)
-				fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
-				fmt.Printf("FRESHNESS:       current\n")
+				fmt.Printf("STATE:           %s\n", eval.State.String())
+				fmt.Printf("EPOCH:           %s\n", eval.Epoch.PolicyDigest)
+				fmt.Printf("EVIDENCE ROOT:   %s\n", eval.EvidenceRoot)
+				fmt.Printf("LAST EVALUATED:  %s\n", now.Format(time.RFC3339))
+				fmt.Printf("FRESHNESS:       %s\n", freshness)
 				return nil
 			}
 
@@ -294,44 +589,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 				}
 			}
 
-			var eval assurance.ClaimEvaluation
-			if len(envelopes) > 0 {
-				var evRefs []assurance.EvidenceRef
-				for _, env := range envelopes {
-					evRefs = append(evRefs, env.Artifact)
-				}
-				evRoot := receipts.ComputeEvidenceRoot(evRefs)
-				policyDigest := assurance.ComputeStringDigest(sub.URI() + ":" + evRoot)
-
-				eval = assurance.ClaimEvaluation{
-					ID:      fmt.Sprintf("eval-%s", ctrl.ID),
-					Subject: sub,
-					Control: ctrl,
-					State:   assurance.AssuranceStateAssured,
-					Epoch: assurance.AssuranceEpoch{
-						SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-						ImplementationDigest: assurance.ComputeStringDigest("kubernetes:admission-policy"),
-						PolicyDigest:         policyDigest,
-						AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/operator"),
-						EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
-					},
-					Evidence:     evRefs,
-					EvidenceRoot: evRoot,
-					EvaluatedAt:  time.Now().UTC(),
-					ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
-				}
-			} else {
-				eval = assurance.ClaimEvaluation{
-					ID:           fmt.Sprintf("eval-unknown-%s", ctrl.ID),
-					Subject:      sub,
-					Control:      ctrl,
-					State:        assurance.AssuranceStateUnknown,
-					Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(sub.URI())},
-					Evidence:     nil,
-					EvidenceRoot: "",
-					EvaluatedAt:  time.Now().UTC(),
-				}
-			}
+			eval, _, _ := evaluateLocalEnvelopes(sub, ctrl, envelopes, time.Now().UTC())
 
 			explainer := explain.NewExplainer()
 			graph := explainer.BuildExplainGraph(cmd.Context(), sub, ctrl, eval)
@@ -366,13 +624,16 @@ and projects defensible results into standard OSCAL artifacts.`,
 				if err != nil {
 					return err
 				}
-				if len(envelopes) == 0 {
+				now := time.Now().UTC()
+				ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+				_, _, validEnvelopes := evaluateLocalEnvelopes(sub, ctrl, envelopes, now)
+				if len(validEnvelopes) == 0 {
 					fmt.Printf("No verified evidence envelopes found for %s in %s\n", sub.URI(), evidenceDir)
 					return nil
 				}
 
-				fmt.Printf("VERIFIED EVIDENCE ENVELOPES FOR %s (%d total):\n\n", sub.URI(), len(envelopes))
-				for i, env := range envelopes {
+				fmt.Printf("VERIFIED EVIDENCE ENVELOPES FOR %s (%d total):\n\n", sub.URI(), len(validEnvelopes))
+				for i, env := range validEnvelopes {
 					fmt.Printf("%d. [%s]\n   ID:       %s\n   Producer: %s\n   Digest:   %s\n   URI:      %s\n   Captured: %s\n\n",
 						i+1, env.ObservationType, env.ID, env.Producer.Canonical(), env.Artifact.Digest, env.Artifact.URI, env.CapturedAt.Format(time.RFC3339))
 				}
@@ -415,26 +676,44 @@ and projects defensible results into standard OSCAL artifacts.`,
 				}
 
 				now := time.Now().UTC()
-				isStale := false
-				for _, env := range envelopes {
-					if now.Sub(env.CapturedAt) > 10*time.Minute {
-						isStale = true
-						break
-					}
-				}
+				ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+				eval, _, validEnvelopes := evaluateLocalEnvelopes(sub, ctrl, envelopes, now)
 
 				fmt.Printf("DRIFT ANALYSIS FOR %s:\n\n", sub.URI())
-				if isStale {
+				if len(validEnvelopes) == 0 {
+					fmt.Printf("SUBJECT STATUS:         DRIFT_DETECTED\n")
+					fmt.Printf("FRESHNESS:              INVALID (future-dated evidence rejected)\n")
+					fmt.Printf("ASSURANCE STATUS:       UNKNOWN\n")
+				} else if eval.State == assurance.AssuranceStateFailed {
+					fmt.Printf("SUBJECT STATUS:         DECOHERENT\n")
+					fmt.Printf("SEMANTIC DRIFT:         adverse or violation evidence observed\n")
+					fmt.Printf("ASSURANCE STATUS:       FAILED\n")
+				} else if eval.State == assurance.AssuranceStateStale {
 					fmt.Printf("SUBJECT STATUS:         DRIFT_DETECTED\n")
 					fmt.Printf("FRESHNESS:              STALE (evidence expired)\n")
 					fmt.Printf("ASSURANCE STATUS:       STALE\n")
 				} else {
-					fmt.Printf("SUBJECT STATUS:         IN_SYNC\n")
-					fmt.Printf("RECORDED POLICY DIGEST: %s\n", envelopes[0].Epoch.PolicyDigest)
-					fmt.Printf("CURRENT POLICY DIGEST:  %s\n", envelopes[0].Epoch.PolicyDigest)
-					fmt.Printf("AUTHORITY CA ROTATION:  NONE\n")
-					fmt.Printf("SEMANTIC DRIFT:         0 dimensions drifted\n")
-					fmt.Printf("ASSURANCE STATUS:       ASSURED (no invalidation)\n")
+					policyDiverged := false
+					basePolicy := validEnvelopes[0].Epoch.PolicyDigest
+					for _, ve := range validEnvelopes[1:] {
+						if basePolicy != "" && ve.Epoch.PolicyDigest != "" && ve.Epoch.PolicyDigest != basePolicy {
+							policyDiverged = true
+							break
+						}
+					}
+					if policyDiverged {
+						fmt.Printf("SUBJECT STATUS:         DECOHERENT\n")
+						fmt.Printf("RECORDED POLICY DIGEST: %s\n", basePolicy)
+						fmt.Printf("SEMANTIC DRIFT:         1 dimension drifted (policy digest mismatch)\n")
+						fmt.Printf("ASSURANCE STATUS:       FAILED\n")
+					} else {
+						fmt.Printf("SUBJECT STATUS:         IN_SYNC\n")
+						fmt.Printf("RECORDED POLICY DIGEST: %s\n", validEnvelopes[0].Epoch.PolicyDigest)
+						fmt.Printf("CURRENT POLICY DIGEST:  %s\n", validEnvelopes[0].Epoch.PolicyDigest)
+						fmt.Printf("AUTHORITY CA ROTATION:  NONE\n")
+						fmt.Printf("SEMANTIC DRIFT:         0 dimensions drifted\n")
+						fmt.Printf("ASSURANCE STATUS:       ASSURED (no invalidation)\n")
+					}
 				}
 				return nil
 			}
@@ -457,12 +736,19 @@ and projects defensible results into standard OSCAL artifacts.`,
 	var (
 		verifyReceiptID   string
 		verifyReceiptFile string
+		verifyPublicKey   string
 	)
 	verifyReceiptCmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Verify an Ed25519-signed ControlReceipt and its Merkle evidence root",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var rcpt assurance.ControlReceipt
+			var searchDirs []string
+			if evidenceDir != "" {
+				searchDirs = append(searchDirs, evidenceDir, filepath.Join(evidenceDir, "receipts"))
+			}
+			searchDirs = append(searchDirs, "evidence", filepath.Join("evidence", "receipts"))
+
 			if verifyReceiptFile != "" {
 				data, err := os.ReadFile(verifyReceiptFile)
 				if err != nil {
@@ -471,49 +757,69 @@ and projects defensible results into standard OSCAL artifacts.`,
 				if err := json.Unmarshal(data, &rcpt); err != nil {
 					return fmt.Errorf("failed to parse receipt JSON: %w", err)
 				}
-			} else if verifyReceiptID != "" {
-				// Search evidenceDir for receipt file or mock receipt
-				rcptPath := filepath.Join(evidenceDir, verifyReceiptID+".json")
-				data, err := os.ReadFile(rcptPath)
-				if err != nil {
-					rcpt = assurance.ControlReceipt{
-						Subject:      assurance.SubjectRef{Scheme: "k8s", ID: "production/Deployment/payment-service"},
-						Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-						State:        assurance.AssuranceStateAssured,
-						EvidenceRoot: "sha256:39a81f08cb2149b109e2098fa0192809ca1980a0129038cb019a82019481920b",
-						Evaluator: assurance.AuthorityRef{
-							Scheme:  "spiffe",
-							Subject: "ckodex.internal/ns/system/sa/oskal-controller",
-						},
-						EvaluatedAt: time.Now().UTC(),
-						Signature:   "3f890ab189c4d9e0128912890123890123890123890123890123890123890123",
-					}
-				} else {
-					if err := json.Unmarshal(data, &rcpt); err != nil {
-						return fmt.Errorf("failed to parse receipt from %s: %w", rcptPath, err)
-					}
-				}
-			} else if len(args) > 0 {
-				verifyReceiptID = args[0]
-				rcpt = assurance.ControlReceipt{
-					Subject:      assurance.SubjectRef{Scheme: "k8s", ID: "production/Deployment/payment-service"},
-					Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-					State:        assurance.AssuranceStateAssured,
-					EvidenceRoot: "sha256:39a81f08cb2149b109e2098fa0192809ca1980a0129038cb019a82019481920b",
-					Evaluator: assurance.AuthorityRef{
-						Scheme:  "spiffe",
-						Subject: "ckodex.internal/ns/system/sa/oskal-controller",
-					},
-					EvaluatedAt: time.Now().UTC(),
-					Signature:   "3f890ab189c4d9e0128912890123890123890123890123890123890123890123",
-				}
+				fileDir := filepath.Dir(verifyReceiptFile)
+				searchDirs = append([]string{fileDir, filepath.Dir(fileDir)}, searchDirs...)
 			} else {
-				return errors.New("must specify --receipt-id or --receipt-file")
+				if verifyReceiptID == "" && len(args) > 0 {
+					verifyReceiptID = args[0]
+				}
+				if verifyReceiptID == "" {
+					return errors.New("must specify --receipt-id or --receipt-file")
+				}
+
+				var candidatePaths []string
+				if strings.HasSuffix(verifyReceiptID, ".json") {
+					candidatePaths = append(candidatePaths, verifyReceiptID)
+				}
+				for _, d := range searchDirs {
+					candidatePaths = append(candidatePaths,
+						filepath.Join(d, verifyReceiptID+".json"),
+						filepath.Join(d, "rcpt-"+verifyReceiptID+".json"),
+					)
+				}
+
+				found := false
+				for _, p := range candidatePaths {
+					data, err := os.ReadFile(p)
+					if err != nil {
+						continue
+					}
+					if err := json.Unmarshal(data, &rcpt); err != nil {
+						return fmt.Errorf("failed to parse receipt from %s: %w", p, err)
+					}
+					found = true
+					break
+				}
+				if !found {
+					return fmt.Errorf("[FAIL] receipt %q not found on disk (searched %v)", verifyReceiptID, searchDirs)
+				}
 			}
 
 			idDisplay := verifyReceiptID
 			if idDisplay == "" {
 				idDisplay = "rcpt-" + rcpt.Control.ID
+			}
+
+			pubKeyHex := strings.TrimSpace(verifyPublicKey)
+			if pubKeyHex != "" {
+				if data, err := os.ReadFile(pubKeyHex); err == nil {
+					pubKeyHex = strings.TrimSpace(string(data))
+				}
+			} else {
+				for _, d := range searchDirs {
+					if data, err := os.ReadFile(filepath.Join(d, "receipt-signing.pub")); err == nil {
+						pubKeyHex = strings.TrimSpace(string(data))
+						break
+					}
+				}
+			}
+			if pubKeyHex == "" {
+				return fmt.Errorf("[FAIL] cannot verify receipt %s: no public key provided (--public-key) and no receipt-signing.pub found", idDisplay)
+			}
+
+			valid, err := receipts.VerifyIndependentReceipt(rcpt, pubKeyHex)
+			if err != nil || !valid {
+				return fmt.Errorf("[FAIL] Receipt %s cryptographic verification failed: valid=%v, err=%v", idDisplay, valid, err)
 			}
 
 			fmt.Printf("[VERIFIED] Receipt %s is cryptographically valid.\n", idDisplay)
@@ -525,6 +831,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 	}
 	verifyReceiptCmd.Flags().StringVar(&verifyReceiptID, "receipt-id", "", "ID of the receipt to verify")
 	verifyReceiptCmd.Flags().StringVar(&verifyReceiptFile, "receipt-file", "", "Path to raw ControlReceipt JSON file")
+	verifyReceiptCmd.Flags().StringVar(&verifyPublicKey, "public-key", "", "Ed25519 public key hex or path to .pub file")
 	receiptCmd.AddCommand(verifyReceiptCmd)
 
 	// oscal record admission --file <manifest.yaml> [--evidence-dir <dir>]
@@ -554,15 +861,26 @@ and projects defensible results into standard OSCAL artifacts.`,
 			if err != nil {
 				return fmt.Errorf("failed to read workload manifest: %w", err)
 			}
-			var manifest struct {
+			type manifestMeta struct {
 				Kind     string `yaml:"kind"`
 				Metadata struct {
 					Name      string `yaml:"name"`
 					Namespace string `yaml:"namespace"`
 				} `yaml:"metadata"`
 			}
-			if err := yaml.Unmarshal(data, &manifest); err != nil {
-				return fmt.Errorf("failed to parse workload manifest YAML: %w", err)
+			var manifest manifestMeta
+			docs := splitYAMLDocuments(data)
+			for i, doc := range docs {
+				var docMeta manifestMeta
+				if err := yaml.Unmarshal(doc, &docMeta); err != nil {
+					return fmt.Errorf("failed to parse workload manifest YAML: %w", err)
+				}
+				if i == 0 || docMeta.Kind == "Deployment" || docMeta.Kind == "StatefulSet" || docMeta.Kind == "DaemonSet" || docMeta.Kind == "Pod" || docMeta.Kind == "Job" || docMeta.Kind == "CronJob" {
+					manifest = docMeta
+				}
+			}
+			if err := validateManifestSecurity(data); err != nil {
+				return err
 			}
 			if manifest.Kind == "" {
 				manifest.Kind = "Deployment"
@@ -620,9 +938,43 @@ and projects defensible results into standard OSCAL artifacts.`,
 				return fmt.Errorf("failed to write evidence file: %w", err)
 			}
 
+			// Issue and persist an Ed25519-signed ControlReceipt for the admission evaluation
+			rcptMgr, err := receipts.LoadOrCreateReceiptManager(env.Producer, targetDir)
+			if err != nil {
+				return fmt.Errorf("failed to initialize receipt signer: %w", err)
+			}
+			ctrlRef := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+			rcpt, err := rcptMgr.IssueReceipt(
+				sub,
+				ctrlRef,
+				assurance.AssuranceStateAssured,
+				env.Epoch,
+				[]assurance.EvidenceRef{env.Artifact},
+				now,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to issue control receipt: %w", err)
+			}
+			rcptBytes, err := json.MarshalIndent(rcpt, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to marshal control receipt: %w", err)
+			}
+			receiptsDir := filepath.Join(targetDir, "receipts")
+			_ = os.MkdirAll(receiptsDir, 0755)
+			rcptID := fmt.Sprintf("rcpt-adm-%s", manifest.Metadata.Name)
+			for _, p := range []string{
+				filepath.Join(targetDir, rcptID+".json"),
+				filepath.Join(receiptsDir, rcptID+".json"),
+				filepath.Join(targetDir, "rcpt-AC-6.json"),
+				filepath.Join(receiptsDir, "rcpt-AC-6.json"),
+			} {
+				_ = os.WriteFile(p, rcptBytes, 0644)
+			}
+
 			fmt.Printf("[RECORDED] Evidence envelope created: %s\n", outPath)
 			fmt.Printf("Subject:   %s\n", sub.URI())
 			fmt.Printf("Envelope:  %s\n", env.ID)
+			fmt.Printf("Receipt:   %s\n", rcptID)
 			fmt.Printf("Digest:    %s\n", artifactDigest)
 			fmt.Printf("State:     COHERENT / POSITIVE / VERIFIED\n")
 			return nil
@@ -654,48 +1006,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
 			}
 
-			var eval assurance.ClaimEvaluation
-			if len(envelopes) > 0 {
-				var evRefs []assurance.EvidenceRef
-				for _, env := range envelopes {
-					evRefs = append(evRefs, env.Artifact)
-				}
-				evRoot := receipts.ComputeEvidenceRoot(evRefs)
-				policyDigest := assurance.ComputeStringDigest(sub.URI() + ":" + evRoot)
-
-				eval = assurance.ClaimEvaluation{
-					ID:      fmt.Sprintf("eval-%s", ctrl.ID),
-					Subject: sub,
-					Control: ctrl,
-					State:   assurance.AssuranceStateAssured,
-					Epoch: assurance.AssuranceEpoch{
-						SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-						ImplementationDigest: assurance.ComputeStringDigest("kubernetes:admission-policy"),
-						PolicyDigest:         policyDigest,
-						AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/operator"),
-						EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
-					},
-					Evidence:     evRefs,
-					Completeness: assurance.EvidenceCompleteness{Required: len(evRefs), Verified: len(evRefs)},
-					EvidenceRoot: evRoot,
-					EvaluatedAt:  time.Now().UTC(),
-					ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
-				}
-			} else {
-				// Honest reporting when no evidence is present (Invariant I-02)
-				eval = assurance.ClaimEvaluation{
-					ID:           fmt.Sprintf("eval-unknown-%s", ctrl.ID),
-					Subject:      sub,
-					Control:      ctrl,
-					State:        assurance.AssuranceStateUnknown,
-					Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(sub.URI())},
-					Evidence:     nil,
-					Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 0},
-					EvidenceRoot: "",
-					EvaluatedAt:  time.Now().UTC(),
-					ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
-				}
-			}
+			eval, _, _ := evaluateLocalEnvelopes(sub, ctrl, envelopes, time.Now().UTC())
 
 			projector := oscal.NewProjector()
 			data, err := projector.ProjectAssessmentResults(context.Background(), sub, []assurance.ClaimEvaluation{eval}, nil)
@@ -724,40 +1035,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
 			}
 
-			var eval assurance.ClaimEvaluation
-			if len(envelopes) > 0 {
-				var evRefs []assurance.EvidenceRef
-				for _, env := range envelopes {
-					evRefs = append(evRefs, env.Artifact)
-				}
-				evRoot := receipts.ComputeEvidenceRoot(evRefs)
-				eval = assurance.ClaimEvaluation{
-					ID:      fmt.Sprintf("eval-%s", ctrl.ID),
-					Subject: sub,
-					Control: ctrl,
-					State:   assurance.AssuranceStateAssured,
-					Epoch: assurance.AssuranceEpoch{
-						SubjectDigest: assurance.ComputeStringDigest(sub.URI()),
-					},
-					Evidence:     evRefs,
-					EvidenceRoot: evRoot,
-					EvaluatedAt:  time.Now().UTC(),
-					ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
-				}
-			} else {
-				eval = assurance.ClaimEvaluation{
-					ID:      fmt.Sprintf("eval-unknown-%s", ctrl.ID),
-					Subject: sub,
-					Control: ctrl,
-					State:   assurance.AssuranceStateUnknown,
-					Epoch: assurance.AssuranceEpoch{
-						SubjectDigest: assurance.ComputeStringDigest(sub.URI()),
-					},
-					Evidence:     nil,
-					EvidenceRoot: "",
-					EvaluatedAt:  time.Now().UTC(),
-				}
-			}
+			eval, _, _ := evaluateLocalEnvelopes(sub, ctrl, envelopes, time.Now().UTC())
 
 			projector := oscal.NewProjector()
 			data, err := projector.ProjectComponentDefinition(context.Background(), compName, []assurance.ClaimEvaluation{eval})
@@ -782,7 +1060,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 			contract := assurance.EvidenceContract{
 				ID: fmt.Sprintf("contract-%s", sub.ID),
 				Requirements: []assurance.EvidenceRequirement{
-					{ID: "req-1", EvidenceType: "admission", Required: true, MaxAge: 5 * time.Minute},
+					{ID: "req-1", EvidenceType: "admission", Required: true, MaxAge: defaultMaxEvidenceAge},
 				},
 			}
 			controls := []assurance.ControlRef{
@@ -808,8 +1086,28 @@ and projects defensible results into standard OSCAL artifacts.`,
 				subURI = "k8s://prod/payments/Deployment/payments-api"
 			}
 			sub := parseSubjectURI(subURI)
-			// Truthfully report only observed findings (never fabricate fake violations)
+			ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+
+			var envelopes []assurance.EvidenceEnvelope
+			if evidenceDir != "" {
+				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
+			}
+			now := time.Now().UTC()
+			eval, freshness, _ := evaluateLocalEnvelopes(sub, ctrl, envelopes, now)
+
+			// Truthfully report findings when continuous assurance is not ASSURED
 			var findings []assurance.Finding
+			if eval.State != assurance.AssuranceStateAssured {
+				findings = append(findings, assurance.Finding{
+					ID:           fmt.Sprintf("finding-%s-%s", ctrl.ID, strings.ToLower(eval.State.String())),
+					Subject:      sub,
+					Control:      ctrl,
+					Severity:     "HIGH",
+					Title:        fmt.Sprintf("Control %s Assurance State is %s", ctrl.Canonical(), eval.State),
+					Description:  fmt.Sprintf("Subject %s does not have current verified evidence for %s (state: %s, freshness: %s).", sub.URI(), ctrl.Canonical(), eval.State, freshness),
+					DiscoveredAt: now,
+				})
+			}
 			projector := oscal.NewProjector()
 			data, err := projector.ProjectPOAM(context.Background(), sub, findings)
 			if err != nil {
@@ -831,18 +1129,14 @@ and projects defensible results into standard OSCAL artifacts.`,
 			}
 			sub := parseSubjectURI(subURI)
 			ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-			eval := assurance.ClaimEvaluation{
-				ID:      fmt.Sprintf("eval-%s", ctrl.ID),
-				Subject: sub,
-				Control: ctrl,
-				State:   assurance.AssuranceStateAssured,
-				Epoch: assurance.AssuranceEpoch{
-					SubjectDigest: assurance.ComputeStringDigest(sub.URI()),
-				},
-				EvidenceRoot: assurance.ComputeStringDigest(sub.URI() + ":root"),
-				EvaluatedAt:  time.Now().UTC(),
-				ValidUntil:   time.Now().UTC().Add(5 * time.Minute),
+
+			var envelopes []assurance.EvidenceEnvelope
+			if evidenceDir != "" {
+				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
 			}
+
+			eval, _, _ := evaluateLocalEnvelopes(sub, ctrl, envelopes, time.Now().UTC())
+
 			projector := oscal.NewProjector()
 			data, err := projector.ProjectSSP(context.Background(), sub.ID, []assurance.ClaimEvaluation{eval})
 			if err != nil {
@@ -936,7 +1230,11 @@ and projects defensible results into standard OSCAL artifacts.`,
 	importCmd.AddCommand(importOscalCmd)
 
 	// 7. oscal serve --port <port>
-	var port int
+	var (
+		port         int
+		serveTLSCert string
+		serveTLSKey  string
+	)
 	serveCmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the gRPC AssuranceService daemon",
@@ -946,18 +1244,71 @@ and projects defensible results into standard OSCAL artifacts.`,
 				return fmt.Errorf("failed to listen on port %d: %w", port, err)
 			}
 
-			grpcServer := grpc.NewServer()
-			srv := service.NewServer(nil)
+			serverOpts := []grpc.ServerOption{
+				grpc.MaxRecvMsgSize(16 << 20),
+				grpc.MaxSendMsgSize(16 << 20),
+				grpc.MaxConcurrentStreams(256),
+				grpc.KeepaliveParams(keepalive.ServerParameters{
+					MaxConnectionIdle: 5 * time.Minute,
+					Time:              2 * time.Minute,
+					Timeout:           20 * time.Second,
+				}),
+				grpc.UnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+					defer func() {
+						if rec := recover(); rec != nil {
+							err = status.Errorf(codes.Internal, "panic recovered in %s: %v", info.FullMethod, rec)
+						}
+					}()
+					return handler(ctx, req)
+				}),
+				grpc.StreamInterceptor(func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+					defer func() {
+						if rec := recover(); rec != nil {
+							err = status.Errorf(codes.Internal, "stream panic recovered in %s: %v", info.FullMethod, rec)
+						}
+					}()
+					return handler(srv, ss)
+				}),
+			}
+			if serveTLSCert != "" && serveTLSKey != "" {
+				tlsCreds, err := credentials.NewServerTLSFromFile(serveTLSCert, serveTLSKey)
+				if err != nil {
+					return fmt.Errorf("failed to load server TLS credentials: %w", err)
+				}
+				serverOpts = append(serverOpts, grpc.Creds(tlsCreds))
+			}
+
+			var repo ports.EvidenceRepository
+			if evidenceDir != "" {
+				fsRepo, err := storage.NewFilesystemEvidenceRepository(evidenceDir)
+				if err != nil {
+					return fmt.Errorf("failed to open evidence repository at %s: %w", evidenceDir, err)
+				}
+				repo = fsRepo
+			}
+
+			grpcServer := grpc.NewServer(serverOpts...)
+			srv := service.NewServer(nil, repo)
 			servicesv1.RegisterAssuranceServiceServer(grpcServer, srv)
+
+			healthSrv := health.NewServer()
+			healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+			healthSrv.SetServingStatus(servicesv1.AssuranceService_ServiceDesc.ServiceName, grpc_health_v1.HealthCheckResponse_SERVING)
+			grpc_health_v1.RegisterHealthServer(grpcServer, healthSrv)
 
 			fmt.Printf("OSKAL AssuranceService gRPC daemon listening on port %d\n", port)
 
 			stopCh := make(chan os.Signal, 1)
 			signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
+			defer signal.Stop(stopCh)
 
 			go func() {
-				<-stopCh
+				select {
+				case <-stopCh:
+				case <-cmd.Context().Done():
+				}
 				fmt.Println("Shutting down OSKAL AssuranceService gRPC daemon...")
+				healthSrv.Shutdown()
 				grpcServer.GracefulStop()
 			}()
 
@@ -968,6 +1319,8 @@ and projects defensible results into standard OSCAL artifacts.`,
 		},
 	}
 	serveCmd.Flags().IntVar(&port, "port", 9090, "Port for gRPC service to listen on")
+	serveCmd.Flags().StringVar(&serveTLSCert, "tls-cert-file", "", "Optional path to TLS server certificate file")
+	serveCmd.Flags().StringVar(&serveTLSKey, "tls-key-file", "", "Optional path to TLS server private key file")
 
 	// 8. oscal webhook
 	var (
@@ -1270,39 +1623,9 @@ for a governed workload subject without collapsing them into generic logs.`,
 			}
 
 			now := time.Now().UTC()
-			var eval assurance.ClaimEvaluation
-			if len(envelopes) > 0 {
-				var evRefs []assurance.EvidenceRef
-				for _, env := range envelopes {
-					evRefs = append(evRefs, env.Artifact)
-				}
-				evRoot := receipts.ComputeEvidenceRoot(evRefs)
-				eval = assurance.ClaimEvaluation{
-					ID:      fmt.Sprintf("eval-%s", ctrl.ID),
-					Subject: sub,
-					Control: ctrl,
-					State:   assurance.AssuranceStateAssured,
-					Epoch: assurance.AssuranceEpoch{
-						SubjectDigest: assurance.ComputeStringDigest(sub.URI()),
-						PolicyDigest:  assurance.ComputeStringDigest("cel:policy:ac-6"),
-					},
-					Evidence:     evRefs,
-					EvidenceRoot: evRoot,
-					EvaluatedAt:  now,
-				}
-			} else {
-				eval = assurance.ClaimEvaluation{
-					ID:           fmt.Sprintf("eval-%s", ctrl.ID),
-					Subject:      sub,
-					Control:      ctrl,
-					State:        assurance.AssuranceStateUnknown,
-					Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(sub.URI())},
-					EvidenceRoot: "",
-					EvaluatedAt:  now,
-				}
-			}
+			eval, _, validEnvelopes := evaluateLocalEnvelopes(sub, ctrl, envelopes, now)
 
-			report := diagnostics.InspectSubject(cmd.Context(), sub, eval, envelopes)
+			report := diagnostics.InspectSubject(cmd.Context(), sub, eval, validEnvelopes)
 
 			outFormat, err := format.NormalizeFormat(inspectOutput)
 			if err != nil {
@@ -1526,6 +1849,362 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 	pruneCmd.Flags().DurationVar(&pruneOlderThan, "older-than", 720*time.Hour, "Retention age threshold (e.g. 720h, 30d)")
 	pruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "Preview envelopes that would be deleted without removing them")
 
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print OSKAL CLI version and build metadata",
+		Run: func(cmd *cobra.Command, args []string) {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "oskal %s (commit: %s, built: %s)\n", version, commit, date)
+		},
+	}
+
+	// 17. oscal utcp [manual|validate|search|call|serve|sdk-config]
+	utcpCmd := &cobra.Command{
+		Use:   "utcp",
+		Short: "Universal Tool Calling Protocol (UTCP v1.0.1) manual, discovery, and multi-SDK operations",
+		Long: `Provides full Universal Tool Calling Protocol (UTCP) support compatible with:
+  - utcp-specification (https://github.com/universal-tool-calling-protocol/utcp-specification)
+  - utcp-mcp           (https://github.com/universal-tool-calling-protocol/utcp-mcp)
+  - go-utcp            (https://github.com/universal-tool-calling-protocol/go-utcp)
+  - rs-utcp            (https://github.com/universal-tool-calling-protocol/rs-utcp)
+  - typescript-utcp    (https://github.com/universal-tool-calling-protocol/typescript-utcp)
+  - python-utcp        (https://github.com/universal-tool-calling-protocol/python-utcp)`,
+	}
+
+	var (
+		utcpTransport string
+		utcpBaseURL   string
+		utcpGRPCAddr  string
+		utcpBinary    string
+		utcpOutput    string
+	)
+	utcpManualCmd := &cobra.Command{
+		Use:   "manual",
+		Short: "Export the OSKAL UTCP v1.0.1 manual (JSON or YAML)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			m := utcp.BuildOSKALManual(utcp.ManualOptions{
+				PrimaryTransport: utcpTransport,
+				BaseURL:          utcpBaseURL,
+				GRPCAddr:         utcpGRPCAddr,
+				BinaryPath:       utcpBinary,
+			})
+			if strings.EqualFold(utcpOutput, "yaml") {
+				out, err := yaml.Marshal(m)
+				if err != nil {
+					return err
+				}
+				_, _ = fmt.Fprint(cmd.OutOrStdout(), string(out))
+				return nil
+			}
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			return enc.Encode(m)
+		},
+	}
+	utcpManualCmd.Flags().StringVar(&utcpTransport, "transport", "cli", "Primary call_template_type: cli, http, grpc, mcp")
+	utcpManualCmd.Flags().StringVar(&utcpBaseURL, "base-url", "http://localhost:8090", "Base HTTP URL for http call templates")
+	utcpManualCmd.Flags().StringVar(&utcpGRPCAddr, "grpc-addr", "localhost:9090", "gRPC server address for grpc call templates")
+	utcpManualCmd.Flags().StringVar(&utcpBinary, "binary", "oskal", "CLI binary name or path for cli/mcp call templates")
+	utcpManualCmd.Flags().StringVar(&utcpOutput, "output", "json", "Output format: json or yaml")
+
+	utcpValidateCmd := &cobra.Command{
+		Use:   "validate <manual-file>",
+		Short: "Validate a UTCP manual against utcp-specification v1.0.1 and CKODEX invariants",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			raw, err := os.ReadFile(args[0])
+			if err != nil {
+				return fmt.Errorf("failed to read UTCP manual file %s: %w", args[0], err)
+			}
+			var m utcp.UTCPManual
+			if err := yaml.Unmarshal(raw, &m); err != nil {
+				return fmt.Errorf("failed to parse UTCP manual: %w", err)
+			}
+			if err := utcp.ValidateManual(m); err != nil {
+				return fmt.Errorf("[FAIL] UTCP manual validation failed: %w", err)
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "[PASS] UTCP manual %s conforms to utcp-specification v%s (%d tools verified)\n", args[0], m.UTCPVersion, len(m.Tools))
+			return nil
+		},
+	}
+
+	var (
+		utcpSearchTag   string
+		utcpSearchLimit int
+	)
+	utcpSearchCmd := &cobra.Command{
+		Use:   "search [query]",
+		Short: "Search OSKAL UTCP tools by keyword and tag",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q := ""
+			if len(args) > 0 {
+				q = args[0]
+			}
+			reg, err := utcp.NewRegistry(evidenceDir, nil)
+			if err != nil {
+				return err
+			}
+			var tags []string
+			if utcpSearchTag != "" {
+				tags = append(tags, utcpSearchTag)
+			}
+			matches := reg.SearchTools(q, tags, utcpSearchLimit)
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			return enc.Encode(map[string]interface{}{
+				"tools": matches,
+				"count": len(matches),
+			})
+		},
+	}
+	utcpSearchCmd.Flags().StringVar(&utcpSearchTag, "tag", "", "Optional tag filter")
+	utcpSearchCmd.Flags().IntVar(&utcpSearchLimit, "limit", 10, "Maximum results")
+
+	runListTools := func(cmd *cobra.Command, _ []string) error {
+		reg, err := utcp.NewRegistry(evidenceDir, nil)
+		if err != nil {
+			return err
+		}
+		tools := reg.ListTools()
+		enc := json.NewEncoder(cmd.OutOrStdout())
+		enc.SetIndent("", "  ")
+		return enc.Encode(map[string]interface{}{
+			"tools": tools,
+			"count": len(tools),
+		})
+	}
+
+	utcpListToolsCmd := &cobra.Command{
+		Use:   "list-tools",
+		Short: "List all registered OSKAL UTCP tools (compatible with go-utcp CLI discovery)",
+		RunE:  runListTools,
+	}
+
+	topListToolsCmd := &cobra.Command{
+		Use:    "list-tools",
+		Short:  "List all registered OSKAL UTCP tools",
+		Hidden: true,
+		RunE:   runListTools,
+	}
+
+	var utcpCallArgs string
+	runUTCPCall := func(cmd *cobra.Command, rawArgs []string) error {
+		var posArgs []string
+		flagArgs := make(map[string]interface{})
+		explicitArgsJSON := ""
+		leaseID := ""
+		prevReceiptHash := ""
+
+		for i := 0; i < len(rawArgs); i++ {
+			tok := rawArgs[i]
+			if tok == "-h" || tok == "--help" {
+				return cmd.Help()
+			}
+			if !strings.HasPrefix(tok, "-") || tok == "-" {
+				posArgs = append(posArgs, tok)
+				continue
+			}
+
+			trimmed := strings.TrimLeft(tok, "-")
+			key := trimmed
+			val := ""
+			hasInlineVal := false
+			if eqIdx := strings.IndexByte(trimmed, '='); eqIdx >= 0 {
+				key = trimmed[:eqIdx]
+				val = trimmed[eqIdx+1:]
+				hasInlineVal = true
+			} else if i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "--") {
+				val = rawArgs[i+1]
+				i++
+			} else {
+				val = "true"
+			}
+
+			switch key {
+			case "args":
+				explicitArgsJSON = val
+			case "evidence-dir":
+				evidenceDir = val
+			case "server":
+				serverAddr = val
+			case "config":
+				configFileFlag = val
+			case "tls-ca-file":
+				tlsCAFile = val
+			case "lease-id", "lease_id":
+				leaseID = val
+			case "prev-receipt-hash", "prev_receipt_hash":
+				prevReceiptHash = val
+			default:
+				if strings.HasPrefix(val, "UTCP_ARG_") && strings.HasSuffix(val, "_UTCP_END") {
+					continue
+				}
+				var decoded interface{} = val
+				if !hasInlineVal && (strings.HasPrefix(val, "{") || strings.HasPrefix(val, "[")) {
+					var js interface{}
+					if json.Unmarshal([]byte(val), &js) == nil {
+						decoded = js
+					}
+				}
+				flagArgs[key] = decoded
+				if strings.Contains(key, "-") {
+					underKey := strings.ReplaceAll(key, "-", "_")
+					if _, exists := flagArgs[underKey]; !exists {
+						flagArgs[underKey] = decoded
+					}
+				}
+			}
+		}
+
+		if len(posArgs) < 1 || len(posArgs) > 2 {
+			return fmt.Errorf("expected 1 or 2 positional arguments (<tool-name> or <provider-name> <tool-name>), got %d", len(posArgs))
+		}
+		toolName := posArgs[0]
+		if len(posArgs) == 2 {
+			toolName = posArgs[0] + "." + posArgs[1]
+		}
+
+		parsedArgs := make(map[string]interface{})
+		if strings.TrimSpace(explicitArgsJSON) != "" {
+			if err := json.Unmarshal([]byte(explicitArgsJSON), &parsedArgs); err != nil {
+				return fmt.Errorf("invalid --args JSON: %w", err)
+			}
+		} else {
+			inReader := cmd.InOrStdin()
+			shouldReadStdin := false
+			if f, ok := inReader.(*os.File); ok {
+				if st, err := f.Stat(); err == nil && (st.Mode()&os.ModeCharDevice) == 0 {
+					shouldReadStdin = true
+				}
+			} else if inReader != nil {
+				shouldReadStdin = true
+			}
+			if shouldReadStdin {
+				stdinBytes, err := io.ReadAll(io.LimitReader(inReader, 4<<20))
+				if err == nil && len(bytes.TrimSpace(stdinBytes)) > 0 {
+					if err := json.Unmarshal(bytes.TrimSpace(stdinBytes), &parsedArgs); err != nil {
+						return fmt.Errorf("invalid stdin JSON arguments: %w", err)
+					}
+				}
+			}
+		}
+
+		for k, v := range flagArgs {
+			parsedArgs[k] = v
+		}
+
+		reg, err := utcp.NewRegistry(evidenceDir, nil)
+		if err != nil {
+			return err
+		}
+		res, err := reg.CallTool(cmd.Context(), toolName, parsedArgs, leaseID, prevReceiptHash)
+		if err != nil && len(posArgs) == 2 {
+			res, err = reg.CallTool(cmd.Context(), posArgs[1], parsedArgs, leaseID, prevReceiptHash)
+		}
+		if err != nil {
+			return err
+		}
+		enc := json.NewEncoder(cmd.OutOrStdout())
+		enc.SetIndent("", "  ")
+		return enc.Encode(res)
+	}
+
+	utcpCallCmd := &cobra.Command{
+		Use:                "call [<provider-name>] <tool-name>",
+		Short:              "Execute an OSKAL UTCP tool directly via flags, --args JSON, or stdin JSON",
+		DisableFlagParsing: true,
+		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
+		RunE:               runUTCPCall,
+	}
+	utcpCallCmd.Flags().StringVar(&utcpCallArgs, "args", "{}", "JSON object of tool arguments")
+
+	topCallCmd := &cobra.Command{
+		Use:                "call [<provider-name>] <tool-name>",
+		Short:              "Execute an OSKAL UTCP tool directly",
+		Hidden:             true,
+		DisableFlagParsing: true,
+		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
+		RunE:               runUTCPCall,
+	}
+
+	var (
+		utcpServeAddr    string
+		utcpServeBaseURL string
+	)
+	utcpServeCmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Start native UTCP HTTP discovery (GET /utcp) and tool execution server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reg, err := utcp.NewRegistry(evidenceDir, nil)
+			if err != nil {
+				return err
+			}
+			httpSrv := utcp.NewHTTPServer(reg, utcpServeBaseURL)
+			srv := &http.Server{
+				Addr:              utcpServeAddr,
+				Handler:           httpSrv.Handler(),
+				ReadHeaderTimeout: 5 * time.Second,
+				ReadTimeout:       15 * time.Second,
+				WriteTimeout:      30 * time.Second,
+				IdleTimeout:       60 * time.Second,
+				MaxHeaderBytes:    1 << 20,
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Starting OSKAL UTCP HTTP Server on %s (discovery: %s/utcp)\n", utcpServeAddr, strings.TrimRight(utcpServeBaseURL, "/"))
+
+			stopCh := make(chan os.Signal, 1)
+			signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
+			defer signal.Stop(stopCh)
+
+			errCh := make(chan error, 1)
+			go func() {
+				if serveErr := srv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+					errCh <- serveErr
+				} else {
+					errCh <- nil
+				}
+			}()
+
+			select {
+			case <-stopCh:
+			case <-cmd.Context().Done():
+			case serveErr := <-errCh:
+				return serveErr
+			}
+
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return srv.Shutdown(shutdownCtx)
+		},
+	}
+	utcpServeCmd.Flags().StringVar(&utcpServeAddr, "addr", ":8090", "Listen address for UTCP HTTP server")
+	utcpServeCmd.Flags().StringVar(&utcpServeBaseURL, "base-url", "http://localhost:8090", "Public base URL advertised in /utcp manual")
+
+	var utcpSDKLang string
+	utcpSDKConfigCmd := &cobra.Command{
+		Use:   "sdk-config",
+		Short: "Generate UTCP provider configs and client snippets for go-utcp, rs-utcp, typescript-utcp, python-utcp, and utcp-mcp",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			bundles := utcp.GenerateSDKConfigs(utcpBaseURL, utcpBinary)
+			var filtered []utcp.SDKBundle
+			for _, b := range bundles {
+				if utcpSDKLang == "" || utcpSDKLang == "all" || strings.EqualFold(b.Language, utcpSDKLang) {
+					filtered = append(filtered, b)
+				}
+			}
+			if len(filtered) == 0 {
+				return fmt.Errorf("unknown UTCP SDK target '%s' (valid: all, go, rust, typescript, python, utcp-mcp)", utcpSDKLang)
+			}
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			return enc.Encode(filtered)
+		},
+	}
+	utcpSDKConfigCmd.Flags().StringVar(&utcpSDKLang, "lang", "all", "Target SDK language: all, go, rust, typescript, python, utcp-mcp")
+	utcpSDKConfigCmd.Flags().StringVar(&utcpBaseURL, "base-url", "http://localhost:8090", "Base UTCP HTTP endpoint URL")
+	utcpSDKConfigCmd.Flags().StringVar(&utcpBinary, "binary", "oskal", "OSKAL binary path")
+
+	utcpCmd.AddCommand(utcpManualCmd, utcpValidateCmd, utcpSearchCmd, utcpListToolsCmd, utcpCallCmd, utcpServeCmd, utcpSDKConfigCmd)
+
 	assuranceCmd.AddCommand(stateCmd, explainCmd, evidenceCmd, driftCmd, receiptCmd)
 	rootCmd.AddCommand(
 		assuranceCmd,
@@ -1539,9 +2218,13 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 		doctorCmd,
 		inspectCmd,
 		mcpCmd,
+		utcpCmd,
+		topListToolsCmd,
+		topCallCmd,
 		cockpitCmd,
 		configCmd,
 		pruneCmd,
+		versionCmd,
 	)
 	return rootCmd
 }

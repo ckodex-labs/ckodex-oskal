@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/workcell"
 	proj "github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 )
 
@@ -91,7 +92,7 @@ func TestMCPServerLifecycleAndTools(t *testing.T) {
 		t.Fatalf("init error: %+v", resp1)
 	}
 
-	// Verify line 3 (tools/list has 7 tools)
+	// Verify line 3 (tools/list has 16 tools: 7 native OSKAL + 9 utcp-mcp bridge tools)
 	var resp3 struct {
 		Result struct {
 			Tools []struct {
@@ -102,8 +103,8 @@ func TestMCPServerLifecycleAndTools(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[2]), &resp3); err != nil {
 		t.Fatalf("failed to parse tools/list resp: %v", err)
 	}
-	if len(resp3.Result.Tools) != 7 {
-		t.Fatalf("expected 7 tools, got %d", len(resp3.Result.Tools))
+	if len(resp3.Result.Tools) != 16 {
+		t.Fatalf("expected 16 tools (7 native + 9 utcp-mcp bridge), got %d", len(resp3.Result.Tools))
 	}
 
 	// Verify line 4 (validate_oscal valid=true)
@@ -129,6 +130,149 @@ func TestMCPServerLifecycleAndTools(t *testing.T) {
 				t.Fatalf("non-ASCII character %d in line %d: %s", b, idx+1, line)
 			}
 		}
+	}
+
+	// Verify detect_drift returns UNKNOWN without evidence (Invariant I-02)
+	driftRes, err := srv.callTool(context.Background(), "detect_drift", map[string]interface{}{
+		"subject": "k8s://prod/payments/Deployment/payments-api",
+	})
+	if err != nil {
+		t.Fatalf("detect_drift failed: %v", err)
+	}
+	if !strings.Contains(driftRes.Content[0].Text, `"assurance_status": "UNKNOWN"`) {
+		t.Fatalf("expected detect_drift without evidence to return UNKNOWN, got:\n%s", driftRes.Content[0].Text)
+	}
+
+	// Verify UTCP-MCP bridge tools (utcp_get_manual, search_tools, list_tools, call_tool, tool_info, get_required_keys_for_tool, register_manual, deregister_manual)
+	manualRes, err := srv.callTool(context.Background(), "utcp_get_manual", map[string]interface{}{
+		"transport": "http",
+	})
+	if err != nil || !strings.Contains(manualRes.Content[0].Text, `"utcp_version": "1.0.1"`) {
+		t.Fatalf("utcp_get_manual failed: err=%v, out=%+v", err, manualRes)
+	}
+
+	// F-07: search_tools with task_description and max_results
+	searchRes, err := srv.callTool(context.Background(), "search_tools", map[string]interface{}{
+		"task_description": "explain_claim",
+		"max_results":      float64(5),
+	})
+	if err != nil || !strings.Contains(searchRes.Content[0].Text, `"explain_claim"`) {
+		t.Fatalf("search_tools with task_description failed: err=%v, out=%+v", err, searchRes)
+	}
+
+	// F-07: tool_info
+	infoRes, err := srv.callTool(context.Background(), "tool_info", map[string]interface{}{
+		"tool_name": "ckodex_oskal.get_assurance_state",
+	})
+	if err != nil || infoRes.IsError || !strings.Contains(infoRes.Content[0].Text, `"get_assurance_state"`) {
+		t.Fatalf("tool_info failed: err=%v, out=%+v", err, infoRes)
+	}
+
+	// F-07: get_required_keys_for_tool
+	reqKeysRes, err := srv.callTool(context.Background(), "get_required_keys_for_tool", map[string]interface{}{
+		"tool_name": "get_assurance_state",
+	})
+	if err != nil || reqKeysRes.IsError || !strings.Contains(reqKeysRes.Content[0].Text, `"required_variables"`) {
+		t.Fatalf("get_required_keys_for_tool failed: err=%v, out=%+v", err, reqKeysRes)
+	}
+
+	// F-07: register_manual with manual object and deregister_manual
+	regRes, err := srv.callTool(context.Background(), "register_manual", map[string]interface{}{
+		"manual": map[string]interface{}{
+			"version":        "1.0.0",
+			"utcp_version":   "1.0.1",
+			"manual_version": "1.0.0",
+			"name":           "custom_sec_manual",
+			"tools": []interface{}{
+				map[string]interface{}{
+					"name":        "custom_sec_scan",
+					"description": "Custom scanner",
+					"inputs":      map[string]interface{}{"type": "object"},
+					"outputs":     map[string]interface{}{"type": "object"},
+					"tool_call_template": map[string]interface{}{
+						"name":               "custom_sec_manual",
+						"call_template_type": "cli",
+						"command_name":       "echo",
+					},
+				},
+			},
+		},
+	})
+	if err != nil || regRes.IsError || !strings.Contains(regRes.Content[0].Text, `"registered_tools": 1`) {
+		t.Fatalf("register_manual failed: err=%v, out=%+v", err, regRes)
+	}
+
+	deregRes, err := srv.callTool(context.Background(), "deregister_manual", map[string]interface{}{
+		"manual_name": "custom_sec_manual",
+	})
+	if err != nil || deregRes.IsError || !strings.Contains(deregRes.Content[0].Text, `"success": true`) {
+		t.Fatalf("deregister_manual failed: err=%v, out=%+v", err, deregRes)
+	}
+
+	// F-07: call_tool with "arguments"
+	callBridgeRes, err := srv.callTool(context.Background(), "call_tool", map[string]interface{}{
+		"tool_name": "get_assurance_state",
+		"arguments": map[string]interface{}{
+			"subject": "k8s://prod/payments/Deployment/payments-api",
+		},
+	})
+	if err != nil || !strings.Contains(callBridgeRes.Content[0].Text, `"UNKNOWN"`) {
+		t.Fatalf("call_tool bridge failed: err=%v, out=%+v", err, callBridgeRes)
+	}
+}
+
+func TestMCPServerGovernedBrokerEnforcement(t *testing.T) {
+	inBuf := new(bytes.Buffer)
+	outBuf := new(bytes.Buffer)
+
+	broker := workcell.NewEffectBroker()
+	srv, err := NewServerWithBroker(inBuf, outBuf, "", broker)
+	if err != nil {
+		t.Fatalf("failed to create governed MCP server: %v", err)
+	}
+
+	// Unleased register_manual must fail when broker is configured (F-10)
+	_, err = srv.callTool(context.Background(), "register_manual", map[string]interface{}{
+		"manual": map[string]interface{}{
+			"version":        "1.0.0",
+			"utcp_version":   "1.0.1",
+			"manual_version": "1.0.0",
+			"name":           "unleased_manual",
+			"tools": []interface{}{
+				map[string]interface{}{
+					"name":        "unleased_tool",
+					"description": "Unleased tool",
+					"inputs":      map[string]interface{}{"type": "object"},
+					"outputs":     map[string]interface{}{"type": "object"},
+					"tool_call_template": map[string]interface{}{
+						"name":               "unleased_manual",
+						"call_template_type": "cli",
+						"command_name":       "echo",
+					},
+				},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "lease") {
+		t.Fatalf("expected unleased register_manual to be rejected by lease gate, got: %v", err)
+	}
+
+	// Unleased deregister_manual must fail when broker is configured (F-10)
+	_, err = srv.callTool(context.Background(), "deregister_manual", map[string]interface{}{
+		"manual_name": "ckodex_oskal",
+	})
+	if err == nil || !strings.Contains(err.Error(), "lease") {
+		t.Fatalf("expected unleased deregister_manual to be rejected by lease gate, got: %v", err)
+	}
+
+	// Unleased register_tool_provider must fail when broker is configured (F-10)
+	_, err = srv.callTool(context.Background(), "register_tool_provider", map[string]interface{}{
+		"name":          "ext_prov",
+		"provider_type": "cli",
+		"command_name":  "echo",
+	})
+	if err == nil || !strings.Contains(err.Error(), "lease") {
+		t.Fatalf("expected unleased register_tool_provider to be rejected by lease gate, got: %v", err)
 	}
 }
 
