@@ -63,7 +63,7 @@ func (r *AssuranceStateRepository) persistToDisk() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filePath, data, 0600)
+	return writeFileAtomic(filePath, data, 0600)
 }
 
 // GetState retrieves the latest assurance state and epoch for a subject.

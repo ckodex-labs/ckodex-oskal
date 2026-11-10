@@ -93,10 +93,25 @@ func TestAirgapBundleExportAndImport(t *testing.T) {
 		t.Fatalf("expected 1 imported evaluation, got %d", len(importedBundle.Evaluations))
 	}
 
-	// 3. Verify evidence blob was ingested into targetRepo
+	// 3. Verify evidence blob and receipts were ingested into targetRepo
 	verifiedEnvelopes, err := targetRepo.ListBySubject(ctx, sub)
 	if err != nil || len(verifiedEnvelopes) != 1 {
 		t.Fatalf("expected 1 envelope in targetRepo, got %d (err: %v)", len(verifiedEnvelopes), err)
+	}
+	verifiedReceipt, err := targetRepo.GetReceipt(ctx, ctrl.ID)
+	if err != nil || verifiedReceipt.Signature != receipt.Signature {
+		t.Fatalf("expected receipt %s in targetRepo, got err=%v", ctrl.ID, err)
+	}
+
+	// 3b. Verify non-sha256 blob key is rejected
+	nonShaBundle := *bundle
+	nonShaBundle.Blobs = map[string]string{
+		"md5:abcd": "invalid-scheme",
+	}
+	nonShaBundle.ManifestDigest = nonShaBundle.ComputeManifestDigest()
+	nonShaBytes, _ := json.Marshal(nonShaBundle)
+	if _, err := ImportBundle(ctx, nonShaBytes, storage.NewMemoryEvidenceRepository(), receiptMgr); err == nil {
+		t.Fatal("expected ImportBundle to reject blob key without sha256: prefix")
 	}
 
 	// 4. Verify tampering with bundle manifest is rejected

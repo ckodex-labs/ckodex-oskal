@@ -689,6 +689,14 @@ func (r *Registry) registerManualInternal(name string, manual UTCPManual) error 
 	}
 
 	r.manuals[name] = manual
+	builtInTools := make(map[string]bool)
+	if name != "oskal" {
+		if oskalManual, ok := r.manuals["oskal"]; ok {
+			for _, bt := range oskalManual.Tools {
+				builtInTools[bt.Name] = true
+			}
+		}
+	}
 	for _, t := range manual.Tools {
 		if len(t.Inputs) == 0 && len(t.InputSchema) > 0 {
 			t.Inputs = t.InputSchema
@@ -696,7 +704,12 @@ func (r *Registry) registerManualInternal(name string, manual UTCPManual) error 
 		if len(t.InputSchema) == 0 && len(t.Inputs) > 0 {
 			t.InputSchema = t.Inputs
 		}
-		r.tools[t.Name] = t
+		if name != "" {
+			r.tools[name+"."+t.Name] = t
+		}
+		if name == "oskal" || !builtInTools[t.Name] {
+			r.tools[t.Name] = t
+		}
 	}
 	return nil
 }
@@ -709,6 +722,9 @@ func (r *Registry) RegisterManual(name string, manual UTCPManual) error {
 
 // RegisterManualWithLease validates and registers a UTCPManual gated by the registry's EffectBroker when present.
 func (r *Registry) RegisterManualWithLease(ctx context.Context, name string, manual UTCPManual, leaseID, prevReceiptHash string) error {
+	if strings.EqualFold(strings.TrimSpace(name), "oskal") {
+		return errors.New("cannot overwrite reserved built-in 'oskal' manual")
+	}
 	if r.broker != nil {
 		if leaseID == "" {
 			leaseID, prevReceiptHash = leaseFromContext(ctx)
@@ -719,6 +735,26 @@ func (r *Registry) RegisterManualWithLease(ctx context.Context, name string, man
 		}
 	}
 	return r.registerManualInternal(name, manual)
+}
+
+func isBlockedMetadataOrLinkLocalIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	for _, blocked := range []string{
+		"169.254.169.254",
+		"100.100.100.200",
+		"168.63.129.16",
+		"fd00:ec2::254",
+	} {
+		if bIP := net.ParseIP(blocked); bIP != nil && ip.Equal(bIP) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateHTTPProviderURL(rawURL string) error {
@@ -735,20 +771,52 @@ func validateHTTPProviderURL(rawURL string) error {
 		return fmt.Errorf("provider URL '%s' has empty hostname", rawURL)
 	}
 	// Block cloud instance metadata and link-local / unspecified SSRF targets (Constitution Section 25).
-	if host == "metadata.google.internal" || host == "metadata" || host == "100.100.100.200" {
+	if host == "metadata.google.internal" || host == "metadata" || host == "100.100.100.200" || host == "169.254.169.254" || host == "168.63.129.16" || host == "fd00:ec2::254" {
 		return fmt.Errorf("SSRF_BLOCKED: provider URL '%s' targets restricted cloud metadata endpoint", rawURL)
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return fmt.Errorf("SSRF_BLOCKED: provider URL '%s' targets forbidden link-local or unspecified IP %s", rawURL, ip.String())
+		if isBlockedMetadataOrLinkLocalIP(ip) {
+			return fmt.Errorf("SSRF_BLOCKED: provider URL '%s' targets forbidden metadata, link-local, or unspecified IP %s", rawURL, ip.String())
 		}
 	}
 	return nil
 }
 
 func newSafeHTTPClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{
+		Timeout:   timeout,
+		KeepAlive: 30 * time.Second,
+	}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			if ip := net.ParseIP(host); ip != nil {
+				if isBlockedMetadataOrLinkLocalIP(ip) {
+					return nil, fmt.Errorf("SSRF_BLOCKED: target IP %s is blocked", ip.String())
+				}
+				return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			}
+			addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			if len(addrs) == 0 {
+				return nil, fmt.Errorf("no IP addresses resolved for host %s", host)
+			}
+			for _, a := range addrs {
+				if isBlockedMetadataOrLinkLocalIP(a.IP) {
+					return nil, fmt.Errorf("SSRF_BLOCKED: host %s resolved to blocked IP %s", host, a.IP.String())
+				}
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0].IP.String(), port))
+		},
+	}
 	return &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 3 {
 				return errors.New("exceeded maximum of 3 HTTP redirects")
@@ -817,6 +885,9 @@ func doHTTPWithRetry(ctx context.Context, client *http.Client, buildReq func() (
 func (r *Registry) RegisterToolProvider(ctx context.Context, cfg ProviderConfig) error {
 	if strings.TrimSpace(cfg.Name) == "" {
 		return errors.New("provider config requires a non-empty 'name'")
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Name), "oskal") {
+		return errors.New("cannot overwrite reserved built-in 'oskal' manual")
 	}
 	pType := strings.ToLower(strings.TrimSpace(cfg.ProviderType))
 	if pType == "" {
@@ -909,6 +980,9 @@ func (r *Registry) DeregisterManual(ctx context.Context, name, leaseID, prevRece
 	if name == "" {
 		return errors.New("manual_name is required")
 	}
+	if strings.EqualFold(name, "oskal") {
+		return errors.New("cannot deregister reserved built-in 'oskal' manual")
+	}
 	if r.broker != nil {
 		if leaseID == "" {
 			leaseID, prevReceiptHash = leaseFromContext(ctx)
@@ -924,6 +998,9 @@ func (r *Registry) DeregisterManual(ctx context.Context, name, leaseID, prevRece
 
 // DeregisterToolProvider removes a provider and its manual from the registry.
 func (r *Registry) DeregisterToolProvider(name string) {
+	if strings.EqualFold(strings.TrimSpace(name), "oskal") {
+		return
+	}
 	if r.broker != nil {
 		_ = r.DeregisterManual(context.Background(), name, "", "")
 		return
@@ -932,12 +1009,24 @@ func (r *Registry) DeregisterToolProvider(name string) {
 }
 
 func (r *Registry) deregisterUnlocked(name string) {
+	if strings.EqualFold(strings.TrimSpace(name), "oskal") {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	builtInTools := make(map[string]bool)
+	if oskalManual, ok := r.manuals["oskal"]; ok {
+		for _, bt := range oskalManual.Tools {
+			builtInTools[bt.Name] = true
+		}
+	}
 	delete(r.providers, name)
 	if m, ok := r.manuals[name]; ok {
 		for _, t := range m.Tools {
-			delete(r.tools, t.Name)
+			delete(r.tools, name+"."+t.Name)
+			if !builtInTools[t.Name] {
+				delete(r.tools, t.Name)
+			}
 		}
 		delete(r.manuals, name)
 	}
@@ -1027,9 +1116,19 @@ func (r *Registry) ListTools() []Tool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	seen := make(map[string]bool, len(r.tools))
 	out := make([]Tool, 0, len(r.tools))
+	for k, t := range r.tools {
+		if !strings.Contains(k, ".") && !seen[t.Name] {
+			seen[t.Name] = true
+			out = append(out, t)
+		}
+	}
 	for _, t := range r.tools {
-		out = append(out, t)
+		if !seen[t.Name] {
+			seen[t.Name] = true
+			out = append(out, t)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].Name < out[j].Name
@@ -1184,14 +1283,6 @@ func (r *Registry) loadSubjectEnvelopes(ctx context.Context, sub assurance.Subje
 	return envelopes
 }
 
-func isEnvelopeViolation(obsType string) bool {
-	lower := strings.ToLower(strings.TrimSpace(obsType))
-	return strings.Contains(lower, "violation") ||
-		strings.Contains(lower, "denied") ||
-		strings.Contains(lower, "fail") ||
-		strings.Contains(lower, "adverse")
-}
-
 func countEpochDivergences(envelopes []assurance.EvidenceEnvelope) int {
 	var basePol, baseImp, baseAuth string
 	polDrift, impDrift, authDrift := false, false, false
@@ -1244,7 +1335,7 @@ func (r *Registry) buildEvaluation(sub assurance.SubjectRef, ctrl assurance.Cont
 		if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
 			continue
 		}
-		if isEnvelopeViolation(env.ObservationType) {
+		if assurance.IsAdverseObservationType(env.ObservationType) {
 			isViolation = true
 		}
 		if now.Sub(env.CapturedAt) > DefaultFreshnessWindow {
@@ -1594,6 +1685,9 @@ func executeRemoteHTTPTool(ctx context.Context, toolName string, tmpl CallTempla
 		} else {
 			remainingArgs[k] = v
 		}
+	}
+	if err := validateHTTPProviderURL(targetURL); err != nil {
+		return nil, err
 	}
 
 	method := strings.ToUpper(strings.TrimSpace(tmpl.HTTPMethod))

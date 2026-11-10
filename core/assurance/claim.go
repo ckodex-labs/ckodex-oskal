@@ -63,6 +63,7 @@ type Finding struct {
 type ControlException struct {
 	ID                   string         `json:"id"`
 	Subject              SubjectRef     `json:"subject"`
+	Control              ControlRef     `json:"control,omitempty"`
 	Controls             []ControlRef   `json:"controls"`
 	Justification        string         `json:"justification"`
 	RequiredApprovers    []AuthorityRef `json:"requiredApprovers"`
@@ -71,18 +72,86 @@ type ControlException struct {
 	CompensatingControls []ControlRef   `json:"compensatingControls"`
 }
 
+// Validate checks structural and invariant constraints on ControlException (Invariant I-05).
+func (e ControlException) Validate() error {
+	if strings.TrimSpace(e.ID) == "" {
+		return fmt.Errorf("control exception id cannot be empty")
+	}
+	if err := e.Subject.Validate(); err != nil {
+		return fmt.Errorf("invalid exception subject: %w", err)
+	}
+	if len(e.Controls) == 0 {
+		if err := e.Control.Validate(); err != nil {
+			return fmt.Errorf("invalid exception control: %w", err)
+		}
+	} else {
+		for _, c := range e.Controls {
+			if err := c.Validate(); err != nil {
+				return fmt.Errorf("invalid exception control: %w", err)
+			}
+		}
+		if e.Control.Namespace != "" || e.Control.ID != "" {
+			if err := e.Control.Validate(); err != nil {
+				return fmt.Errorf("invalid exception control: %w", err)
+			}
+		}
+	}
+	if strings.TrimSpace(e.Justification) == "" {
+		return fmt.Errorf("control exception justification cannot be empty")
+	}
+	if len(e.RequiredApprovers) == 0 {
+		return fmt.Errorf("control exception requires at least one approver")
+	}
+	for _, app := range e.RequiredApprovers {
+		if err := app.Validate(); err != nil {
+			return fmt.Errorf("invalid exception approver: %w", err)
+		}
+	}
+	if e.NotBefore.IsZero() || e.NotAfter.IsZero() || !e.NotAfter.After(e.NotBefore) {
+		return fmt.Errorf("control exception requires valid bounded [NotBefore, NotAfter] window")
+	}
+	for _, cc := range e.CompensatingControls {
+		if err := cc.Validate(); err != nil {
+			return fmt.Errorf("invalid compensating control: %w", err)
+		}
+	}
+	return nil
+}
+
 // IsValidAt checks whether this exception is temporally valid (never permanent).
 func (e ControlException) IsValidAt(t time.Time) bool {
-	if e.NotAfter.IsZero() || e.NotBefore.IsZero() {
+	if e.NotAfter.IsZero() || e.NotBefore.IsZero() || !e.NotAfter.After(e.NotBefore) {
 		return false // Mandatory time boundaries
+	}
+	if err := e.Subject.Validate(); err != nil {
+		return false
+	}
+	if len(e.Controls) == 0 {
+		if err := e.Control.Validate(); err != nil {
+			return false
+		}
+	} else {
+		for _, c := range e.Controls {
+			if err := c.Validate(); err != nil {
+				return false
+			}
+		}
 	}
 	return !t.Before(e.NotBefore) && !t.After(e.NotAfter)
 }
 
 // AppliesTo checks if the exception covers a specific subject and control.
 func (e ControlException) AppliesTo(sub SubjectRef, ctrl ControlRef) bool {
+	if e.Subject.Validate() != nil || sub.Validate() != nil || ctrl.Validate() != nil {
+		return false
+	}
 	if e.Subject.URI() != sub.URI() {
 		return false
+	}
+	if e.Control.Namespace != "" && e.Control.ID != "" {
+		if e.Control.Canonical() == ctrl.Canonical() || (e.Control.Namespace == ctrl.Namespace && e.Control.ID == ctrl.ID) {
+			return true
+		}
 	}
 	for _, c := range e.Controls {
 		if c.Canonical() == ctrl.Canonical() || (c.Namespace == ctrl.Namespace && c.ID == ctrl.ID) {

@@ -92,7 +92,7 @@ func TestMCPServerLifecycleAndTools(t *testing.T) {
 		t.Fatalf("init error: %+v", resp1)
 	}
 
-	// Verify line 3 (tools/list has 16 tools: 7 native OSKAL + 9 utcp-mcp bridge tools)
+	// Verify line 3 (tools/list has 17 tools: 8 native OSKAL + 9 utcp-mcp bridge tools)
 	var resp3 struct {
 		Result struct {
 			Tools []struct {
@@ -103,8 +103,8 @@ func TestMCPServerLifecycleAndTools(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[2]), &resp3); err != nil {
 		t.Fatalf("failed to parse tools/list resp: %v", err)
 	}
-	if len(resp3.Result.Tools) != 16 {
-		t.Fatalf("expected 16 tools (7 native + 9 utcp-mcp bridge), got %d", len(resp3.Result.Tools))
+	if len(resp3.Result.Tools) != 17 {
+		t.Fatalf("expected 17 tools (8 native + 9 utcp-mcp bridge), got %d", len(resp3.Result.Tools))
 	}
 
 	// Verify line 4 (validate_oscal valid=true)

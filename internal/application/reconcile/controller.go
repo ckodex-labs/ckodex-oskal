@@ -255,7 +255,17 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			if err != nil {
 				log.Error(err, "claim evaluation error", "control", cRef.Canonical())
 				overallState = assurance.AssuranceStateFailed
-				break
+				evalResult = assurance.ClaimEvaluation{
+					ID:          fmt.Sprintf("eval-%s", claim.ID),
+					Control:     cRef,
+					Subject:     subRef,
+					State:       assurance.AssuranceStateFailed,
+					Epoch:       currentEpoch,
+					EvaluatedAt: time.Now().UTC(),
+				}
+				evidenceRoot = ""
+				allEvaluations = append(allEvaluations, evalResult)
+				continue
 			}
 
 			evalResult = eval
@@ -276,6 +286,9 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			}
 		}
 		targetState = overallState
+		if targetState != assurance.AssuranceStateAssured {
+			evidenceRoot = ""
+		}
 	}
 
 	// Check active ControlExceptions in namespace (Invariant I-05: Derogation does not erase failure)
@@ -555,11 +568,19 @@ func (e *ContractEvaluator) Evaluate(ctx context.Context, claim assurance.Claim,
 	case assurance.AssuranceStateAssured, assurance.AssuranceStateVerified:
 		vec.Applicability = assurance.ValencePositive
 		vec.Conformance = assurance.ValencePositive
-		vec.Completeness = assurance.ValencePositive
+		vec.Provenance = assurance.ValencePositive
+		vec.Integrity = assurance.ValencePositive
+		vec.Authority = assurance.ValencePositive
+		vec.Identity = assurance.ValencePositive
+		vec.Runtime = assurance.ValencePositive
 		vec.Freshness = assurance.ValencePositive
+		vec.Completeness = assurance.ValencePositive
 	case assurance.AssuranceStateFailed:
 		vec.Conformance = assurance.ValenceNegative
 		vec.Coherence = assurance.CoherenceDecoherent
+	case assurance.AssuranceStateStale:
+		vec.Freshness = assurance.ValenceMixed
+		vec.Coherence = assurance.CoherencePartiallyCoherent
 	}
 
 	return assurance.ClaimEvaluation{

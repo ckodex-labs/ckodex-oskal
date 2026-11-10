@@ -55,6 +55,12 @@ type ReceiptSigner interface {
 	VerifyReceipt(ctx context.Context, receipt assurance.ControlReceipt) (bool, error)
 }
 
+// ReceiptRepository stores and retrieves signed control evaluation receipts (Section 41).
+type ReceiptRepository interface {
+	PutReceipt(ctx context.Context, receipt assurance.ControlReceipt) (string, error)
+	GetReceipt(ctx context.Context, idOrDigest string) (assurance.ControlReceipt, error)
+}
+
 // OscalProjector projects internal assurance claim evaluations into standard OSCAL artifacts (ADR-005, Section 43-47).
 type OscalProjector interface {
 	ProjectAssessmentResults(ctx context.Context, subject assurance.SubjectRef, evaluations []assurance.ClaimEvaluation, findings []assurance.Finding) ([]byte, error)

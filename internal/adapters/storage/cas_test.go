@@ -427,3 +427,79 @@ func TestEvidenceRepository_NamespacePrefixAndDiskTamper(t *testing.T) {
 		t.Fatal("expected oversized payload (> MaxPayloadBytes) to be rejected")
 	}
 }
+
+func TestEvidenceRepository_PathTraversalAndBinaryBlobLifecycle(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	repo, err := NewFilesystemEvidenceRepository(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+
+	// 1. Path traversal and malformed digest rejection in Get
+	traversalRefs := []assurance.EvidenceRef{
+		{Digest: "sha256:../../../../etc/passwd"},
+		{Digest: "sha256:../secret"},
+		{Digest: "md5:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+		{Digest: "sha256:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"},
+	}
+	for _, badRef := range traversalRefs {
+		if _, err := repo.Get(ctx, badRef); err == nil {
+			t.Fatalf("expected Get to reject invalid/traversal digest %q", badRef.Digest)
+		}
+	}
+
+	// 2. Secondary .bin payload reachable after restart and disk fallback
+	rawPayload := []byte("secondary-binary-evidence-artifact-payload")
+	rawDigest := assurance.ComputeDigest(rawPayload)
+	envOld := createTestEnvelope("ev-bin-old", "payments/Pod/old-bin-pod", "kubernetes.admission")
+	envOld.CapturedAt = time.Now().UTC().Add(-3 * time.Hour)
+	envOld.Artifact.Digest = rawDigest
+
+	if _, err := repo.Put(ctx, envOld, bytes.NewReader(rawPayload)); err != nil {
+		t.Fatalf("Put with binary payload failed: %v", err)
+	}
+
+	// Reload repo from disk and verify secondary .bin blob is loaded and readable via Get
+	reloaded, err := NewFilesystemEvidenceRepository(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to reload repo: %v", err)
+	}
+	rc, err := reloaded.Get(ctx, assurance.EvidenceRef{Digest: rawDigest})
+	if err != nil {
+		t.Fatalf("expected secondary .bin blob to be readable after restart, got: %v", err)
+	}
+	_ = rc.Close()
+
+	// Also verify disk fallback when in-memory r.blobs entry is cleared
+	reloaded.mu.Lock()
+	delete(reloaded.blobs, rawDigest)
+	reloaded.mu.Unlock()
+	rcFallback, err := reloaded.Get(ctx, assurance.EvidenceRef{Digest: rawDigest})
+	if err != nil {
+		t.Fatalf("expected Get fallback to .bin on disk to succeed, got: %v", err)
+	}
+	_ = rcFallback.Close()
+
+	// Reload again so r.blobs has rawDigest, and write an expired flat ev-bin-old.json in baseDir
+	reloaded2, err := NewFilesystemEvidenceRepository(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to reload repo2: %v", err)
+	}
+	flatFile := filepath.Join(tmpDir, "ev-bin-old.json")
+	if err := os.WriteFile(flatFile, []byte(`{"id":"ev-bin-old","capturedAt":"2020-01-01T00:00:00Z"}`), 0600); err != nil {
+		t.Fatalf("failed to write flat file: %v", err)
+	}
+
+	// 3. Prune removes expired envelope, its unreferenced .bin artifact, and expired flat file
+	if _, err := reloaded2.Prune(1*time.Hour, false); err != nil {
+		t.Fatalf("Prune failed: %v", err)
+	}
+	if _, err := reloaded2.Get(ctx, assurance.EvidenceRef{Digest: rawDigest}); err == nil {
+		t.Fatal("expected pruned secondary .bin blob to be removed from memory and disk")
+	}
+	if _, err := os.Stat(flatFile); !os.IsNotExist(err) {
+		t.Fatalf("expected expired flat file %s to be removed by Prune", flatFile)
+	}
+}

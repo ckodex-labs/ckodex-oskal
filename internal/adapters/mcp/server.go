@@ -180,7 +180,7 @@ func (s *Server) handleRequest(ctx context.Context, req jsonRPCRequest) {
 			},
 			ServerInfo: mcpImplementation{
 				Name:    "oskal-mcp",
-				Version: "v0.3.0",
+				Version: "v1.0.0",
 			},
 		}
 		s.sendResult(req.ID, res)
@@ -358,6 +358,25 @@ func (s *Server) listTools() mcpToolsListResult {
 				InputSchema: map[string]interface{}{
 					"type":       "object",
 					"properties": map[string]interface{}{},
+				},
+			},
+			{
+				Name:        "inspect_subject",
+				Description: "Inspect all 4 Truth Channels (Telemetry, Execution, Decision, Evidence) for a workload subject (Section 13).",
+				InputSchema: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"subject": map[string]interface{}{
+							"type":        "string",
+							"description": "Subject URI (e.g. k8s://prod/payments/Deployment/payments-api)",
+						},
+						"control": map[string]interface{}{
+							"type":        "string",
+							"description": "Control identifier (e.g. nist-sp-800-53:AC-6)",
+							"default":     "nist-sp-800-53:AC-6",
+						},
+					},
+					"required": []string{"subject"},
 				},
 			},
 			{
@@ -587,14 +606,6 @@ func (s *Server) loadSubjectEnvelopes(ctx context.Context, sub assurance.Subject
 	return envelopes
 }
 
-func isMCPEnvelopeViolation(obsType string) bool {
-	lower := strings.ToLower(strings.TrimSpace(obsType))
-	return strings.Contains(lower, "violation") ||
-		strings.Contains(lower, "denied") ||
-		strings.Contains(lower, "fail") ||
-		strings.Contains(lower, "adverse")
-}
-
 func detectMCPEpochDrift(envelopes []assurance.EvidenceEnvelope) (bool, bool, bool) {
 	var basePol, baseImp, baseAuth string
 	polDrift, impDrift, authDrift := false, false, false
@@ -637,7 +648,7 @@ func (s *Server) buildEvaluation(sub assurance.SubjectRef, ctrl assurance.Contro
 		if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
 			continue
 		}
-		if isMCPEnvelopeViolation(env.ObservationType) {
+		if assurance.IsAdverseObservationType(env.ObservationType) {
 			isViolation = true
 		}
 		if now.Sub(env.CapturedAt) > utcp.DefaultFreshnessWindow {
@@ -986,6 +997,9 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]inte
 			Content: []mcpToolContentItem{{Type: "text", Text: string(buf)}},
 		}, nil
 
+	case "inspect_subject":
+		return s.toolInspectSubject(ctx, args)
+
 	case "utcp_get_manual":
 		transport, _ := args["transport"].(string)
 		opts := utcp.DefaultManualOptions()
@@ -1229,6 +1243,33 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]inte
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+func (s *Server) toolInspectSubject(ctx context.Context, args map[string]interface{}) (*mcpCallToolResult, error) {
+	subRaw, _ := args["subject"].(string)
+	if subRaw == "" {
+		return nil, fmt.Errorf("subject argument is required")
+	}
+	sub := parseSubjectRef(subRaw)
+	ctrlID := "AC-6"
+	ctrlNS := "nist-sp-800-53"
+	if rawCtrl, ok := args["control"].(string); ok && rawCtrl != "" {
+		parts := strings.SplitN(rawCtrl, ":", 2)
+		if len(parts) == 2 {
+			ctrlNS = parts[0]
+			ctrlID = parts[1]
+		} else {
+			ctrlID = rawCtrl
+		}
+	}
+	ctrl := assurance.ControlRef{Namespace: ctrlNS, ID: ctrlID}
+	envelopes := s.loadSubjectEnvelopes(ctx, sub)
+	eval := s.buildEvaluation(sub, ctrl, envelopes)
+	report := diagnostics.InspectSubject(ctx, sub, eval, envelopes)
+	buf, _ := json.MarshalIndent(report, "", "  ")
+	return &mcpCallToolResult{
+		Content: []mcpToolContentItem{{Type: "text", Text: string(buf)}},
+	}, nil
 }
 
 func parseSubjectRef(raw string) assurance.SubjectRef {

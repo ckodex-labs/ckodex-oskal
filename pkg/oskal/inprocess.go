@@ -21,11 +21,7 @@ func isObservationViolation(obs *evidencev1.Observation) bool {
 	if obs == nil {
 		return false
 	}
-	lowerType := strings.ToLower(strings.TrimSpace(obs.Type))
-	if strings.Contains(lowerType, "violation") ||
-		strings.Contains(lowerType, "denied") ||
-		strings.Contains(lowerType, "fail") ||
-		strings.Contains(lowerType, "adverse") {
+	if assurance.IsAdverseObservationType(obs.Type) {
 		return true
 	}
 	for k, v := range obs.Attributes {

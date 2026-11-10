@@ -31,6 +31,17 @@ func (s SubjectRef) Digest() string {
 	return "sha256:" + hex.EncodeToString(h[:])
 }
 
+// Validate checks that SubjectRef contains non-empty scheme and ID.
+func (s SubjectRef) Validate() error {
+	if strings.TrimSpace(s.Scheme) == "" {
+		return fmt.Errorf("subject scheme cannot be empty")
+	}
+	if strings.TrimSpace(s.ID) == "" {
+		return fmt.Errorf("subject id cannot be empty")
+	}
+	return nil
+}
+
 // ControlRef identifies a standard or canonical security control.
 type ControlRef struct {
 	Namespace string `json:"namespace"`
@@ -44,6 +55,17 @@ func (c ControlRef) Canonical() string {
 		return fmt.Sprintf("%s:%s@%s", c.Namespace, c.ID, c.Version)
 	}
 	return fmt.Sprintf("%s:%s", c.Namespace, c.ID)
+}
+
+// Validate checks that ControlRef contains non-empty namespace and ID.
+func (c ControlRef) Validate() error {
+	if strings.TrimSpace(c.Namespace) == "" {
+		return fmt.Errorf("control namespace cannot be empty")
+	}
+	if strings.TrimSpace(c.ID) == "" {
+		return fmt.Errorf("control id cannot be empty")
+	}
+	return nil
 }
 
 // ImplementationPurpose defines control realization purpose.
@@ -78,6 +100,17 @@ func (a AuthorityRef) Canonical() string {
 		return a.Subject
 	}
 	return fmt.Sprintf("%s://%s", a.Scheme, a.Subject)
+}
+
+// Validate checks that AuthorityRef contains non-empty scheme and subject.
+func (a AuthorityRef) Validate() error {
+	if strings.TrimSpace(a.Scheme) == "" {
+		return fmt.Errorf("authority scheme cannot be empty")
+	}
+	if strings.TrimSpace(a.Subject) == "" {
+		return fmt.Errorf("authority subject cannot be empty")
+	}
+	return nil
 }
 
 // EvidenceRef points to an immutable stored evidence artifact.
@@ -275,12 +308,30 @@ func (c EvidenceContract) Evaluate(envelopes []EvidenceEnvelope, currentEpoch As
 
 	hasAdverse := false
 	for _, env := range envelopes {
+		if !IsAdverseObservationType(env.ObservationType) {
+			continue
+		}
 		if env.CapturedAt.IsZero() || env.CapturedAt.After(now) {
 			continue
 		}
-		if IsAdverseObservationType(env.ObservationType) {
-			hasAdverse = true
+		if !env.Epoch.Matches(currentEpoch) {
+			continue
 		}
+		producerURI := strings.TrimSpace(env.Producer.Canonical())
+		if producerURI == "" || strings.TrimSpace(env.Artifact.Digest) == "" {
+			continue
+		}
+		accepted := len(c.Requirements) == 0
+		for _, req := range c.Requirements {
+			if req.IsProducerAccepted(producerURI) {
+				accepted = true
+				break
+			}
+		}
+		if !accepted {
+			continue
+		}
+		hasAdverse = true
 	}
 
 	for _, req := range c.Requirements {

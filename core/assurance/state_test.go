@@ -160,4 +160,23 @@ func TestVectorStateResolution(t *testing.T) {
 	if s := vIncomplete.Resolve(policy); s != AssuranceStateUnknown {
 		t.Fatalf("expected incomplete evidence to resolve to UNKNOWN, got %s", s)
 	}
+
+	// QA-06: Negative provenance -> FAILED
+	vNegProvenance := vAllPositive
+	vNegProvenance.Provenance = ValenceNegative
+	if s := vNegProvenance.Resolve(policy); s != AssuranceStateFailed {
+		t.Fatalf("expected negative provenance to resolve to FAILED, got %s", s)
+	}
+
+	// QA-06: Partially coherent or reconciling with all positive valence -> VERIFIED, not ASSURED
+	vPartial := vAllPositive
+	vPartial.Coherence = CoherencePartiallyCoherent
+	if s := vPartial.Resolve(policy); s != AssuranceStateVerified {
+		t.Fatalf("expected PARTIALLY_COHERENT to resolve to VERIFIED, got %s", s)
+	}
+	vReconciling := vAllPositive
+	vReconciling.Coherence = CoherenceReconciling
+	if s := vReconciling.Resolve(policy); s != AssuranceStateVerified {
+		t.Fatalf("expected RECONCILING to resolve to VERIFIED, got %s", s)
+	}
 }

@@ -114,14 +114,6 @@ func resolveSubjectFromArgsOrFlags(args []string, kind, name, namespace string) 
 
 const defaultMaxEvidenceAge = 15 * time.Minute
 
-func isLocalViolationType(obsType string) bool {
-	lower := strings.ToLower(strings.TrimSpace(obsType))
-	return strings.Contains(lower, "violation") ||
-		strings.Contains(lower, "denied") ||
-		strings.Contains(lower, "fail") ||
-		strings.Contains(lower, "adverse")
-}
-
 func evaluateLocalEnvelopes(
 	sub assurance.SubjectRef,
 	ctrl assurance.ControlRef,
@@ -135,7 +127,7 @@ func evaluateLocalEnvelopes(
 		if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
 			continue
 		}
-		if isLocalViolationType(env.ObservationType) {
+		if assurance.IsAdverseObservationType(env.ObservationType) {
 			isViolation = true
 		}
 		if now.Sub(env.CapturedAt) > defaultMaxEvidenceAge {
@@ -627,15 +619,45 @@ and projects defensible results into standard OSCAL artifacts.`,
 				now := time.Now().UTC()
 				ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
 				_, _, validEnvelopes := evaluateLocalEnvelopes(sub, ctrl, envelopes, now)
-				if len(validEnvelopes) == 0 {
+				if len(validEnvelopes) == 0 && serverAddr == "" {
 					fmt.Printf("No verified evidence envelopes found for %s in %s\n", sub.URI(), evidenceDir)
 					return nil
 				}
+				if len(validEnvelopes) > 0 {
+					fmt.Printf("VERIFIED EVIDENCE ENVELOPES FOR %s (%d total):\n\n", sub.URI(), len(validEnvelopes))
+					for i, env := range validEnvelopes {
+						fmt.Printf("%d. [%s]\n   ID:       %s\n   Producer: %s\n   Digest:   %s\n   URI:      %s\n   Captured: %s\n\n",
+							i+1, env.ObservationType, env.ID, env.Producer.Canonical(), env.Artifact.Digest, env.Artifact.URI, env.CapturedAt.Format(time.RFC3339))
+					}
+					return nil
+				}
+			}
 
-				fmt.Printf("VERIFIED EVIDENCE ENVELOPES FOR %s (%d total):\n\n", sub.URI(), len(validEnvelopes))
-				for i, env := range validEnvelopes {
-					fmt.Printf("%d. [%s]\n   ID:       %s\n   Producer: %s\n   Digest:   %s\n   URI:      %s\n   Captured: %s\n\n",
-						i+1, env.ObservationType, env.ID, env.Producer.Canonical(), env.Artifact.Digest, env.Artifact.URI, env.CapturedAt.Format(time.RFC3339))
+			if serverAddr != "" {
+				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+				defer cancel()
+
+				client, conn, err := getGRPCClient(ctx, serverAddr)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = conn.Close() }()
+
+				resp, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
+					Subject: &commonv1.SubjectRef{Scheme: sub.Scheme, Id: sub.ID},
+					Control: &controlv1.ControlRef{Namespace: "nist-sp-800-53", Id: "AC-6"},
+				})
+				if err != nil {
+					return fmt.Errorf("gRPC ExplainClaim failed: %w", err)
+				}
+				if len(resp.Evidence) == 0 {
+					fmt.Printf("No verified evidence envelopes found for %s on server %s\n", sub.URI(), serverAddr)
+					return nil
+				}
+				fmt.Printf("VERIFIED EVIDENCE ENVELOPES FOR %s (%d total):\n\n", sub.URI(), len(resp.Evidence))
+				for i, ev := range resp.Evidence {
+					fmt.Printf("%d. [%s]\n   Producer: %s\n   Digest:   %s\n\n",
+						i+1, ev.MediaType, ev.Uri, ev.Digest)
 				}
 				return nil
 			}
@@ -714,6 +736,42 @@ and projects defensible results into standard OSCAL artifacts.`,
 						fmt.Printf("SEMANTIC DRIFT:         0 dimensions drifted\n")
 						fmt.Printf("ASSURANCE STATUS:       ASSURED (no invalidation)\n")
 					}
+				}
+				return nil
+			}
+
+			if serverAddr != "" && evidenceDir == "" {
+				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+				defer cancel()
+
+				client, conn, err := getGRPCClient(ctx, serverAddr)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = conn.Close() }()
+
+				resp, err := client.GetAssuranceState(ctx, &servicesv1.GetAssuranceStateRequest{
+					Subject: &commonv1.SubjectRef{Scheme: sub.Scheme, Id: sub.ID},
+				})
+				if err != nil {
+					return fmt.Errorf("gRPC GetAssuranceState failed: %w", err)
+				}
+				fmt.Printf("DRIFT ANALYSIS FOR %s:\n\n", sub.URI())
+				switch resp.State {
+				case commonv1.AssuranceState_ASSURANCE_STATE_ASSURED, commonv1.AssuranceState_ASSURANCE_STATE_VERIFIED:
+					fmt.Printf("SUBJECT STATUS:         IN_SYNC\n")
+					fmt.Printf("SEMANTIC DRIFT:         0 dimensions drifted\n")
+					fmt.Printf("ASSURANCE STATUS:       ASSURED (no invalidation)\n")
+				case commonv1.AssuranceState_ASSURANCE_STATE_FAILED:
+					fmt.Printf("SUBJECT STATUS:         DECOHERENT\n")
+					fmt.Printf("SEMANTIC DRIFT:         adverse or violation evidence observed\n")
+					fmt.Printf("ASSURANCE STATUS:       FAILED\n")
+				case commonv1.AssuranceState_ASSURANCE_STATE_STALE:
+					fmt.Printf("SUBJECT STATUS:         DRIFT_DETECTED\n")
+					fmt.Printf("FRESHNESS:              STALE (evidence expired)\n")
+					fmt.Printf("ASSURANCE STATUS:       STALE\n")
+				default:
+					fmt.Printf("STATUS:                 UNKNOWN (no baseline evidence found on server %s)\n", serverAddr)
 				}
 				return nil
 			}
@@ -929,6 +987,13 @@ and projects defensible results into standard OSCAL artifacts.`,
 			if err := os.MkdirAll(targetDir, 0755); err != nil {
 				return fmt.Errorf("failed to create evidence directory: %w", err)
 			}
+			casRepo, err := storage.NewFilesystemEvidenceRepository(targetDir)
+			if err != nil {
+				return fmt.Errorf("failed to initialize CAS evidence repository: %w", err)
+			}
+			if _, err := casRepo.Put(cmd.Context(), env, bytes.NewReader(data)); err != nil {
+				return fmt.Errorf("failed to store evidence envelope in CAS: %w", err)
+			}
 			outPath := filepath.Join(targetDir, fmt.Sprintf("%s.json", env.ID))
 			envBytes, err := json.MarshalIndent(env, "", "  ")
 			if err != nil {
@@ -955,6 +1020,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 			if err != nil {
 				return fmt.Errorf("failed to issue control receipt: %w", err)
 			}
+			_, _ = casRepo.PutReceipt(cmd.Context(), rcpt)
 			rcptBytes, err := json.MarshalIndent(rcpt, "", "  ")
 			if err != nil {
 				return fmt.Errorf("failed to marshal control receipt: %w", err)
@@ -1621,6 +1687,40 @@ for a governed workload subject without collapsing them into generic logs.`,
 			if evidenceDir != "" {
 				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
 			}
+			if len(envelopes) == 0 && serverAddr != "" {
+				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+				defer cancel()
+				if client, conn, err := getGRPCClient(ctx, serverAddr); err == nil {
+					defer func() { _ = conn.Close() }()
+					if resp, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
+						Subject: &commonv1.SubjectRef{Scheme: sub.Scheme, Id: sub.ID},
+						Control: &controlv1.ControlRef{Namespace: ctrlNS, Id: ctrlID},
+					}); err == nil && len(resp.Evidence) > 0 {
+						now := time.Now().UTC()
+						for i, ev := range resp.Evidence {
+							obsType := ev.MediaType
+							if obsType == "" {
+								obsType = "admission"
+							}
+							envelopes = append(envelopes, assurance.EvidenceEnvelope{
+								ID:              fmt.Sprintf("ev-remote-%d", i+1),
+								Subject:         sub,
+								ObservationType: obsType,
+								CapturedAt:      now,
+								Producer:        assurance.AuthorityRef{Scheme: "spiffe", Subject: ev.Uri},
+								Artifact: assurance.EvidenceRef{
+									URI:       ev.Uri,
+									Digest:    ev.Digest,
+									MediaType: ev.MediaType,
+								},
+								Epoch: assurance.AssuranceEpoch{
+									SubjectDigest: assurance.ComputeStringDigest(sub.URI()),
+								},
+							})
+						}
+					}
+				}
+			}
 
 			now := time.Now().UTC()
 			eval, _, validEnvelopes := evaluateLocalEnvelopes(sub, ctrl, envelopes, now)
@@ -1995,6 +2095,10 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 		leaseID := ""
 		prevReceiptHash := ""
 
+		explicitServer := false
+		explicitEvidenceDir := false
+		explicitConfig := false
+
 		for i := 0; i < len(rawArgs); i++ {
 			tok := rawArgs[i]
 			if tok == "-h" || tok == "--help" {
@@ -2013,7 +2117,7 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 				key = trimmed[:eqIdx]
 				val = trimmed[eqIdx+1:]
 				hasInlineVal = true
-			} else if i+1 < len(rawArgs) && !strings.HasPrefix(rawArgs[i+1], "--") {
+			} else if i+1 < len(rawArgs) && (!strings.HasPrefix(rawArgs[i+1], "-") || rawArgs[i+1] == "-") {
 				val = rawArgs[i+1]
 				i++
 			} else {
@@ -2025,10 +2129,13 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 				explicitArgsJSON = val
 			case "evidence-dir":
 				evidenceDir = val
+				explicitEvidenceDir = true
 			case "server":
 				serverAddr = val
+				explicitServer = true
 			case "config":
 				configFileFlag = val
+				explicitConfig = true
 			case "tls-ca-file":
 				tlsCAFile = val
 			case "lease-id", "lease_id":
@@ -2053,6 +2160,19 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 						flagArgs[underKey] = decoded
 					}
 				}
+			}
+		}
+
+		if explicitConfig && configFileFlag != "" {
+			cfg, _, err := config.LoadConfig(configFileFlag)
+			if err != nil {
+				return err
+			}
+			if !explicitServer && cfg.Server != "" {
+				serverAddr = cfg.Server
+			}
+			if !explicitEvidenceDir && cfg.EvidenceDir != "" {
+				evidenceDir = cfg.EvidenceDir
 			}
 		}
 

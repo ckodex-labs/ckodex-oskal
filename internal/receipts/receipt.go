@@ -118,7 +118,9 @@ func LoadOrCreateReceiptManager(evaluator assurance.AuthorityRef, dir string) (*
 			return nil, err
 		}
 		if _, err := os.Stat(pubPath); os.IsNotExist(err) {
-			_ = writeFileAtomic(pubPath, []byte(mgr.PublicKey()+"\n"), 0644)
+			if err := writeFileAtomic(pubPath, []byte(mgr.PublicKey()+"\n"), 0644); err != nil {
+				return nil, fmt.Errorf("failed to persist regenerated receipt-signing.pub: %w", err)
+			}
 		}
 		return mgr, nil
 	} else if !os.IsNotExist(err) {

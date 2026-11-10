@@ -71,6 +71,9 @@ func TestContractEvaluator_Unit(t *testing.T) {
 	if evalResPresent.Vector.Conformance != assurance.ValencePositive {
 		t.Fatalf("expected positive conformance in vector state, got %s", evalResPresent.Vector.Conformance)
 	}
+	if evalResPresent.Vector.Resolve(assurance.VectorResolutionPolicy{RequireFresh: true}) != assurance.AssuranceStateAssured {
+		t.Fatalf("expected evalResPresent.Vector.Resolve() == ASSURED, got %s", evalResPresent.Vector.Resolve(assurance.VectorResolutionPolicy{RequireFresh: true}))
+	}
 
 	// 3. Failed contract state
 	contractFailing := assurance.EvidenceContract{

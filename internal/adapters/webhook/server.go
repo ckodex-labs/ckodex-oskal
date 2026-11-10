@@ -272,13 +272,13 @@ func (s *AdmissionWebhookServer) validateRequest(req *admissionv1.AdmissionReque
 	allViolations = append(allViolations, nonRootViolations...)
 	allViolations = append(allViolations, capViolations...)
 
-	mode := s.config.Mode
-	if mode == "" {
+	mode := WebhookMode(strings.ToLower(strings.TrimSpace(string(s.config.Mode))))
+	if mode != ModeAudit && mode != ModeWarn {
 		mode = ModeEnforcing
 	}
 
 	if len(allViolations) > 0 {
-		if mode == ModeEnforcing {
+		if mode != ModeAudit && mode != ModeWarn {
 			return &admissionv1.AdmissionResponse{
 				Allowed: false,
 				Result: &metav1.Status{

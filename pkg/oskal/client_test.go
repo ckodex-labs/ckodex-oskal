@@ -263,6 +263,16 @@ func TestGRPCClientLifecycle(t *testing.T) {
 	if explainResp.AssuranceState != StateAssured {
 		t.Fatalf("expected explain state ASSURED, got %v", explainResp.AssuranceState)
 	}
+	// QA-07: Verify ExplainGraph round-trip fields over gRPC
+	if explainResp.Graph.Epoch.SubjectDigest == "" {
+		t.Fatal("expected non-empty Epoch.SubjectDigest on gRPC ExplainClaim round-trip")
+	}
+	if len(explainResp.Graph.Implementations) == 0 || explainResp.Graph.Implementations[0].Requirement == "" {
+		t.Fatalf("expected non-empty Implementation.Requirement on gRPC ExplainClaim round-trip, got: %+v", explainResp.Graph.Implementations)
+	}
+	if len(explainResp.Graph.Evidence) == 0 || explainResp.Graph.Evidence[0].Digest == "" || !explainResp.Graph.Evidence[0].Verified {
+		t.Fatalf("expected verified Evidence item with non-empty Digest on gRPC ExplainClaim round-trip, got: %+v", explainResp.Graph.Evidence)
+	}
 
 	// 5. Evaluate subject
 	evalResp, err := client.EvaluateSubject(ctx, subject, []ControlRef{ctrl})
@@ -271,6 +281,9 @@ func TestGRPCClientLifecycle(t *testing.T) {
 	}
 	if evalResp.SummaryState != StateAssured {
 		t.Fatalf("expected summary state ASSURED, got %v", evalResp.SummaryState)
+	}
+	if len(evalResp.Evaluations) != 1 || evalResp.Evaluations[0].Vector.Provenance != assurance.ValencePositive {
+		t.Fatalf("expected positive Provenance valence in EvaluateSubject vector (QA-15), got: %+v", evalResp.Evaluations)
 	}
 }
 

@@ -579,3 +579,44 @@ func TestAdmissionWebhook_ExpandedDangerousCapabilities(t *testing.T) {
 		}
 	}
 }
+
+func TestAdmissionWebhook_FailClosedOnUnknownOrUppercaseMode(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "root-pod", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "root-app",
+					Image: "evil:latest",
+					SecurityContext: &corev1.SecurityContext{
+						RunAsUser: ptrInt64(0),
+					},
+				},
+			},
+		},
+	}
+	podRaw, _ := json.Marshal(pod)
+	review := admissionv1.AdmissionReview{
+		Request: &admissionv1.AdmissionRequest{
+			UID:       "req-mode-check",
+			Kind:      metav1.GroupVersionKind{Kind: "Pod"},
+			Namespace: "default",
+			Name:      "root-pod",
+			Object:    runtime.RawExtension{Raw: podRaw},
+		},
+	}
+	body, _ := json.Marshal(review)
+
+	for _, mode := range []WebhookMode{"ENFORCING", "enforce", "monitor-only", "unknown", ""} {
+		server := NewAdmissionWebhookServer(ServerConfig{Mode: mode})
+		req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		server.Handler().ServeHTTP(w, req)
+
+		var resp admissionv1.AdmissionReview
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		if resp.Response == nil || resp.Response.Allowed {
+			t.Fatalf("QA-04 regression: expected mode %q to fail closed (Allowed=false)", mode)
+		}
+	}
+}

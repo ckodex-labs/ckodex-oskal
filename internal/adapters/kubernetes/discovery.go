@@ -260,7 +260,7 @@ func CalculateEpoch(
 		authorityDigest = assurance.ComputeStringDigest("spiffe://local/ns/ckodex-assurance")
 	}
 	if environmentDigest == "" {
-		environmentDigest = assurance.ComputeStringDigest("k8s:v1.31:oskal:v0.1.0")
+		environmentDigest = assurance.ComputeStringDigest("k8s:v1.31:oskal:v1.0.0")
 	}
 
 	return assurance.AssuranceEpoch{

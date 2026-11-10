@@ -17,6 +17,7 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
+	"github.com/ckodex-labs/ckodex-oskal/internal/verifier"
 	assessmentv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/assessment/v1"
 	commonv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
 	controlv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1"
@@ -34,19 +35,11 @@ const (
 	MaxStoredReceipts = 8192
 )
 
-func isViolationType(obsType string) bool {
-	lower := strings.ToLower(strings.TrimSpace(obsType))
-	return strings.Contains(lower, "violation") ||
-		strings.Contains(lower, "denied") ||
-		strings.Contains(lower, "fail") ||
-		strings.Contains(lower, "adverse")
-}
-
 func isViolationObservation(obs *evidencev1.Observation) bool {
 	if obs == nil {
 		return false
 	}
-	if isViolationType(obs.Type) {
+	if assurance.IsAdverseObservationType(obs.Type) {
 		return true
 	}
 	for k, v := range obs.Attributes {
@@ -178,6 +171,7 @@ func (s *Server) SubmitObservation(ctx context.Context, req *servicesv1.SubmitOb
 				TrustDomain: obs.Observer.TrustDomain,
 			}
 		}
+		env.ControlRefs = verifier.DeriveControlRefs(obs.Type, env.Producer.Canonical(), obs.Attributes)
 		_, _ = s.evidenceRepo.Put(ctx, env, bytes.NewReader([]byte(ev.Digest)))
 	}
 
@@ -242,7 +236,7 @@ func (s *Server) evaluateSubjectEvidence(
 					continue
 				}
 				validCount++
-				if isViolationType(env.ObservationType) {
+				if assurance.IsAdverseObservationType(env.ObservationType) {
 					hasViolation = true
 				}
 				if now.Sub(env.CapturedAt) > DefaultFreshnessWindow {
@@ -324,7 +318,7 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 		}
 	}
 	for _, env := range envelopes {
-		if !env.CapturedAt.IsZero() && !env.CapturedAt.After(now.Add(1*time.Minute)) && isViolationType(env.ObservationType) {
+		if !env.CapturedAt.IsZero() && !env.CapturedAt.After(now.Add(1*time.Minute)) && assurance.IsAdverseObservationType(env.ObservationType) {
 			hasViolation = true
 		}
 	}
@@ -402,6 +396,14 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 		envDigest = currentEpoch.EnvironmentDigest
 	}
 
+	coherence := commonv1.Coherence_COHERENCE_COHERENT
+	switch targetState {
+	case commonv1.AssuranceState_ASSURANCE_STATE_FAILED:
+		coherence = commonv1.Coherence_COHERENCE_DECOHERENT
+	case commonv1.AssuranceState_ASSURANCE_STATE_STALE:
+		coherence = commonv1.Coherence_COHERENCE_PARTIALLY_COHERENT
+	}
+
 	var evaluations []*assessmentv1.ClaimEvaluation
 	for _, ctrl := range req.Controls {
 		if ctrl == nil {
@@ -415,13 +417,14 @@ func (s *Server) EvaluateSubject(ctx context.Context, req *servicesv1.EvaluateSu
 			Vector: &commonv1.AssuranceVector{
 				Applicability: commonv1.Valence_VALENCE_POSITIVE,
 				Conformance:   valence,
+				Provenance:    valence,
 				Integrity:     valence,
 				Authority:     valence,
 				Identity:      valence,
 				Runtime:       valence,
 				Freshness:     valence,
 				Completeness:  valence,
-				Coherence:     commonv1.Coherence_COHERENCE_COHERENT,
+				Coherence:     coherence,
 			},
 			Epoch: &commonv1.AssuranceEpoch{
 				SubjectDigest:        assurance.ComputeStringDigest(subKey),
@@ -520,6 +523,7 @@ func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimR
 	var impls []*controlv1.ImplementationRef
 	for _, imp := range graph.Implementations {
 		impls = append(impls, &controlv1.ImplementationRef{
+			Id:       imp.Requirement,
 			Provider: imp.Provider,
 			Digest:   imp.Digest,
 		})
@@ -528,7 +532,9 @@ func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimR
 	var evs []*evidencev1.EvidenceRef
 	for _, ev := range graph.Evidence {
 		evs = append(evs, &evidencev1.EvidenceRef{
-			Digest: ev.Digest,
+			Uri:       ev.Producer,
+			Digest:    ev.Digest,
+			MediaType: ev.Type,
 		})
 	}
 
@@ -547,8 +553,15 @@ func (s *Server) ExplainClaim(ctx context.Context, req *servicesv1.ExplainClaimR
 			Stale:    int32(graph.Completeness.Stale),
 			Missing:  int32(graph.Completeness.Missing),
 		},
-		Freshness:      graph.Freshness,
-		Authority:      graph.Authority,
+		Freshness: graph.Freshness,
+		Authority: graph.Authority,
+		Epoch: &commonv1.AssuranceEpoch{
+			SubjectDigest:        graph.Epoch.SubjectDigest,
+			ImplementationDigest: graph.Epoch.ImplementationDigest,
+			PolicyDigest:         graph.Epoch.PolicyDigest,
+			AuthorityDigest:      graph.Epoch.AuthorityDigest,
+			EnvironmentDigest:    graph.Epoch.EnvironmentDigest,
+		},
 		AssuranceState: respState,
 		EvidenceRoot:   graph.EvidenceRoot,
 		Projections:    graph.Projections,

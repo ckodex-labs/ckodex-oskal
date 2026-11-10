@@ -53,6 +53,7 @@ func main() {
 	var webhookTLSCertFile string
 	var webhookTLSKeyFile string
 	var evidenceDir string
+	var showVersion bool
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -62,16 +63,22 @@ func main() {
 	flag.IntVar(&webhookPort, "webhook-port", 8443, "The port the validating admission webhook listens on.")
 	flag.StringVar(&webhookServiceName, "webhook-service-name", "oskal-webhook", "Kubernetes Service name for the admission webhook.")
 	flag.StringVar(&webhookNamespace, "webhook-namespace", "ckodex-system", "Kubernetes Namespace for the admission webhook.")
-	flag.StringVar(&webhookMode, "webhook-mode", "enforcing", "Webhook mode (enforcing or monitor-only).")
+	flag.StringVar(&webhookMode, "webhook-mode", "enforcing", "Webhook mode (enforcing, warn, or audit)")
 	flag.StringVar(&webhookTLSCertFile, "webhook-tls-cert-file", "", "Path to TLS certificate file for the admission webhook.")
 	flag.StringVar(&webhookTLSKeyFile, "webhook-tls-key-file", "", "Path to TLS private key file for the admission webhook.")
 	flag.StringVar(&evidenceDir, "evidence-dir", "/tmp/oskal/evidence", "Path to local directory for content-addressed evidence storage.")
+	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
 
 	opts := zap.Options{
 		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if showVersion {
+		fmt.Printf("oskal-controller %s (commit: %s, built: %s)\n", version, commit, date)
+		os.Exit(0)
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 

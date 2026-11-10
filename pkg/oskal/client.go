@@ -295,11 +295,28 @@ func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, co
 			validUntil = evalProto.ValidUntil.AsTime()
 		}
 
+		var vec assurance.AssuranceVector
+		if evalProto.Vector != nil {
+			vec = assurance.AssuranceVector{
+				Applicability: mapProtoValence(evalProto.Vector.Applicability),
+				Conformance:   mapProtoValence(evalProto.Vector.Conformance),
+				Provenance:    mapProtoValence(evalProto.Vector.Provenance),
+				Integrity:     mapProtoValence(evalProto.Vector.Integrity),
+				Authority:     mapProtoValence(evalProto.Vector.Authority),
+				Identity:      mapProtoValence(evalProto.Vector.Identity),
+				Runtime:       mapProtoValence(evalProto.Vector.Runtime),
+				Freshness:     mapProtoValence(evalProto.Vector.Freshness),
+				Completeness:  mapProtoValence(evalProto.Vector.Completeness),
+				Coherence:     mapProtoCoherence(evalProto.Vector.Coherence),
+			}
+		}
+
 		evals = append(evals, ClaimEvaluation{
 			ID:           evalProto.Id,
 			Subject:      subject,
 			Control:      ctrl,
 			State:        mapProtoState(evalProto.State),
+			Vector:       vec,
 			Epoch:        epoch,
 			Completeness: completeness,
 			EvidenceRoot: evalProto.EvidenceRoot,
@@ -360,6 +377,8 @@ func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, contr
 		})
 	}
 
+	state := mapProtoState(resp.AssuranceState)
+
 	var evItems []ExplainEvidenceItem
 	for _, ev := range resp.Evidence {
 		if ev == nil {
@@ -367,17 +386,22 @@ func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, contr
 		}
 		evItems = append(evItems, ExplainEvidenceItem{
 			Type:     ev.MediaType,
-			Verified: true,
+			Digest:   ev.Digest,
+			Verified: state != assurance.AssuranceStateFailed && state != assurance.AssuranceStateUnknown && ev.Digest != "",
 			Producer: ev.Uri,
 		})
 	}
 
 	completeness := EvidenceCompleteness{}
 	if resp.Completeness != nil {
+		verified := int(resp.Completeness.Verified)
+		if state == assurance.AssuranceStateFailed || state == assurance.AssuranceStateUnknown || state == assurance.AssuranceStateStale {
+			verified = 0
+		}
 		completeness = EvidenceCompleteness{
 			Required: int(resp.Completeness.Required),
 			Present:  int(resp.Completeness.Present),
-			Verified: int(resp.Completeness.Verified),
+			Verified: verified,
 			Stale:    int(resp.Completeness.Stale),
 			Missing:  int(resp.Completeness.Missing),
 		}
@@ -406,7 +430,7 @@ func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, contr
 		Freshness:          resp.Freshness,
 		Authority:          resp.Authority,
 		Epoch:              epoch,
-		AssuranceState:     mapProtoState(resp.AssuranceState),
+		AssuranceState:     state,
 		EvidenceRoot:       resp.EvidenceRoot,
 		Projections:        resp.Projections,
 	}
@@ -415,7 +439,7 @@ func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, contr
 		Subject:          subject,
 		Control:          control,
 		CanonicalControl: resp.CanonicalControl,
-		AssuranceState:   mapProtoState(resp.AssuranceState),
+		AssuranceState:   state,
 		EvidenceRoot:     resp.EvidenceRoot,
 		Graph:            graph,
 		RenderedText:     resp.RenderedText,
@@ -464,5 +488,35 @@ func mapProtoState(st commonv1.AssuranceState) AssuranceState {
 		return assurance.AssuranceStateFailed
 	default:
 		return assurance.AssuranceStateUnspecified
+	}
+}
+
+func mapProtoValence(v commonv1.Valence) assurance.Valence {
+	switch v {
+	case commonv1.Valence_VALENCE_POSITIVE:
+		return assurance.ValencePositive
+	case commonv1.Valence_VALENCE_NEGATIVE:
+		return assurance.ValenceNegative
+	case commonv1.Valence_VALENCE_NEUTRAL:
+		return assurance.ValenceNeutral
+	case commonv1.Valence_VALENCE_MIXED:
+		return assurance.ValenceMixed
+	default:
+		return assurance.ValenceUnresolved
+	}
+}
+
+func mapProtoCoherence(c commonv1.Coherence) assurance.Coherence {
+	switch c {
+	case commonv1.Coherence_COHERENCE_COHERENT:
+		return assurance.CoherenceCoherent
+	case commonv1.Coherence_COHERENCE_PARTIALLY_COHERENT:
+		return assurance.CoherencePartiallyCoherent
+	case commonv1.Coherence_COHERENCE_DECOHERENT:
+		return assurance.CoherenceDecoherent
+	case commonv1.Coherence_COHERENCE_RECONCILING:
+		return assurance.CoherenceReconciling
+	default:
+		return assurance.CoherenceCoherent
 	}
 }

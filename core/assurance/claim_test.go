@@ -57,6 +57,21 @@ func TestControlExceptionValidity(t *testing.T) {
 	if exc.AppliesTo(otherSub, ctrl) {
 		t.Fatalf("exception must not apply to different subject")
 	}
+
+	// QA-09: Validate checks Subject and Control
+	if err := exc.Validate(); err != nil {
+		t.Fatalf("expected valid ControlException to pass Validate, got %v", err)
+	}
+	excEmptySubject := exc
+	excEmptySubject.Subject = SubjectRef{}
+	if err := excEmptySubject.Validate(); err == nil {
+		t.Fatalf("expected ControlException with empty Subject to fail Validate")
+	}
+	excEmptyControl := exc
+	excEmptyControl.Controls = []ControlRef{{Namespace: "", ID: ""}}
+	if err := excEmptyControl.Validate(); err == nil {
+		t.Fatalf("expected ControlException with empty Control to fail Validate")
+	}
 }
 
 func TestControlReceiptCanonicalBytesAndDigest(t *testing.T) {

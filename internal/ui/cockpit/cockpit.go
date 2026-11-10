@@ -205,11 +205,7 @@ func (c *Cockpit) gatherWorkloads() []WorkloadStatusSummary {
 						if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
 							continue
 						}
-						lowerObs := strings.ToLower(strings.TrimSpace(env.ObservationType))
-						if strings.Contains(lowerObs, "violation") ||
-							strings.Contains(lowerObs, "denied") ||
-							strings.Contains(lowerObs, "fail") ||
-							strings.Contains(lowerObs, "adverse") {
+						if assurance.IsAdverseObservationType(env.ObservationType) {
 							isViolation = true
 						}
 						if now.Sub(env.CapturedAt) > 15*time.Minute {

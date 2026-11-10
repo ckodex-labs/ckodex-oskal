@@ -322,4 +322,59 @@ func TestAdverseObservationDominatesContractEvaluation(t *testing.T) {
 	if res.State != AssuranceStateFailed {
 		t.Fatalf("expected adverse observation to dominate contract evaluation with AssuranceStateFailed (Section 23), got %v", res.State)
 	}
+
+	// QA-01: Untrusted producer, missing digest, or stale-epoch adverse observations must NOT force AssuranceStateFailed
+	strictContract := EvidenceContract{
+		ID: "contract-strict-producers",
+		Requirements: []EvidenceRequirement{
+			{
+				ID:                "req-adm",
+				EvidenceType:      "kubernetes.admission",
+				Required:          true,
+				MaxAge:            15 * time.Minute,
+				AcceptedProducers: []string{"spiffe://prod/ns/system/sa/observer"},
+			},
+		},
+	}
+
+	forgedAdverse := EvidenceEnvelope{
+		ID:              "ev-forged-adverse",
+		Subject:         sub,
+		ObservationType: "kubernetes.admission.violation",
+		CapturedAt:      now,
+		Producer:        AuthorityRef{Scheme: "spiffe", Subject: "prod/ns/untrusted/sa/attacker"},
+		Artifact:        EvidenceRef{Digest: ComputeStringDigest("forged-payload")},
+		Epoch:           epoch,
+	}
+	staleEpochAdverse := EvidenceEnvelope{
+		ID:              "ev-stale-adverse",
+		Subject:         sub,
+		ObservationType: "kubernetes.admission.violation",
+		CapturedAt:      now,
+		Producer:        AuthorityRef{Scheme: "spiffe", Subject: "prod/ns/system/sa/observer"},
+		Artifact:        EvidenceRef{Digest: ComputeStringDigest("stale-payload")},
+		Epoch:           AssuranceEpoch{SubjectDigest: ComputeStringDigest("old-subject-epoch")},
+	}
+	emptyDigestAdverse := EvidenceEnvelope{
+		ID:              "ev-empty-digest-adverse",
+		Subject:         sub,
+		ObservationType: "kubernetes.admission.violation",
+		CapturedAt:      now,
+		Producer:        AuthorityRef{Scheme: "spiffe", Subject: "prod/ns/system/sa/observer"},
+		Artifact:        EvidenceRef{Digest: ""},
+		Epoch:           epoch,
+	}
+
+	resUntrusted := strictContract.Evaluate([]EvidenceEnvelope{goodEnv, forgedAdverse, staleEpochAdverse, emptyDigestAdverse}, epoch, now)
+	if resUntrusted.State == AssuranceStateFailed {
+		t.Fatalf("QA-01 regression: untrusted/stale/unverified adverse observations must not force AssuranceStateFailed, got %v", resUntrusted.State)
+	}
+	if resUntrusted.State != AssuranceStateVerified {
+		t.Fatalf("expected AssuranceStateVerified when only forged/stale adverse observations accompany valid evidence, got %v", resUntrusted.State)
+	}
+
+	resAuthorizedAdverse := strictContract.Evaluate([]EvidenceEnvelope{goodEnv, adverseEnv}, epoch, now)
+	if resAuthorizedAdverse.State != AssuranceStateFailed {
+		t.Fatalf("expected authorized current-epoch adverse observation to force AssuranceStateFailed, got %v", resAuthorizedAdverse.State)
+	}
 }

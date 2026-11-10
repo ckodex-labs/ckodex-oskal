@@ -506,6 +506,35 @@ func buildComponentDefinition(plan *ScaffoldPlan) {
 	docUUID := uuid.New().String()
 	compUUID := uuid.New().String()
 
+	var implReqs []proj.OscalImplementedRequirement
+	for _, cb := range plan.ControlBindings {
+		for _, ctrl := range cb.Spec.Controls {
+			controlID := ctrl.Canonical.ID
+			if len(ctrl.Mappings) > 0 && ctrl.Mappings[0].Control != "" {
+				controlID = ctrl.Mappings[0].Control
+			}
+			implReqs = append(implReqs, proj.OscalImplementedRequirement{
+				UUID:        uuid.New().String(),
+				ControlID:   controlID,
+				Description: fmt.Sprintf("Realizes %s:%s via %s continuous assurance", ctrl.Canonical.Namespace, ctrl.Canonical.ID, plan.Profile),
+				Props: []proj.Property{
+					{Name: "canonical-control", Value: fmt.Sprintf("%s:%s", ctrl.Canonical.Namespace, ctrl.Canonical.ID), Ns: "https://assurance.ckodex.io/ns"},
+				},
+			})
+		}
+	}
+	var controlImpls []proj.OscalControlImplementation
+	if len(implReqs) > 0 {
+		controlImpls = []proj.OscalControlImplementation{
+			{
+				UUID:                    uuid.New().String(),
+				Source:                  fmt.Sprintf("https://assurance.ckodex.io/profiles/%s", plan.Profile),
+				Description:             fmt.Sprintf("Scaffolded control implementations for %s", plan.Profile),
+				ImplementedRequirements: implReqs,
+			},
+		}
+	}
+
 	cd := &proj.ComponentDefinitionWrapper{}
 	cd.ComponentDefinition.UUID = docUUID
 	cd.ComponentDefinition.Metadata = proj.OscalMetadata{
@@ -517,11 +546,12 @@ func buildComponentDefinition(plan *ScaffoldPlan) {
 	}
 	cd.ComponentDefinition.DefinedComponents = []proj.OscalDefinedComponent{
 		{
-			UUID:        compUUID,
-			Type:        "software",
-			Title:       plan.WorkloadName,
-			Description: fmt.Sprintf("Scaffolded component definition adhering to %s profile", plan.Profile),
-			Purpose:     "Continuous assurance governed microservice workload",
+			UUID:                   compUUID,
+			Type:                   "software",
+			Title:                  plan.WorkloadName,
+			Description:            fmt.Sprintf("Scaffolded component definition adhering to %s profile", plan.Profile),
+			Purpose:                "Continuous assurance governed microservice workload",
+			ControlImplementations: controlImpls,
 		},
 	}
 	plan.ComponentDefinition = cd

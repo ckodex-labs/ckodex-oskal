@@ -87,7 +87,7 @@ func ExportBundle(
 			ExportedAt:     now,
 			SubjectURI:     subject.URI(),
 			EpochComposite: composite,
-			Generator:      "oskal-airgap-packager:v0.2.0",
+			Generator:      "oskal-airgap-packager:v1.0.0",
 		},
 		Evaluations: evaluations,
 		Receipts:    receipts,
@@ -144,12 +144,13 @@ func ImportBundle(
 
 	// 2. Verify every embedded CAS blob matches its content-addressed SHA-256 key (anti-forgery preflight)
 	for digest, content := range bundle.Blobs {
-		if strings.HasPrefix(digest, "sha256:") {
-			h := sha256.Sum256([]byte(content))
-			computed := "sha256:" + hex.EncodeToString(h[:])
-			if computed != digest {
-				return nil, fmt.Errorf("bundle blob digest mismatch: key %s, computed %s", digest, computed)
-			}
+		if !strings.HasPrefix(digest, "sha256:") {
+			return nil, fmt.Errorf("bundle blob key %q is invalid: must have sha256 prefix", digest)
+		}
+		h := sha256.Sum256([]byte(content))
+		computed := "sha256:" + hex.EncodeToString(h[:])
+		if computed != digest {
+			return nil, fmt.Errorf("bundle blob digest mismatch: key %s, computed %s", digest, computed)
 		}
 	}
 
@@ -163,13 +164,22 @@ func ImportBundle(
 		}
 	}
 
-	// 4. Load verified envelopes and blobs into target repository only after full preflight succeeds
+	// 4. Load verified envelopes, blobs, and receipts into target repository only after full preflight succeeds
 	if targetRepo != nil {
 		for _, env := range bundle.Envelopes {
-			blobContent := bundle.Blobs[env.Artifact.Digest]
-			payload := bytes.NewReader([]byte(blobContent))
+			var payload io.Reader
+			if blobContent, ok := bundle.Blobs[env.Artifact.Digest]; ok {
+				payload = bytes.NewReader([]byte(blobContent))
+			}
 			if _, err := targetRepo.Put(ctx, env, payload); err != nil {
 				return nil, fmt.Errorf("failed to import envelope %s into target repository: %w", env.ID, err)
+			}
+		}
+		if receiptRepo, ok := targetRepo.(ports.ReceiptRepository); ok {
+			for i, receipt := range bundle.Receipts {
+				if _, err := receiptRepo.PutReceipt(ctx, receipt); err != nil {
+					return nil, fmt.Errorf("failed to import receipt[%d] into target repository: %w", i, err)
+				}
 			}
 		}
 	}

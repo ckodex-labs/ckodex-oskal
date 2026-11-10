@@ -136,7 +136,7 @@ func ingestComponentDefinition(doc *proj.ComponentDefinitionWrapper, targetNames
 							},
 						},
 					},
-					EvidenceContract: fmt.Sprintf("%s-contract", compSlug),
+					EvidenceContract: SanitizeK8sName(fmt.Sprintf("%s-contract", compSlug)),
 				})
 			}
 		}
@@ -148,7 +148,7 @@ func ingestComponentDefinition(doc *proj.ComponentDefinitionWrapper, targetNames
 					Kind:       "EvidenceContract",
 				},
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("%s-contract", compSlug),
+					Name:      SanitizeK8sName(fmt.Sprintf("%s-contract", compSlug)),
 					Namespace: targetNamespace,
 					Labels: map[string]string{
 						"assurance.ckodex.io/source":      "oskal-ingest",
@@ -171,7 +171,7 @@ func ingestComponentDefinition(doc *proj.ComponentDefinitionWrapper, targetNames
 					Kind:       "ControlBinding",
 				},
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("%s-binding", compSlug),
+					Name:      SanitizeK8sName(fmt.Sprintf("%s-binding", compSlug)),
 					Namespace: targetNamespace,
 					Labels: map[string]string{
 						"assurance.ckodex.io/source":      "oskal-ingest",
@@ -292,7 +292,7 @@ func ingestSSP(doc *proj.SSPWrapper, targetNamespace string) (*IngestionResult, 
 					},
 				},
 			},
-			EvidenceContract: fmt.Sprintf("%s-contract", systemSlug),
+			EvidenceContract: SanitizeK8sName(fmt.Sprintf("%s-contract", systemSlug)),
 		})
 	}
 
@@ -303,7 +303,7 @@ func ingestSSP(doc *proj.SSPWrapper, targetNamespace string) (*IngestionResult, 
 				Kind:       "EvidenceContract",
 			},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("%s-contract", systemSlug),
+				Name:      SanitizeK8sName(fmt.Sprintf("%s-contract", systemSlug)),
 				Namespace: targetNamespace,
 				Labels: map[string]string{
 					"assurance.ckodex.io/source":      "oskal-ingest",
@@ -326,7 +326,7 @@ func ingestSSP(doc *proj.SSPWrapper, targetNamespace string) (*IngestionResult, 
 				Kind:       "ControlBinding",
 			},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("%s-binding", systemSlug),
+				Name:      SanitizeK8sName(fmt.Sprintf("%s-binding", systemSlug)),
 				Namespace: targetNamespace,
 				Labels: map[string]string{
 					"assurance.ckodex.io/source":      "oskal-ingest",
@@ -366,7 +366,7 @@ func SanitizeK8sName(s string) string {
 	}
 	res := strings.Trim(b.String(), "-")
 	if len(res) > 63 {
-		res = res[:63]
+		res = strings.Trim(res[:63], "-")
 	}
 	if res == "" {
 		res = "resource"

@@ -115,6 +115,21 @@ func NewFilesystemEvidenceRepository(baseDir string) (*ContentAddressedEvidenceR
 	return repo, nil
 }
 
+func isValidHexDigest(hexHash string) bool {
+	if len(hexHash) != 64 {
+		return false
+	}
+	for i := 0; i < len(hexHash); i++ {
+		c := hexHash[i]
+		isDigit := c >= '0' && c <= '9'
+		isHexLower := c >= 'a' && c <= 'f'
+		if !isDigit && !isHexLower {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *ContentAddressedEvidenceRepository) loadFromDisk() error {
 	blobsDir := filepath.Join(r.baseDir, "blobs", "sha256")
 	dirsToScan := []string{
@@ -129,17 +144,42 @@ func (r *ContentAddressedEvidenceRepository) loadFromDisk() error {
 		}
 
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			if entry.IsDir() {
 				continue
 			}
-			path := filepath.Join(dir, entry.Name())
+			name := entry.Name()
+			if dir == blobsDir && strings.HasSuffix(name, ".bin") {
+				expectedHex := strings.TrimSuffix(name, ".bin")
+				if !isValidHexDigest(expectedHex) {
+					continue
+				}
+				path := filepath.Join(dir, name)
+				data, err := os.ReadFile(path)
+				if err != nil {
+					continue
+				}
+				h := sha256.Sum256(data)
+				actualHex := hex.EncodeToString(h[:])
+				if actualHex != expectedHex {
+					continue
+				}
+				r.blobs["sha256:"+actualHex] = data
+				continue
+			}
+			if !strings.HasSuffix(name, ".json") {
+				continue
+			}
+			path := filepath.Join(dir, name)
 			data, err := os.ReadFile(path)
 			if err != nil {
 				continue
 			}
 
 			if dir == blobsDir {
-				expectedHex := strings.TrimSuffix(entry.Name(), ".json")
+				expectedHex := strings.TrimSuffix(name, ".json")
+				if !isValidHexDigest(expectedHex) {
+					continue
+				}
 				h := sha256.Sum256(data)
 				actualHex := hex.EncodeToString(h[:])
 				if actualHex != expectedHex {
@@ -291,6 +331,14 @@ func (r *ContentAddressedEvidenceRepository) Put(
 
 // Get retrieves raw evidence data by content-addressed reference.
 func (r *ContentAddressedEvidenceRepository) Get(ctx context.Context, ref assurance.EvidenceRef) (io.ReadCloser, error) {
+	if !strings.HasPrefix(ref.Digest, "sha256:") {
+		return nil, fmt.Errorf("invalid digest format (must start with sha256:): %s", ref.Digest)
+	}
+	hexHash := strings.TrimPrefix(ref.Digest, "sha256:")
+	if !isValidHexDigest(hexHash) {
+		return nil, fmt.Errorf("invalid sha256 hex digest: %s", ref.Digest)
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -298,10 +346,18 @@ func (r *ContentAddressedEvidenceRepository) Get(ctx context.Context, ref assura
 	if !exists {
 		// Attempt reading from disk
 		if r.baseDir != "" {
-			hexHash := strings.TrimPrefix(ref.Digest, "sha256:")
 			path := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.json", hexHash))
 			diskData, err := os.ReadFile(path)
+			if err != nil {
+				binPath := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.bin", hexHash))
+				diskData, err = os.ReadFile(binPath)
+			}
 			if err == nil {
+				h := sha256.Sum256(diskData)
+				computed := "sha256:" + hex.EncodeToString(h[:])
+				if computed != ref.Digest {
+					return nil, fmt.Errorf("digest mismatch on read: expected %s, computed %s", ref.Digest, computed)
+				}
 				return io.NopCloser(bytes.NewReader(diskData)), nil
 			}
 		}
@@ -519,28 +575,75 @@ func (r *ContentAddressedEvidenceRepository) Prune(maxAge time.Duration, dryRun 
 
 	report := &PruneReport{}
 	var toDelete []string
+	deletedEnvs := make(map[string]assurance.EvidenceEnvelope)
+	survivingArtifacts := make(map[string]bool)
 
 	for digest, env := range r.envelopes {
 		if env.CapturedAt.Before(cutoff) {
 			toDelete = append(toDelete, digest)
+			deletedEnvs[digest] = env
 			report.PrunedCount++
 			if b, ok := r.blobs[digest]; ok {
 				report.PrunedBytes += int64(len(b))
+			}
+		} else {
+			if env.Artifact.Digest != "" {
+				survivingArtifacts[env.Artifact.Digest] = true
 			}
 		}
 	}
 
 	if !dryRun {
+		prunedArtifacts := make(map[string]bool)
 		for _, digest := range toDelete {
+			env := deletedEnvs[digest]
 			delete(r.envelopes, digest)
 			delete(r.blobs, digest)
 
 			if r.baseDir != "" {
 				hexHash := strings.TrimPrefix(digest, "sha256:")
-				filePath := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.json", hexHash))
-				_ = os.Remove(filePath)
-				binPath := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.bin", hexHash))
-				_ = os.Remove(binPath)
+				if isValidHexDigest(hexHash) {
+					filePath := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.json", hexHash))
+					_ = os.Remove(filePath)
+					binPath := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.bin", hexHash))
+					_ = os.Remove(binPath)
+				}
+			}
+
+			artDigest := env.Artifact.Digest
+			if artDigest != "" && artDigest != digest && !survivingArtifacts[artDigest] && !prunedArtifacts[artDigest] {
+				prunedArtifacts[artDigest] = true
+				delete(r.blobs, artDigest)
+				if r.baseDir != "" {
+					artHex := strings.TrimPrefix(artDigest, "sha256:")
+					if isValidHexDigest(artHex) {
+						artBinPath := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.bin", artHex))
+						_ = os.Remove(artBinPath)
+					}
+				}
+			}
+
+			if r.baseDir != "" && env.ID != "" && !strings.Contains(env.ID, "/") && !strings.Contains(env.ID, "\\") && !strings.Contains(env.ID, "..") {
+				_ = os.Remove(filepath.Join(r.baseDir, env.ID+".json"))
+			}
+		}
+
+		if r.baseDir != "" {
+			if entries, err := os.ReadDir(r.baseDir); err == nil {
+				for _, e := range entries {
+					if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+						continue
+					}
+					flatPath := filepath.Join(r.baseDir, e.Name())
+					data, err := os.ReadFile(flatPath)
+					if err != nil {
+						continue
+					}
+					var env assurance.EvidenceEnvelope
+					if err := json.Unmarshal(data, &env); err == nil && env.ID != "" && !env.CapturedAt.IsZero() && env.CapturedAt.Before(cutoff) {
+						_ = os.Remove(flatPath)
+					}
+				}
 			}
 		}
 

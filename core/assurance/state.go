@@ -213,6 +213,7 @@ type VectorResolutionPolicy struct {
 func (v AssuranceVector) Resolve(policy VectorResolutionPolicy) AssuranceState {
 	// Rule 16: Anti / Negative invariant violation dominates
 	if v.Conformance == ValenceNegative ||
+		v.Provenance == ValenceNegative ||
 		v.Integrity == ValenceNegative ||
 		v.Authority == ValenceNegative ||
 		v.Identity == ValenceNegative ||
@@ -266,7 +267,10 @@ func (v AssuranceVector) Resolve(policy VectorResolutionPolicy) AssuranceState {
 		v.Runtime == ValencePositive &&
 		v.Freshness == ValencePositive &&
 		v.Completeness == ValencePositive {
-		return AssuranceStateAssured
+		if v.Coherence == CoherenceCoherent {
+			return AssuranceStateAssured
+		}
+		return AssuranceStateVerified
 	}
 
 	return AssuranceStateObserved
