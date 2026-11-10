@@ -84,4 +84,11 @@ evidenceStorage:
   mountPath: "/var/lib/oskal/evidence"
   sizeLimit: "1Gi"
 
+persistence:
+  enabled: false
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: "10Gi"
 

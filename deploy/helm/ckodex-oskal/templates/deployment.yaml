@@ -92,8 +92,13 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
         - name: evidence-store
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-evidence" (include "ckodex-oskal.fullname" .)) }}
+          {{- else }}
           emptyDir:
             sizeLimit: {{ .Values.evidenceStorage.sizeLimit | default "1Gi" }}
+          {{- end }}
         - name: tmp
           emptyDir:
             sizeLimit: "64Mi"

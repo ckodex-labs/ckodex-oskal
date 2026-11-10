@@ -83,6 +83,8 @@ Connects OSKAL directly to AI development tools (Claude Code, Cursor, OpenCode, 
 - `scaffold_compliance`: Generate CRDs and OSCAL templates for any profile.
 - `project_oscal`: Real-time export to AR, CD, SSP, AP, and POAM.
 - `run_doctor`: System preflight health diagnosis.
+- `inspect_subject`: Reconstruct all 4 Truth Channels for a workload subject.
+- **UTCP v1.0.1 Bridge (`oskal utcp` & MCP tools)**: Direct native tool discovery, governed provider registration, and capability-leased execution (`search_tools`, `list_tools`, `call_tool`, `register_manual`, `deregister_manual`, `register_tool_provider`, `get_required_keys_for_tool`, `tool_info`).
 
 ### 2. Deep Diagnostics (`oskal doctor` & `oskal inspect`)
 - **`oskal doctor`**: Preflight checks for Kernel substrate, Kubernetes API reachability, SPIFFE/SPIRE sockets, Sigstore trust root, CAS storage permissions, and embedded NIST schemas.
@@ -169,9 +171,9 @@ The admission webhook supports three operating modes via `--mode`:
 
 ---
 
-## The Five Kubernetes CRDs
+## The Six Kubernetes CRDs
 
-OSKAL extends Kubernetes with five declarative Custom Resource Definitions:
+OSKAL extends Kubernetes with six declarative Custom Resource Definitions:
 
 1. **`ControlBinding` (`assurance.ckodex.io/v1alpha1`):**  
    Binds security controls (e.g. NIST SP 800-53 `AC-6`, `SC-7`, `CM-8`) to target workloads and defines the required Evidence Contracts.
@@ -183,6 +185,8 @@ OSKAL extends Kubernetes with five declarative Custom Resource Definitions:
    Encodes authorized, time-bounded derogations with explicit justifications and compensating controls (never permanent).
 5. **`AssuranceState` (`assurance.ckodex.io/v1alpha1`):**  
    Emits the live, continuous assurance vector, evidence root, and per-control status directly into the cluster.
+6. **`CapabilityLease` (`assurance.ckodex.io/v1alpha1`):**  
+   Governs bounded, time-limited, and revocable capability leases for agentic workcells and UTCP tool invocations (ADR-006).
 
 ---
 

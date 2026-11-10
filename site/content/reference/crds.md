@@ -1,6 +1,6 @@
 ---
 title: "Kubernetes CRD Reference"
-description: "Technical schema reference for the five Custom Resource Definitions in api/assurance/v1alpha1."
+description: "Technical schema reference for the six Custom Resource Definitions in api/assurance/v1alpha1."
 quadrant: "reference"
 tier: "E5"
 invariant: "Do not store evidence blobs in etcd (ADR-002)"
@@ -17,7 +17,7 @@ Version: v1alpha1
 
 ## 1. `ControlBinding`
 
-Binds a canonical control to workload selectors and an implementation provider.
+Binds canonical security controls to workload selectors, atomic requirements, and `EvidenceContract` references.
 
 ### Schema:
 
@@ -28,28 +28,36 @@ metadata:
   name: <string>
   namespace: <string>
 spec:
-  canonicalControl: <string>      # e.g. "ckodex:container.least-privilege"
-  frameworkMappings:              # Standards cross-walks
-    - framework: <string>         # e.g. "NIST-SP-800-53"
-      controlId: <string>         # e.g. "AC-6"
-  workloadSelector:               # Target workloads
-    matchLabels: <map[string]string>
-  implementation:
-    provider: <string>            # "kubernetes.admission.cel" | "tetragon" | "cilium"
-    componentRef: <string>        # Identifier of enforcement resource
-    policyDigest: <string>        # SHA-256 digest of implementation policy
-  evidenceContractRef:
-    name: <string>                # Name of EvidenceContract
+  selector:
+    namespaces:
+      - <string>
+    workloadSelector:
+      matchLabels: <map[string]string>
+  controls:
+    - canonical:
+        namespace: <string>       # e.g. "ckodex"
+        id: <string>              # e.g. "container.least-privilege"
+      mappings:
+        - framework: <string>     # e.g. "NIST-SP-800-53"
+          version: <string>       # e.g. "rev5"
+          controlId: <string>     # e.g. "AC-6"
+  requirements:
+    - id: <string>                # e.g. "non-root-execution"
+      implementation: <string>    # e.g. "validating-admission-policy/disallow-root"
+      evidenceContract: <string>  # Name of EvidenceContract
 status:
   observedGeneration: <int64>
-  bindingState: <string>          # "Bound" | "Unbound" | "Error"
+  conditions:
+    - type: Ready
+      status: "True" | "False"
+      reason: "ASSURED" | "UNKNOWN" | "STALE" | "FAILED"
 ```
 
 ---
 
 ## 2. `EvidenceContract`
 
-Specifies the evidence requirements that must be met to satisfy a control.
+Specifies the evidence requirements, accepted producers, and freshness bounds that must be met to satisfy a control.
 
 ### Schema:
 
@@ -60,22 +68,34 @@ metadata:
   name: <string>
   namespace: <string>
 spec:
-  subjectSelector:
-    matchLabels: <map[string]string>
+  requirementId: <string>
   requiredEvidence:
-    - observationType: <string>   # "kubernetes.admission" | "workload.runtime.capabilities"
-      maxAge: <duration>          # e.g. "30m", "1h"
-      allowedProducers:           # Authorized SPIFFE IDs
-        - <string>
+    - type: <string>              # "kubernetes.admission" | "runtime.ebpf"
+      producerSelector:
+        spiffeTrustDomain: <string>
+        allowedSubjects:
+          - <string>
+      maxAge: <duration>          # e.g. "15m", "1h"
+      verification:
+        signatureRequired: <bool>
+        provenanceRequired: <bool>
+  evaluation:
+    engine: <string>              # "cel"
+    expression: <string>
+  failurePolicy:
+    onMissingEvidence: "UNKNOWN" | "FAILED"
+    onStaleEvidence: "STALE" | "FAILED"
+    onUnverifiedSignature: "FAILED"
 status:
-  contractStatus: <string>        # "Active" | "Pending"
+  observedGeneration: <int64>
+  conditions: <[]metav1.Condition>
 ```
 
 ---
 
 ## 3. `AssurancePolicy`
 
-Defines cluster-wide governance thresholds, staleness bounds, and admission gating behaviors.
+Defines cluster-wide governance thresholds, admission gating modes, and runtime containment rules.
 
 ### Schema:
 
@@ -85,16 +105,22 @@ kind: AssurancePolicy
 metadata:
   name: <string>
 spec:
-  defaultStalenessTolerance: <duration>  # Default: "1h"
-  enforceAdmissionGating: <bool>         # Reject pods if state is UNKNOWN/FAILED
-  quarantineThreshold: <int32>           # Max failed evaluations before quarantine
+  mode: <string>                  # "enforcing" | "warn" | "audit"
+  admission:
+    requireVerifiedProvenance: <bool>
+    requireValidControls:
+      - <string>
+    unknownDisposition: <string>  # "DENY" | "ADMIT_WITH_OBLIGATIONS"
+  runtime:
+    onInvalidation: <string>      # "ALERT_AND_QUARANTINE"
+    quarantineAction: <string>    # "APPLY_ISOLATION_NETWORK_POLICY"
 ```
 
 ---
 
 ## 4. `ControlException`
 
-Defines a temporally bounded, authorized derogation for a specific control failure.
+Defines a temporally bounded, authorized derogation for a specific control failure (Invariant I-05: Derogation does not erase failure).
 
 ### Schema:
 
@@ -105,19 +131,24 @@ metadata:
   name: <string>
   namespace: <string>
 spec:
-  controlRef:
-    framework: <string>
-    controlId: <string>
   subject:
     kind: <string>
     name: <string>
     namespace: <string>
-  justification: <string>         # Reason for derogation
-  approverSPIFFEID: <string>      # Identity of authorized risk owner
-  compensatingControls:           # Active secondary mitigations
+  controls:
     - <string>
-  validFrom: <timestamp>
-  expiresAt: <timestamp>          # Permanent exceptions are strictly rejected (I-05)
+  justification:
+    reason: <string>
+    ticket: <string>
+    compensatingControls:
+      - <string>
+  authority:
+    requiredApprovers:
+      - <string>
+    signatureRef: <string>
+  validity:
+    notBefore: <timestamp>
+    notAfter: <timestamp>         # Permanent exceptions are strictly rejected (I-05)
 ```
 
 ---
@@ -134,12 +165,58 @@ kind: AssuranceState
 metadata:
   name: <string>
   namespace: <string>
+spec:
+  subjectRef:
+    apiVersion: <string>
+    kind: <string>
+    name: <string>
+    namespace: <string>
 status:
-  currentState: <string>          # "UNKNOWN" | "OBSERVED" | "VERIFIED" | "ASSURED" | "STALE" | "FAILED"
-  activeEpoch:
-    epochId: <string>
-    subjectDigest: <string>
-    policyDigest: <string>
+  state: <string>                 # "UNKNOWN" | "OBSERVED" | "VERIFIED" | "ASSURED" | "STALE" | "FAILED"
+  epoch:
+    subject: <string>
+    policy: <string>
+    implementation: <string>
+    authority: <string>
+    environment: <string>
+    composite: <string>
   evidenceRoot: <string>          # SHA-256 Merkle root of leaf envelopes
-  lastTransitionTime: <timestamp>
+  evaluatedAt: <timestamp>
+  validUntil: <timestamp>
+  controls:
+    - id: <string>
+      state: <string>
+      evidenceSummary: <string>
+```
+
+---
+
+## 6. `CapabilityLease`
+
+Governs bounded, revocable authority for agentic workcells and UTCP tool execution (ADR-006).
+
+### Schema:
+
+```yaml
+apiVersion: assurance.ckodex.io/v1alpha1
+kind: CapabilityLease
+metadata:
+  name: <string>
+  namespace: <string>
+spec:
+  leaseId: <string>
+  holderSpiffeId: <string>
+  issuerSpiffeId: <string>
+  allowedEffects:
+    - <string>                    # "READ_K8S_STATE" | "EMIT_EVIDENCE_CAS" | "PROJECT_OSCAL"
+  allowedSubjectPrefixes:
+    - <string>
+  maxCalls: <int32>
+  notBefore: <timestamp>
+  expiresAt: <timestamp>
+  revoked: <bool>
+status:
+  state: <string>                 # "ACTIVE" | "EXPIRED" | "REVOKED" | "EXHAUSTED"
+  callsConsumed: <int32>
+  lastReceiptHash: <string>
 ```

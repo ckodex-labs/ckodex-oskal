@@ -30,16 +30,17 @@ oskal [global flags] <command> [command flags] [arguments]
 | `oskal assurance` | `state`, `explain`, `evidence`, `drift`, `receipt verify` | Continuous assurance evaluation and explainability |
 | `oskal record` | `admission` | Record evaluation evidence from workload manifests |
 | `oskal export` | `assessment-results`, `component-definition`, `assessment-plan`, `ssp`, `poam` | Export to NIST OSCAL v1.2.3 JSON models |
-| `oskal import` | `oskal` | Import OSCAL component definitions into Kubernetes CRDs |
+| `oskal import` | `oscal` | Import OSCAL component definitions into Kubernetes CRDs |
 | `oskal validate` | (standalone) | Validate OSCAL documents against NIST v1.2.3 schemas |
-| `oskal scaffold` | `control-binding`, `evidence-contract`, `oscal-component` | Generate boilerplate compliance and policy CRDs |
+| `oskal scaffold` | `<profile>` (`nist-sp-800-53`, `pci-dss`, `soc-2`, `iso-27001`) | Generate boilerplate compliance and policy CRDs |
 | `oskal doctor` | (standalone) | Preflight diagnostics and environment verification |
 | `oskal inspect` | (standalone) | Four-channel truth inspection for a subject |
 | `oskal cockpit` | (standalone) | Interactive ASCII monitoring console |
 | `oskal mcp` | (standalone) | Model Context Protocol (MCP) stdio JSON-RPC server |
+| `oskal utcp` | `manual`, `serve`, `search`, `list`, `info`, `required-keys`, `call`, `register`, `deregister` | Universal Tool Calling Protocol (UTCP v1.0.1) discovery and execution |
 | `oskal serve` | (standalone) | Start the gRPC AssuranceService daemon |
 | `oskal webhook` | (standalone) | Run the Kubernetes Validating Admission Webhook |
-| `oskal config` | `init`, `show`, `validate` | Manage `.oskal.yaml` configuration |
+| `oskal config` | `init`, `view`, `path` | Manage `.oskal.yaml` configuration |
 | `oskal prune` | (standalone) | Prune expired CAS evidence envelopes |
 
 ---
@@ -217,15 +218,23 @@ oskal validate examples/oscal-component-definition.json
 
 ### `oskal scaffold`
 
-Scaffolds compliance artifacts and CRDs.
+Scaffolds compliance artifacts (`ControlBinding`, `EvidenceContract`, and OSCAL Component Definition) for a baseline profile.
 
-#### Subcommands:
-- `oskal scaffold control-binding --control <id> --subject <uri>`: Generates a Kubernetes `ControlBinding` CRD.
-- `oskal scaffold evidence-contract --control <id> --subject <uri>`: Generates an `EvidenceContract` CRD.
-- `oskal scaffold oscal-component --name <name> --control <id>`: Generates a starter OSCAL Component Definition JSON.
+```bash
+oskal scaffold <profile> [flags]
+```
+
+#### Supported Profiles:
+- `nist-sp-800-53`
+- `pci-dss`
+- `soc-2`
+- `iso-27001`
 
 #### Flags:
-- `--output <yaml|json>`: Output format (default: `yaml`).
+- `--workload <name>`: Target Kubernetes workload name (default: `example-app`).
+- `--namespace <ns>`: Target Kubernetes namespace (default: `default`).
+- `--output-dir <dir>`: Write generated YAML/JSON files to directory.
+- `--output <yaml|json|table|tree>`: Output format (default: `yaml`).
 
 ---
 
@@ -279,6 +288,23 @@ oskal mcp
 
 ---
 
+### `oskal utcp`
+
+Universal Tool Calling Protocol (UTCP v1.0.1) discovery, registration, and direct execution.
+
+#### Subcommands:
+- `oskal utcp manual [--transport <cli|http|grpc|mcp>]`: Emit the UTCP v1.0.1 manual JSON.
+- `oskal utcp serve [--listen <addr>]`: Start the HTTP UTCP discovery and tool provider endpoint.
+- `oskal utcp search <query>`: Search registered UTCP tools by keyword and tags.
+- `oskal utcp list`: List all registered UTCP tools.
+- `oskal utcp info <tool-name>`: Show full schema and call template for a UTCP tool.
+- `oskal utcp required-keys <tool-name>`: List required input and auth variables for a tool.
+- `oskal utcp call <tool-name> [--args <json>]`: Invoke a UTCP tool directly.
+- `oskal utcp register --name <name> --type <http|cli|grpc|mcp|text>`: Register a UTCP manual or tool provider.
+- `oskal utcp deregister <manual-name>`: Deregister a UTCP manual or tool provider.
+
+---
+
 ### `oskal serve`
 
 Starts the gRPC AssuranceService daemon hosting continuous evaluation loops and evidence stores.
@@ -288,7 +314,9 @@ oskal serve [flags]
 ```
 
 #### Flags:
-- `--port <int>`: Port for gRPC service to listen on (default: `9090`).
+- `--listen <addr>`: TCP address for gRPC server to listen on (default: `127.0.0.1:9090`).
+- `--tls-cert-file <path>`: Optional path to TLS server certificate PEM file.
+- `--tls-key-file <path>`: Optional path to TLS server private key PEM file.
 
 ---
 
@@ -302,7 +330,7 @@ oskal webhook [flags]
 
 #### Flags:
 - `--listen <addr>`: Address to bind webhook HTTPS server (default: `:8443`).
-- `--mode <enforce|audit>`: Webhook enforcement mode (default: `enforce`).
+- `--mode <enforcing|warn|audit>`: Webhook enforcement mode (default: `enforcing`).
 - `--evidence-dir <path>`: Local CAS directory for written admission envelopes.
 - `--tls-cert <path>`: Path to TLS certificate.
 - `--tls-key <path>`: Path to TLS private key.
@@ -316,8 +344,8 @@ Manages the local `.oskal.yaml` configuration file.
 
 #### Subcommands:
 - `oskal config init [--force]`: Initializes a default configuration file.
-- `oskal config show`: Prints the active resolved configuration.
-- `oskal config validate`: Checks the configuration syntax and file paths.
+- `oskal config view`: Prints the active resolved configuration.
+- `oskal config path`: Prints the active configuration file path.
 
 ---
 

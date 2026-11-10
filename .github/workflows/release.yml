@@ -85,6 +85,13 @@ jobs:
         run: |
           syft scan dir:. -o cyclonedx-json=dist/ckodex-oskal_${GITHUB_REF_NAME#v}_sbom.cyclonedx.json
 
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build and Publish OCI Container Image
         run: |
           docker build \
@@ -93,6 +100,8 @@ jobs:
             --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
             -t ghcr.io/ckodex-labs/oskal-controller:${GITHUB_REF_NAME} \
             -t ghcr.io/ckodex-labs/oskal-controller:latest .
+          docker push ghcr.io/ckodex-labs/oskal-controller:${GITHUB_REF_NAME}
+          docker push ghcr.io/ckodex-labs/oskal-controller:latest
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

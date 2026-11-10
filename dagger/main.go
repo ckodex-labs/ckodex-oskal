@@ -100,8 +100,8 @@ func (m *Oskal) Build(ctx context.Context, source *dagger.Directory) (*dagger.Di
 		WithMountedCache("/root/.cache/go-build", goCache).
 		WithMountedCache("/go/pkg/mod", modCache).
 		WithEnvVariable("CGO_ENABLED", "0").
-		WithExec([]string{"go", "build", "-trimpath", "-ldflags", "-s -w", "-o", "/out/bin/oskal", "./cmd/oskal"}).
-		WithExec([]string{"go", "build", "-trimpath", "-ldflags", "-s -w", "-o", "/out/bin/oskal-controller", "./cmd/oskal-controller"}).
+		WithExec([]string{"go", "build", "-trimpath", "-ldflags=-s -w -X main.version=v1.0.0", "-o", "/out/bin/oskal", "./cmd/oskal"}).
+		WithExec([]string{"go", "build", "-trimpath", "-ldflags=-s -w -X main.version=v1.0.0", "-o", "/out/bin/oskal-controller", "./cmd/oskal-controller"}).
 		WithExec([]string{"sh", "-c", "cd /out/bin && sha256sum * > SHA256SUMS"})
 
 	return builder.Directory("/out/bin"), nil
@@ -122,7 +122,7 @@ func (m *Oskal) Attest(ctx context.Context, source *dagger.Directory) (*dagger.D
 		WithMountedDirectory("/out/bin", binDir).
 		WithWorkdir("/out/attestations").
 		WithEnvVariable("COSIGN_PASSWORD", "").
-		WithExec([]string{"cosign", "generate-key-pair"}).
+		WithExec([]string{"sh", "-c", "mkdir -p /tmp/cosign && cd /tmp/cosign && cosign generate-key-pair && cp /tmp/cosign/cosign.pub /out/attestations/cosign.pub"}).
 		WithExec([]string{"sh", "-c", `
 OSKAL_HASH=$(sha256sum /out/bin/oskal | awk '{print $1}')
 CTRL_HASH=$(sha256sum /out/bin/oskal-controller | awk '{print $1}')
@@ -133,6 +133,10 @@ cat <<EOF > /out/attestations/provenance.json
     "buildType": "https://dagger.io/module/ckodex/oskal@v1",
     "externalParameters": {
       "repository": "https://github.com/ckodex-labs/ckodex-oskal"
+    },
+    "internalParameters": {
+      "oskal_sha256": "${OSKAL_HASH}",
+      "oskal_controller_sha256": "${CTRL_HASH}"
     }
   },
   "runDetails": {
@@ -143,9 +147,11 @@ cat <<EOF > /out/attestations/provenance.json
 }
 EOF
 `}).
-		WithExec([]string{"cosign", "sign-blob", "--yes", "--key", "cosign.key", "--output-signature", "oskal.sig", "/out/bin/oskal"}).
-		WithExec([]string{"cosign", "sign-blob", "--yes", "--key", "cosign.key", "--output-signature", "oskal-controller.sig", "/out/bin/oskal-controller"}).
-		WithExec([]string{"cosign", "attest-blob", "--yes", "--key", "cosign.key", "--predicate", "provenance.json", "--type", "slsaprovenance1", "--output-attestation", "in-toto-attestation.json", "/out/bin/oskal"}).
+		WithExec([]string{"cosign", "sign-blob", "--yes", "--key", "/tmp/cosign/cosign.key", "--output-signature", "oskal.sig", "/out/bin/oskal"}).
+		WithExec([]string{"cosign", "sign-blob", "--yes", "--key", "/tmp/cosign/cosign.key", "--output-signature", "oskal-controller.sig", "/out/bin/oskal-controller"}).
+		WithExec([]string{"cosign", "attest-blob", "--yes", "--key", "/tmp/cosign/cosign.key", "--predicate", "provenance.json", "--type", "slsaprovenance1", "--output-attestation", "in-toto-attestation.json", "/out/bin/oskal"}).
+		WithExec([]string{"cosign", "attest-blob", "--yes", "--key", "/tmp/cosign/cosign.key", "--predicate", "provenance.json", "--type", "slsaprovenance1", "--output-attestation", "in-toto-attestation-controller.json", "/out/bin/oskal-controller"}).
+		WithExec([]string{"sh", "-c", "rm -rf /tmp/cosign /out/attestations/cosign.key"}).
 		WithExec([]string{"cosign", "verify-blob", "--key", "cosign.pub", "--signature", "oskal.sig", "/out/bin/oskal"}).
 		WithExec([]string{"cosign", "verify-blob", "--key", "cosign.pub", "--signature", "oskal-controller.sig", "/out/bin/oskal-controller"})
 

@@ -3,7 +3,7 @@ locale = "en-US"
 title = "CKODEX-OSKAL - Continuous Assurance Runtime"
 
 [params]
-  version = "v0.3.1"
+  version = "v1.0.0"
   spec = "CKX-OSKAL-001"
   repository = "https://github.com/ckodex-labs/ckodex-oskal"
   authority = "ckodex-labs"

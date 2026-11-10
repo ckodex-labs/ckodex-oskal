@@ -49,7 +49,7 @@ spec:
     spec:
       containers:
         - name: controller
-          image: ghcr.io/ckodex-labs/ckodex-oskal/oskal-controller:v0.1.0-alpha.1
+          image: ghcr.io/ckodex-labs/oskal-controller:v1.0.0
           resources:
             limits:
               cpu: "500m"

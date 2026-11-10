@@ -20,6 +20,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -o /out/oskal-controller ./cmd/oskal-controller
 
 FROM gcr.io/distroless/static:nonroot
+LABEL org.opencontainers.image.source="https://github.com/ckodex-labs/ckodex-oskal" \
+      org.opencontainers.image.description="CKODEX OSKAL Continuous Assurance Controller and CLI" \
+      org.opencontainers.image.licenses="Apache-2.0"
 WORKDIR /
 COPY --from=builder /out/oskal /oskal
 COPY --from=builder /out/oskal-controller /oskal-controller
