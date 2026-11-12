@@ -39,17 +39,20 @@ metadata:
   name: contract-workload-identity
   namespace: production
 spec:
-  subjectSelector:
-    matchLabels:
-      tier: secure-core
-  requiredEvidence:
-    - observationType: "kubernetes.admission"
-      maxAge: 30m
-      allowedProducers:
+  onMissingRequiredEvidence:
+    state: Unknown
+  requirements:
+    - id: req-admission-valid
+      type: "k8s:admission:review"
+      required: true
+      freshness: 30m0s
+      acceptedProducers:
         - "spiffe://ckodex.internal/ns/system/sa/oskal-cel-adapter"
-    - observationType: "workload.runtime.capabilities"
-      maxAge: 15m
-      allowedProducers:
+    - id: req-runtime-capabilities
+      type: "workload.runtime.capabilities"
+      required: true
+      freshness: 15m0s
+      acceptedProducers:
         - "spiffe://ckodex.internal/ns/system/sa/oskal-tetragon-adapter"
 ```
 

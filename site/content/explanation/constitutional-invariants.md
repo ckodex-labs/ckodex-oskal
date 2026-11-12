@@ -33,6 +33,8 @@ The OSKAL architecture is governed by ten constitutional invariants (I-01 throug
 
 In scoring and compliance calculations, hard invariants dominate:
 
-$$\text{If } \exists \text{ Invariant Violation} \implies \text{State} = \text{NON-CONFORMANT}$$
+```text
+exists InvariantViolation  ==>  State = NON-CONFORMANT
+```
 
 A system with 99 passing checks and 1 mandatory invariant violation does not score 99%; it is immediately flagged as non-conformant.

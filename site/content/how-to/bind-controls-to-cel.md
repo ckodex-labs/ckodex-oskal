@@ -63,21 +63,32 @@ metadata:
   name: bind-least-privilege-admission
   namespace: production
 spec:
-  canonicalControl: "ckodex:container.least-privilege"
-  frameworkMappings:
-    - framework: "NIST-SP-800-53"
-      controlId: "AC-6"
-    - framework: "CIS-Kubernetes-Benchmark"
-      controlId: "5.2.6"
-  workloadSelector:
-    matchLabels:
-      app.kubernetes.io/part-of: core-banking
-  implementation:
-    provider: "kubernetes.admission.cel"
-    componentRef: "validatingadmissionpolicy/disallow-root-user"
-    policyDigest: "sha256:d8912e84...0192"
-  evidenceContractRef:
-    name: contract-least-privilege
+  controls:
+    - canonical:
+        namespace: nist-sp-800-53
+        id: AC-6
+        version: Rev5
+      mappings:
+        - framework: NIST-SP-800-53
+          control: AC-6
+          version: "5"
+        - framework: CIS-Kubernetes-Benchmark
+          control: "5.2.6"
+  subjects:
+    kinds:
+      - Deployment
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/part-of: core-banking
+  requirements:
+    - id: binding-admission-least-privilege
+      evidenceContract: contract-least-privilege
+      implementations:
+        - purpose: preventive
+          provider: kubernetes-validating-admission
+          ref:
+            name: disallow-root-user
+            namespace: ckodex-system
 ```
 
 ---

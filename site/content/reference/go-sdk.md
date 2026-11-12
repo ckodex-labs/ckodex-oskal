@@ -12,27 +12,37 @@ invariant: "Invisible excellence: pure domain abstractions with zero transport l
 import "github.com/ckodex-labs/ckodex-oskal/pkg/oskal"
 ```
 
-The `oskal` package provides a high-assurance client interface for querying, ingesting, and verifying continuous assurance states.
+The `oskal` package provides a continuous assurance client interface for querying, evaluating, ingesting, projecting, and verifying assurance states. For UTCP v1.0.1 tooling and governed agentic calls, see [`pkg/utcp`](../utcp-mcp/).
 
 ---
 
-## Client Constructors
+## Client Constructors & Options
 
 ### `NewClient`
 
-Creates a gRPC-backed client connected to an OSKAL daemon or controller:
+Connects to an OSKAL `AssuranceService` gRPC daemon:
 
 ```go
-func NewClient(ctx context.Context, target string, opts ...grpc.DialOption) (Client, error)
+func NewClient(ctx context.Context, target string, opts ...ClientOption) (Client, error)
 ```
+
+Available `ClientOption` helpers:
+- `WithInsecure() ClientOption`
+- `WithDialOptions(opts ...grpc.DialOption) ClientOption`
+- `WithTimeout(d time.Duration) ClientOption`
+- `WithRetry(maxAttempts int, baseBackoff time.Duration) ClientOption`
 
 ### `NewInProcessClient`
 
-Creates a fully functional, zero-network in-memory engine:
+Creates a fully functional, zero-network in-memory client implementing `Client`:
 
 ```go
-func NewInProcessClient(opts ...InProcessOption) Client
+func NewInProcessClient(opts ...InProcessOption) *InProcessClient
 ```
+
+Available `InProcessOption` helpers:
+- `WithEvaluatorAuthority(auth AuthorityRef) InProcessOption`
+- `WithReceiptManager(mgr *ReceiptManager) InProcessOption`
 
 ---
 
@@ -40,37 +50,55 @@ func NewInProcessClient(opts ...InProcessOption) Client
 
 ```go
 type Client interface {
-    GetAssuranceState(ctx context.Context, subject SubjectRef) (*AssuranceState, error)
-    ExplainClaim(ctx context.Context, subject SubjectRef, control ControlRef) (*ExplainGraph, error)
-    IngestEvidence(ctx context.Context, envelope *EvidenceEnvelope) error
-    VerifyReceipt(ctx context.Context, receipt *ControlReceipt) (*ReceiptVerification, error)
+    GetAssuranceState(ctx context.Context, subject SubjectRef) (*StateResponse, error)
+    EvaluateSubject(ctx context.Context, subject SubjectRef, controls []ControlRef) (*EvaluationResponse, error)
+    ExplainClaim(ctx context.Context, subject SubjectRef, control ControlRef) (*ExplainResponse, error)
+    SubmitObservation(ctx context.Context, obs *ProtoObservation) (string, error)
+    SubmitReceipt(ctx context.Context, rcpt *ProtoReceipt) (bool, string, error)
     Close() error
 }
 ```
 
 ---
 
-## Fluent Builders
+## Fluent Builders & Digests
+
+### `NewObservation`
+
+Builds a wire `ProtoObservation` (`*evidencev1.Observation`) ready for `Client.SubmitObservation`:
+
+```go
+func NewObservation(id, obsType string, subject SubjectRef) *ObservationBuilder
+```
+
+Builder methods:
+- `.WithProducer(auth AuthorityRef) *ObservationBuilder`
+- `.WithEvidenceRef(uri, digest, mediaType string) *ObservationBuilder`
+- `.WithObservedAt(t time.Time) *ObservationBuilder`
+- `.Build() (*ProtoObservation, error)`
 
 ### `NewEvidenceEnvelope`
 
-Constructs an `EvidenceEnvelope` with automatic SHA-256 integrity digest computation:
+Initializes a fluent builder for canonical domain `EvidenceEnvelope` objects:
 
 ```go
-func NewEvidenceEnvelope(
-    schemaVersion string,
-    id string,
-    subject SubjectRef,
-    observationType string,
-) (*EvidenceEnvelope, error)
+func NewEvidenceEnvelope(schema, id string, subject SubjectRef, obsType string) *EvidenceEnvelopeBuilder
 ```
 
-### `ComputeEvidenceRoot`
+Builder methods:
+- `.WithProducer(auth AuthorityRef) *EvidenceEnvelopeBuilder`
+- `.WithArtifact(uri, digest, mediaType string) *EvidenceEnvelopeBuilder`
+- `.WithEpoch(epoch AssuranceEpoch) *EvidenceEnvelopeBuilder`
+- `.WithControlRefs(ctrls ...ControlRef) *EvidenceEnvelopeBuilder`
+- `.WithCapturedAt(t time.Time) *EvidenceEnvelopeBuilder`
+- `.WithIntegrityDigest(digest string) *EvidenceEnvelopeBuilder`
+- `.Build() (EvidenceEnvelope, error)`
 
-Calculates the canonical Merkle root over an arbitrary set of leaf digest strings:
+### `ComputeEvidenceRoot` & `ComputeStringDigest`
 
 ```go
-func ComputeEvidenceRoot(leafDigests []string) string
+func ComputeEvidenceRoot(digests []string) string
+var ComputeStringDigest = assurance.ComputeStringDigest
 ```
 
 ---
@@ -79,36 +107,40 @@ func ComputeEvidenceRoot(leafDigests []string) string
 
 ### `NewReceiptManager`
 
-Instantiates an Ed25519 signer and verifier for non-repudiable receipts:
+Instantiates an Ed25519 signer and verifier scoped to an `AuthorityRef`:
 
 ```go
-func NewReceiptManager(signerSPIFFEID string) (*ReceiptManager, error)
+func NewReceiptManager(evaluator AuthorityRef) (*ReceiptManager, error)
 ```
 
 Methods on `*ReceiptManager`:
-
-- `SignReceipt(...) (*ControlReceipt, error)`
-- `VerifyReceipt(receipt *ControlReceipt) error`
+- `IssueReceipt(subject SubjectRef, control ControlRef, state AssuranceState, epoch AssuranceEpoch, evidences []EvidenceRef, evaluatedAt time.Time) (assurance.ControlReceipt, error)`
+- `VerifyReceipt(rcpt assurance.ControlReceipt) bool`
+- `PublicKey() string`
 
 ### `VerifyIndependentReceipt`
 
-Verifies an Ed25519 `ControlReceipt` offline given an arbitrary public key hex string:
+Verifies an Ed25519 `ControlReceipt` offline given an explicit public key hex string:
 
 ```go
-func VerifyIndependentReceipt(receipt *ControlReceipt, pubKeyHex string) error
+func VerifyIndependentReceipt(rcpt assurance.ControlReceipt, publicKeyHex string) (bool, error)
 ```
 
 ---
 
 ## OSCAL Projector
 
-### `ProjectAssessmentResults`
+### `NewProjector`
 
-Converts a collection of verified `ClaimEvaluation` records into NIST OSCAL 1.2.3 Assessment Results JSON:
+Initializes a NIST OSCAL v1.2.3 JSON projector:
 
 ```go
-func ProjectAssessmentResults(
-    evaluations []*ClaimEvaluation,
-    title string,
-) ([]byte, error)
+func NewProjector() *Projector
 ```
+
+Methods on `*Projector`:
+- `ProjectAssessmentPlan(ctx context.Context, subject SubjectRef, contract EvidenceContract, controls []ControlRef) ([]byte, error)`
+- `ProjectAssessmentResults(ctx context.Context, subject SubjectRef, evaluations []ClaimEvaluation, findings []Finding) ([]byte, error)`
+- `ProjectComponentDefinition(ctx context.Context, componentName string, evaluations []ClaimEvaluation) ([]byte, error)`
+- `ProjectSSP(ctx context.Context, systemName string, evaluations []ClaimEvaluation) ([]byte, error)`
+- `ProjectPOAM(ctx context.Context, subject SubjectRef, findings []Finding) ([]byte, error)`

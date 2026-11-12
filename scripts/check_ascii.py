@@ -3,7 +3,7 @@ import os
 import sys
 
 extensions = ('.go', '.md', '.proto', '.yaml', '.yml', '.json', '.toml', 'Makefile')
-ignored_dirs = {'.git', 'vendor', 'bin', 'testdata'}
+ignored_dirs = {'.git', 'vendor', 'bin', 'testdata', 'public', 'resources'}
 ignored_files = {'dagger.gen.go'}
 
 non_ascii_files = []

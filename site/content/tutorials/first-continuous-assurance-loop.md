@@ -58,9 +58,9 @@ Notice that OSKAL does not report a fake `PASS` or synthetic digest. Absence of 
 
 ---
 
-## Step 2: Ingest Valid Admission & Runtime Evidence
+## Step 2: Record Authentic Admission Evidence
 
-Now, we will simulate the ingestion of authentic evidence envelopes emitted by the Kubernetes CEL admission controller and the runtime sensor.
+Now generate a cryptographically digested `EvidenceEnvelope` and Ed25519-signed `ControlReceipt` directly from the included sample workload manifest (`examples/sample-workload.yaml`, which defines `Deployment/payments-api` in namespace `ckodex-assurance-test`).
 
 Create a temporary directory for evidence envelopes:
 
@@ -68,99 +68,29 @@ Create a temporary directory for evidence envelopes:
 mkdir -p /tmp/oskal-tutorial/evidence
 ```
 
-You can either record evidence automatically from a manifest using the OSKAL CLI:
+Record the admission evidence envelope and control receipt with the OSKAL CLI:
 
 ```bash
-./bin/oskal record admission --file examples/sample-workload.yaml --evidence-dir /tmp/oskal-tutorial/evidence
+./bin/oskal record admission \
+  --file examples/sample-workload.yaml \
+  --evidence-dir /tmp/oskal-tutorial/evidence
 ```
 
-Or write the canonical admission observation envelope directly to `/tmp/oskal-tutorial/evidence/env-admission.json`:
-
-```json
-{
-  "schema": "https://assurance.ckodex.io/schemas/v1",
-  "id": "env-001-admission",
-  "subject": {
-    "scheme": "k8s",
-    "id": "production/Deployment/payment-service"
-  },
-  "observationType": "admission",
-  "capturedAt": "2026-10-25T12:00:00Z",
-  "producer": {
-    "scheme": "spiffe",
-    "subject": "ckodex.internal/ns/system/sa/oskal-cel-adapter"
-  },
-  "artifact": {
-    "uri": "file:///manifests/payment-service.yaml",
-    "digest": "sha256:88192a0149bb8812c3098194a081bc2014918239018401928091820491820938",
-    "mediaType": "application/yaml"
-  },
-  "integrityDigest": "sha256:88192a0149bb8812c3098194a081bc2014918239018401928091820491820938",
-  "epoch": {
-    "subjectDigest": "sha256:1a84f329910c2837bc2810000000000000000000000000000000000000000000",
-    "implementationDigest": "sha256:f47a981240182409182409182409182409182409182409182409182409182409",
-    "policyDigest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "authorityDigest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-    "environmentDigest": "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
-  },
-  "controlRefs": [
-    {
-      "namespace": "nist-sp-800-53",
-      "id": "AC-6"
-    }
-  ]
-}
-```
-
-Write the runtime observation envelope to `/tmp/oskal-tutorial/evidence/env-runtime.json`:
-
-```json
-{
-  "schema": "https://assurance.ckodex.io/schemas/v1",
-  "id": "env-002-runtime",
-  "subject": {
-    "scheme": "k8s",
-    "id": "production/Deployment/payment-service"
-  },
-  "observationType": "runtime.capabilities",
-  "capturedAt": "2026-10-25T12:00:05Z",
-  "producer": {
-    "scheme": "spiffe",
-    "subject": "ckodex.internal/ns/system/sa/oskal-tetragon-adapter"
-  },
-  "artifact": {
-    "uri": "k8s://production/Deployment/payment-service/caps",
-    "digest": "sha256:49c01192fa9812cc182901380918204918240182903810293810928301928301",
-    "mediaType": "application/json"
-  },
-  "integrityDigest": "sha256:49c01192fa9812cc182901380918204918240182903810293810928301928301",
-  "epoch": {
-    "subjectDigest": "sha256:1a84f329910c2837bc2810000000000000000000000000000000000000000000",
-    "implementationDigest": "sha256:f47a981240182409182409182409182409182409182409182409182409182409",
-    "policyDigest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "authorityDigest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-    "environmentDigest": "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
-  },
-  "controlRefs": [
-    {
-      "namespace": "nist-sp-800-53",
-      "id": "AC-6"
-    }
-  ]
-}
-```
+The command computes authentic SHA-256 content and epoch digests and writes:
+- An `EvidenceEnvelope` JSON file (`ev-adm-payments-api-<epoch>.json`)
+- A signed `ControlReceipt` JSON file (`rcpt-adm-payments-api.json` and `rcpt-AC-6.json`)
 
 ---
 
 ## Step 3: Evaluate State and Inspect the Section 51 Explain Graph
 
-Run the OSKAL explain command pointing to the directory of authentic evidence:
+Run the OSKAL explain command pointing to the local evidence directory:
 
 ```bash
 ./bin/oskal assurance explain \
   --subject-kind Deployment \
-  --subject-name payment-service \
-  --subject-namespace production \
+  --subject-name payments-api \
+  --subject-namespace ckodex-assurance-test \
   --control AC-6 \
   --evidence-dir /tmp/oskal-tutorial/evidence
 ```
@@ -169,7 +99,7 @@ The output renders the Section 51 Explain Graph:
 
 ```text
 SUBJECT
-k8s://production/Deployment/payment-service
+k8s://ckodex-assurance-test/Deployment/payments-api
 
 CONTROL
 nist-sp-800-53:AC-6
@@ -225,26 +155,25 @@ ASSURANCE
 ASSURED
 
 EVIDENCE ROOT
-sha256:33b2bca7002b852ba15a9fae8d57597393caa446c467bde0afed6a7c9b327fdf
+sha256:c44cd7657e107c058f1182c4f7411930236431ca9c3b610d613e3a9eed9ffb8e
 ```
 
 ---
 
 ## Step 4: Verify the Cryptographic Receipt
 
-Every positive evaluation produces a verifiable receipt. Let us verify this receipt using the OSKAL CLI:
+Every positive evaluation produces a verifiable receipt. Verify the generated receipt using the OSKAL CLI:
 
 ```bash
 ./bin/oskal assurance receipt verify \
-  --receipt-id rcpt-prod-payment-service-AC-6 \
-  --evidence-dir /tmp/oskal-tutorial/evidence
+  --receipt-file /tmp/oskal-tutorial/evidence/rcpt-adm-payments-api.json
 ```
 
 ```text
-[VERIFIED] Receipt rcpt-prod-payment-service-AC-6 is cryptographically valid.
-Signer Identity:  spiffe://ckodex.internal/ns/system/sa/oskal-controller
-Merkle Root:      sha256:39a81f08cb2149b109e2098fa0192809ca1980a0129038cb019a82019481920b
+[VERIFIED] Receipt in /tmp/oskal-tutorial/evidence/rcpt-adm-payments-api.json is cryptographically valid.
+Signer Identity:  spiffe://ckodex.internal/ns/system/sa/oskal-admission-controller
+Merkle Root:      sha256:c44cd7657e107c058f1182c4f7411930236431ca9c3b610d613e3a9eed9ffb8e
 Status:           NON-REPUDIABLE PROOF ESTABLISHED
 ```
 
-Congratulations! You have completed your first continuous assurance loop, observed real substrate events, satisfied an evidence contract, and generated an offline-verifiable proof.
+Congratulations! You have completed your first continuous assurance loop, recorded authentic evidence from a Kubernetes workload manifest, inspected the Section 51 Explain Graph, and verified an Ed25519-signed receipt.

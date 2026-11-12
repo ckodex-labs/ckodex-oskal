@@ -39,5 +39,5 @@ OSKAL is architected with **Air-Gap as a First-Class Design Property**.
 If an air-gapped node detects an evidence conflict (e.g. signature verification failure or an unexpected change in model weight digests), OSKAL applies the **Containment Protocol**:
 1. **Freeze**: Prevent admission or promotion of the affected workload.
 2. **Preserve Evidence**: Record the exact contradictory observations in the flight recorder log.
-3. **Quarantine**: Transition the workload's Vector State to $L = \text{QUARANTINED}$ and $A = \text{CONTRADICTED}$.
+3. **Quarantine**: Transition the workload's Vector State to `L = QUARANTINED` and `A = CONTRADICTED`.
 4. **Isolate**: Instruct Cilium to restrict egress and isolate the pod without destroying the container state needed for forensics.

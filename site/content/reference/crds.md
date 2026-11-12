@@ -13,13 +13,20 @@ Group:   assurance.ckodex.io
 Version: v1alpha1
 ```
 
+| Kind | Short Name | Purpose |
+| :--- | :--- | :--- |
+| `ControlBinding` | `cb` | Bind canonical controls & external frameworks to Kubernetes workloads |
+| `EvidenceContract` | `ec` | Declare required evidence types, freshness bounds, and allowed producers |
+| `AssurancePolicy` | `ap` | Cluster governance thresholds, admission gating, and failure policies |
+| `ControlException` | `ce` | Temporally bounded derogation with compensating controls (I-05) |
+| `AssuranceState` | `as` | Lightweight state & Merkle root projection (zero raw evidence in etcd) |
+| `CapabilityLease` | `cl` | Bounded, revocable authority for agentic workcells and UTCP tools |
+
 ---
 
-## 1. `ControlBinding`
+## 1. `ControlBinding` (`cb`)
 
-Binds canonical security controls to workload selectors, atomic requirements, and `EvidenceContract` references.
-
-### Schema:
+Binds canonical security controls to workload subject selectors, implementation providers, and `EvidenceContract` references.
 
 ```yaml
 apiVersion: assurance.ckodex.io/v1alpha1
@@ -28,38 +35,42 @@ metadata:
   name: <string>
   namespace: <string>
 spec:
-  selector:
-    namespaces:
-      - <string>
-    workloadSelector:
-      matchLabels: <map[string]string>
   controls:
     - canonical:
-        namespace: <string>       # e.g. "ckodex"
-        id: <string>              # e.g. "container.least-privilege"
+        namespace: <string>       # e.g. "nist-sp-800-53"
+        id: <string>              # e.g. "AC-6"
+        version: <string>         # e.g. "Rev5"
       mappings:
         - framework: <string>     # e.g. "NIST-SP-800-53"
-          version: <string>       # e.g. "rev5"
-          controlId: <string>     # e.g. "AC-6"
+          control: <string>       # e.g. "AC-6"
+          version: <string>       # e.g. "5"
+  subjects:
+    apiGroups:
+      - <string>
+    kinds:
+      - <string>                  # e.g. "Deployment", "StatefulSet"
+    namespaceSelector: <metav1.LabelSelector>
+    labelSelector: <metav1.LabelSelector>
   requirements:
-    - id: <string>                # e.g. "non-root-execution"
-      implementation: <string>    # e.g. "validating-admission-policy/disallow-root"
+    - id: <string>                # e.g. "binding-admission-least-privilege"
       evidenceContract: <string>  # Name of EvidenceContract
+      implementations:
+        - purpose: <string>       # "preventive" | "detective" | "corrective" | "compensating"
+          provider: <string>      # "kubernetes-validating-admission" | "tetragon" | "cilium" | "sigstore"
+          ref:
+            name: <string>
+            namespace: <string>
 status:
   observedGeneration: <int64>
-  conditions:
-    - type: Ready
-      status: "True" | "False"
-      reason: "ASSURED" | "UNKNOWN" | "STALE" | "FAILED"
+  activeSubjects: <int>
+  conditions: <[]metav1.Condition>
 ```
 
 ---
 
-## 2. `EvidenceContract`
+## 2. `EvidenceContract` (`ec`)
 
-Specifies the evidence requirements, accepted producers, and freshness bounds that must be met to satisfy a control.
-
-### Schema:
+Specifies the required evidence signals, freshness durations, and accepted producer authorities that must be satisfied for a control.
 
 ```yaml
 apiVersion: assurance.ckodex.io/v1alpha1
@@ -68,24 +79,15 @@ metadata:
   name: <string>
   namespace: <string>
 spec:
-  requirementId: <string>
-  requiredEvidence:
-    - type: <string>              # "kubernetes.admission" | "runtime.ebpf"
-      producerSelector:
-        spiffeTrustDomain: <string>
-        allowedSubjects:
-          - <string>
-      maxAge: <duration>          # e.g. "15m", "1h"
-      verification:
-        signatureRequired: <bool>
-        provenanceRequired: <bool>
-  evaluation:
-    engine: <string>              # "cel"
-    expression: <string>
-  failurePolicy:
-    onMissingEvidence: "UNKNOWN" | "FAILED"
-    onStaleEvidence: "STALE" | "FAILED"
-    onUnverifiedSignature: "FAILED"
+  requirements:
+    - id: <string>                # e.g. "req-admission-valid"
+      type: <string>              # e.g. "k8s:admission:review", "sigstore:cosign:attestation"
+      required: <bool>
+      freshness: <duration>       # e.g. "15m0s", "24h0m0s"
+      acceptedProducers:
+        - <string>                # e.g. "spiffe://assurance.ckodex.io/ns/ckodex-system/sa/oskal-webhook"
+  onMissingRequiredEvidence:
+    state: <string>               # "Unknown" | "Failed" (Invariant I-02)
 status:
   observedGeneration: <int64>
   conditions: <[]metav1.Condition>
@@ -93,11 +95,9 @@ status:
 
 ---
 
-## 3. `AssurancePolicy`
+## 3. `AssurancePolicy` (`ap`)
 
-Defines cluster-wide governance thresholds, admission gating modes, and runtime containment rules.
-
-### Schema:
+Defines governance thresholds, freshness constraints, failure behavior, and admission enforcement configuration.
 
 ```yaml
 apiVersion: assurance.ckodex.io/v1alpha1
@@ -105,24 +105,27 @@ kind: AssurancePolicy
 metadata:
   name: <string>
 spec:
-  mode: <string>                  # "enforcing" | "warn" | "audit"
-  admission:
-    requireVerifiedProvenance: <bool>
-    requireValidControls:
-      - <string>
-    unknownDisposition: <string>  # "DENY" | "ADMIT_WITH_OBLIGATIONS"
-  runtime:
-    onInvalidation: <string>      # "ALERT_AND_QUARANTINE"
-    quarantineAction: <string>    # "APPLY_ISOLATION_NETWORK_POLICY"
+  requiredState: <string>         # e.g. "Assured"
+  evidence:
+    requireFresh: <bool>
+  behavior:
+    failOnConfirmedViolation: <bool>
+    unknownIsViolation: <bool>
+  freshness:
+    maxEvaluationAge: <duration>
+  enforcement:
+    admission:
+      enabled: <bool>
+status:
+  observedGeneration: <int64>
+  conditions: <[]metav1.Condition>
 ```
 
 ---
 
-## 4. `ControlException`
+## 4. `ControlException` (`ce`)
 
 Defines a temporally bounded, authorized derogation for a specific control failure (Invariant I-05: Derogation does not erase failure).
-
-### Schema:
 
 ```yaml
 apiVersion: assurance.ckodex.io/v1alpha1
@@ -132,32 +135,34 @@ metadata:
   namespace: <string>
 spec:
   subject:
+    apiVersion: <string>
     kind: <string>
-    name: <string>
     namespace: <string>
+    name: <string>
   controls:
     - <string>
   justification:
-    reason: <string>
     ticket: <string>
-    compensatingControls:
-      - <string>
+    notes: <string>
   authority:
     requiredApprovers:
       - <string>
-    signatureRef: <string>
   validity:
     notBefore: <timestamp>
-    notAfter: <timestamp>         # Permanent exceptions are strictly rejected (I-05)
+    notAfter: <timestamp>         # Permanent exceptions are rejected (I-05)
+  compensatingControls:
+    - <string>
+status:
+  phase: <string>                 # "Active" | "Expired" | "Revoked"
+  observedGeneration: <int64>
+  conditions: <[]metav1.Condition>
 ```
 
 ---
 
-## 5. `AssuranceState`
+## 5. `AssuranceState` (`as`)
 
-The lightweight status projection resource. **Stores zero raw evidence blobs in etcd** (ADR-002).
-
-### Schema:
+Lightweight status projection resource. **Stores zero raw evidence blobs in etcd** (ADR-002).
 
 ```yaml
 apiVersion: assurance.ckodex.io/v1alpha1
@@ -169,10 +174,11 @@ spec:
   subjectRef:
     apiVersion: <string>
     kind: <string>
-    name: <string>
     namespace: <string>
+    name: <string>
+    uid: <string>
 status:
-  state: <string>                 # "UNKNOWN" | "OBSERVED" | "VERIFIED" | "ASSURED" | "STALE" | "FAILED"
+  state: <string>                 # "Assured" | "Verified" | "Observed" | "Stale" | "Failed" | "Unknown"
   epoch:
     subject: <string>
     policy: <string>
@@ -187,15 +193,14 @@ status:
     - id: <string>
       state: <string>
       evidenceSummary: <string>
+  conditions: <[]metav1.Condition>
 ```
 
 ---
 
-## 6. `CapabilityLease`
+## 6. `CapabilityLease` (`cl`)
 
 Governs bounded, revocable authority for agentic workcells and UTCP tool execution (ADR-006).
-
-### Schema:
 
 ```yaml
 apiVersion: assurance.ckodex.io/v1alpha1
@@ -204,19 +209,19 @@ metadata:
   name: <string>
   namespace: <string>
 spec:
-  leaseId: <string>
-  holderSpiffeId: <string>
-  issuerSpiffeId: <string>
-  allowedEffects:
-    - <string>                    # "READ_K8S_STATE" | "EMIT_EVIDENCE_CAS" | "PROJECT_OSCAL"
-  allowedSubjectPrefixes:
-    - <string>
-  maxCalls: <int32>
-  notBefore: <timestamp>
-  expiresAt: <timestamp>
-  revoked: <bool>
+  principal: <string>
+  scope: <string>
+  allowedCapabilities:
+    - <string>                    # e.g. "tool:read-evidence", "tool:validate-oscal", "tool:scaffold-policy"
+  maxTurns: <int>
+  ttl: <duration>
 status:
-  state: <string>                 # "ACTIVE" | "EXPIRED" | "REVOKED" | "EXHAUSTED"
-  callsConsumed: <int32>
+  phase: <string>                 # "Active" | "Exhausted" | "Expired" | "Revoked"
+  currentTurn: <int>
   lastReceiptHash: <string>
+  issuedAt: <timestamp>
+  expiresAt: <timestamp>
+  revocationReason: <string>
+  observedGeneration: <int64>
+  conditions: <[]metav1.Condition>
 ```

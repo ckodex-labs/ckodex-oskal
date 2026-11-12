@@ -35,23 +35,32 @@ You do not need a live Kubernetes cluster to verify that your service fulfills a
 ```go
 func TestServiceAssuranceContract(t *testing.T) {
     client := oskal.NewInProcessClient()
-    defer client.Close()
+    defer func() { _ = client.Close() }()
 
+    ctx := context.Background()
     subject := oskal.SubjectRef{
-        Kind: "Deployment",
-        Name: "my-service",
+        Scheme: "k8s",
+        ID:     "default/Deployment/my-service",
     }
 
-    // Ingest simulated CI evidence
-    env, _ := oskal.NewEvidenceEnvelope("v1alpha1", "env-test", subject, "kubernetes.admission")
-    env.Observation.Attributes = map[string]string{
-        "admission.k8s.io/allowed": "true",
+    obs, err := oskal.NewObservation("obs-test", "kubernetes.admission", subject).
+        WithProducer(oskal.AuthorityRef{
+            Scheme:  "spiffe",
+            Subject: "ckodex.internal/ns/system/sa/test-runner",
+        }).
+        WithEvidenceRef("k8s://admission/review", oskal.ComputeStringDigest("admitted"), "application/json").
+        Build()
+    if err != nil {
+        t.Fatalf("failed to build observation: %v", err)
     }
-    _ = client.IngestEvidence(context.Background(), env)
 
-    state, err := client.GetAssuranceState(context.Background(), subject)
-    if err != nil || state.State != oskal.AssuranceStateVerified {
-        t.Fatalf("expected VERIFIED, got %v", state.State)
+    if _, err := client.SubmitObservation(ctx, obs); err != nil {
+        t.Fatalf("failed to submit observation: %v", err)
+    }
+
+    state, err := client.GetAssuranceState(ctx, subject)
+    if err != nil || state.State != oskal.StateAssured {
+        t.Fatalf("expected ASSURED, got %v (err=%v)", state, err)
     }
 }
 ```

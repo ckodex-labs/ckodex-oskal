@@ -34,14 +34,20 @@ metadata:
   name: contract-supply-chain-strict
   namespace: production
 spec:
-  requiredEvidence:
-    - observationType: "supply-chain.signature"
-      maxAge: 720h # 30 days
-      allowedProducers:
+  onMissingRequiredEvidence:
+    state: Unknown
+  requirements:
+    - id: req-sigstore-attestation
+      type: "sigstore:cosign:attestation"
+      required: true
+      freshness: 720h0m0s # 30 days
+      acceptedProducers:
         - "spiffe://ckodex.internal/ns/system/sa/oskal-sigstore-adapter"
-    - observationType: "ai.model.weights.attestation"
-      maxAge: 168h # 7 days
-      allowedProducers:
+    - id: req-ai-weights
+      type: "ai.model.weights.attestation"
+      required: true
+      freshness: 168h0m0s # 7 days
+      acceptedProducers:
         - "spiffe://ckodex.internal/ns/system/sa/oskal-shield-adapter"
 ```
 

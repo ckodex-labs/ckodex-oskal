@@ -48,10 +48,11 @@ The output gives you the complete **Section 51 Explain Graph**:
 OSKAL generates standard, schema-valid NIST OSCAL 1.2.3 Assessment Results JSON documents on demand:
 
 ```bash
-oskal export oscal --model assessment-results --output /tmp/audit-results.json
+oskal export assessment-results --subject k8s://production/Deployment/payment-service > /tmp/audit-results.json
+oskal validate /tmp/audit-results.json
 ```
 
 These documents can be directly fed into:
 - eMASS / FedRAMP automated assessment portals.
-- `ckodex-oscal-cli` for metaschema and constraint verification.
-- `ckodex-xoscal` for mathematical vector state verification.
+- Embedded offline NIST OSCAL v1.2.3 validation (`oskal validate`).
+- Independent offline Ed25519 receipt verification (`oskal assurance receipt verify`).

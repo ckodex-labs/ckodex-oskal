@@ -10,7 +10,8 @@ Reference documentation provides exhaustive, authoritative descriptions of OSKAL
 ## Technical Specifications
 
 - **OSKAL CLI Suite**: Command options, environment flags, exit codes, and output formats.
-- **Custom Resource Definitions**: Field schemas for `ControlBinding`, `EvidenceContract`, `AssurancePolicy`, `ControlException`, and `AssuranceState`.
-- **Go SDK (`pkg/oskal`)**: Interface signatures, client options, fluent builders, and error taxonomy.
+- **Custom Resource Definitions (6)**: Field schemas for `ControlBinding`, `EvidenceContract`, `AssurancePolicy`, `ControlException`, `AssuranceState`, and `CapabilityLease`.
+- **Go SDK (`pkg/oskal`)**: Interface signatures, client options, fluent builders, receipt manager, and OSCAL projector.
+- **UTCP v1.0.1 & MCP (`pkg/utcp`)**: Universal Tool Calling Protocol discovery, HTTP/CLI/gRPC/MCP templates, 17 MCP tools, and multi-SDK config generation.
 - **Cryptographic Receipts & Merkle Derivation**: Mathematical and structural specification of Ed25519 receipts and SHA-256 Merkle trees.
-- **Protobuf v1 gRPC AssuranceService**: Wire definitions and service contracts.
+- **Protobuf v1 gRPC AssuranceService**: Wire definitions and service contracts (`ckodex.assurance.services.v1`).

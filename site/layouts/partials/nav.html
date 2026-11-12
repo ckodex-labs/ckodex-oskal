@@ -33,12 +33,16 @@
           <li><a href="{{ $h2 }}" class="ck-nav-link{{ if eq $.RelPermalink $h2 }} is-active{{ end }}">SPIFFE/SPIRE Authority</a></li>
           {{ $h3 := "how-to/verify-sigstore-provenance/" | relURL }}
           <li><a href="{{ $h3 }}" class="ck-nav-link{{ if eq $.RelPermalink $h3 }} is-active{{ end }}">Sigstore &amp; AI-BOMs</a></li>
-          {{ $h4 := "how-to/export-oscal-artifacts/" | relURL }}
-          <li><a href="{{ $h4 }}" class="ck-nav-link{{ if eq $.RelPermalink $h4 }} is-active{{ end }}">Export NIST OSCAL 1.2.3</a></li>
-          {{ $h5 := "how-to/drift-detection-epoch-recovery/" | relURL }}
-          <li><a href="{{ $h5 }}" class="ck-nav-link{{ if eq $.RelPermalink $h5 }} is-active{{ end }}">Epoch Drift Recovery</a></li>
-          {{ $h6 := "how-to/run-dagger-ssdlc-pipeline/" | relURL }}
-          <li><a href="{{ $h6 }}" class="ck-nav-link{{ if eq $.RelPermalink $h6 }} is-active{{ end }}">Dagger SSDLC Pipeline</a></li>
+          {{ $h4 := "how-to/ingest-oscal/" | relURL }}
+          <li><a href="{{ $h4 }}" class="ck-nav-link{{ if eq $.RelPermalink $h4 }} is-active{{ end }}">Ingest NIST OSCAL</a></li>
+          {{ $h5 := "how-to/export-oscal-artifacts/" | relURL }}
+          <li><a href="{{ $h5 }}" class="ck-nav-link{{ if eq $.RelPermalink $h5 }} is-active{{ end }}">Export NIST OSCAL 1.2.3</a></li>
+          {{ $h6 := "how-to/drift-detection-epoch-recovery/" | relURL }}
+          <li><a href="{{ $h6 }}" class="ck-nav-link{{ if eq $.RelPermalink $h6 }} is-active{{ end }}">Epoch Drift Recovery</a></li>
+          {{ $h7 := "how-to/observability-cockpit/" | relURL }}
+          <li><a href="{{ $h7 }}" class="ck-nav-link{{ if eq $.RelPermalink $h7 }} is-active{{ end }}">Observability &amp; Metrics</a></li>
+          {{ $h8 := "how-to/run-dagger-ssdlc-pipeline/" | relURL }}
+          <li><a href="{{ $h8 }}" class="ck-nav-link{{ if eq $.RelPermalink $h8 }} is-active{{ end }}">Dagger SSDLC Pipeline</a></li>
         </ul>
       </div>
 
@@ -52,13 +56,15 @@
           {{ $r1 := "reference/cli/" | relURL }}
           <li><a href="{{ $r1 }}" class="ck-nav-link{{ if eq $.RelPermalink $r1 }} is-active{{ end }}">OSKAL CLI Suite</a></li>
           {{ $r2 := "reference/crds/" | relURL }}
-          <li><a href="{{ $r2 }}" class="ck-nav-link{{ if eq $.RelPermalink $r2 }} is-active{{ end }}">Kubernetes CRDs (5)</a></li>
+          <li><a href="{{ $r2 }}" class="ck-nav-link{{ if eq $.RelPermalink $r2 }} is-active{{ end }}">Kubernetes CRDs (6)</a></li>
           {{ $r3 := "reference/go-sdk/" | relURL }}
           <li><a href="{{ $r3 }}" class="ck-nav-link{{ if eq $.RelPermalink $r3 }} is-active{{ end }}">Go SDK (<code style="font-family: var(--ck-ff-mono); font-size: 11px;">pkg/oskal</code>)</a></li>
-          {{ $r4 := "reference/receipt-merkle-spec/" | relURL }}
-          <li><a href="{{ $r4 }}" class="ck-nav-link{{ if eq $.RelPermalink $r4 }} is-active{{ end }}">Receipts &amp; Merkle Root</a></li>
-          {{ $r5 := "reference/protobuf-services/" | relURL }}
-          <li><a href="{{ $r5 }}" class="ck-nav-link{{ if eq $.RelPermalink $r5 }} is-active{{ end }}">gRPC AssuranceService</a></li>
+          {{ $r4 := "reference/utcp-mcp/" | relURL }}
+          <li><a href="{{ $r4 }}" class="ck-nav-link{{ if eq $.RelPermalink $r4 }} is-active{{ end }}">UTCP v1.0.1 &amp; MCP</a></li>
+          {{ $r5 := "reference/receipt-merkle-spec/" | relURL }}
+          <li><a href="{{ $r5 }}" class="ck-nav-link{{ if eq $.RelPermalink $r5 }} is-active{{ end }}">Receipts &amp; Merkle Root</a></li>
+          {{ $r6 := "reference/protobuf-services/" | relURL }}
+          <li><a href="{{ $r6 }}" class="ck-nav-link{{ if eq $.RelPermalink $r6 }} is-active{{ end }}">gRPC AssuranceService</a></li>
         </ul>
       </div>
 

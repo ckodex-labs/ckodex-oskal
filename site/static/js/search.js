@@ -224,7 +224,15 @@
 
       btn.addEventListener('click', function() {
         var code = pre.querySelector('code');
-        var text = (code ? code.innerText : pre.innerText).trim();
+        var text = '';
+        if (code) {
+          text = code.innerText.trim();
+        } else {
+          var clone = pre.cloneNode(true);
+          var copyBtn = clone.querySelector('.ck-code-copy-btn');
+          if (copyBtn) copyBtn.remove();
+          text = clone.innerText.trim();
+        }
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(text).then(function() {
             btn.innerText = 'COPIED';

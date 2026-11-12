@@ -29,29 +29,34 @@ metadata:
   name: exception-legacy-db-root
   namespace: billing
 spec:
-  controlRef:
-    framework: "NIST-SP-800-53"
-    controlId: "AC-6"
   subject:
-    kind: "Deployment"
-    name: "legacy-billing-gateway"
-    namespace: "billing"
-  justification: "Legacy database driver requires root user until Q4 migration."
-  approverSPIFFEID: "spiffe://ckodex.internal/ns/secops/sa/ciso-signer"
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: billing
+    name: legacy-billing-gateway
+  controls:
+    - "nist-sp-800-53:AC-6"
+  justification:
+    ticket: "SEC-4812"
+    notes: "Legacy database driver requires root user until Q4 migration."
+  authority:
+    requiredApprovers:
+      - "spiffe://ckodex.internal/ns/secops/sa/ciso-signer"
+  validity:
+    notBefore: "2026-09-01T00:00:00Z"
+    notAfter: "2026-10-01T00:00:00Z"
   compensatingControls:
     - "Cilium network policy blocking all outbound internet egress"
     - "Tetragon runtime enforcement terminating any bash invocation"
-  validFrom: "2026-09-01T00:00:00Z"
-  expiresAt: "2026-10-01T00:00:00Z"
 ```
 
-Once `expiresAt` passes, the exception is automatically discarded. Permanent exceptions are rejected by the Semantic Kernel.
+Once `validity.notAfter` passes, the exception expires automatically. Permanent exceptions are rejected by the Semantic Kernel.
 
 ---
 
 ## 2. Triaging Anti-State and Containment
 
-When a critical contradiction occurs (for example, an active container found executing a binary whose signature was revoked), OSKAL flags an **Anti-Conflict ($A > 0$)**:
+When a critical contradiction occurs (for example, an active container found executing a binary whose signature was revoked), OSKAL flags an **Anti-Conflict (`A > 0`)**:
 - The workload state transitions to `FAILED` or `QUARANTINED`.
 - Invariant dominance ensures this contradiction cannot be hidden by other passing checks.
 

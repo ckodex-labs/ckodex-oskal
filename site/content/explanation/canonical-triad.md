@@ -50,7 +50,7 @@ However, OSCAL is a **data exchange format**, not an execution engine. Attemptin
 
 Therefore, OSKAL places OSCAL **above**:
 - OSCAL models are projected from the runtime state on demand.
-- Projections are validated against the official metaschema by `ckodex-oscal-cli`.
+- Projections are validated offline against the embedded NIST v1.2.3 schemas by `oskal validate`.
 - Auditors receive standard OSCAL Assessment Results without compromising cluster performance.
 
 ---
@@ -60,7 +60,7 @@ Therefore, OSKAL places OSCAL **above**:
 The center is the **Pure Semantic Kernel** (`core/assurance/`):
 - It contains **strictly zero Kubernetes imports**.
 - It does not know about containers, pods, HTTP, or etcd.
-- It models compliance as state transitions across the multi-dimensional vector $S(e,t)$.
+- It models compliance as state transitions across the multi-dimensional vector `S(e,t)`.
 - It defines what "evidence", "claim", "contract", and "epoch" mean deterministically.
 
 Because the core is pure domain logic, it can be tested with 100% determinism, embedded into standalone Go binaries via `pkg/oskal`, and run air-gapped without external cluster dependencies.

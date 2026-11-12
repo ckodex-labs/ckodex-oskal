@@ -1,6 +1,6 @@
 ---
 title: "How to Export and Validate OSCAL 1.2.3 Artifacts"
-description: "Project runtime assurance states into NIST OSCAL 1.2.3 JSON documents and validate them with ckodex-oscal-cli and ckodex-xoscal."
+description: "Project runtime assurance states into NIST OSCAL 1.2.3 JSON documents and validate them with oskal validate."
 quadrant: "how-to"
 tier: "E5"
 invariant: "OSCAL export is derived from the evidence graph (I-06)"
@@ -8,63 +8,52 @@ invariant: "OSCAL export is derived from the evidence graph (I-06)"
 
 ## Context
 
-OSKAL does not treat OSCAL as an internal runtime data model. Instead, **Invariant I-06** specifies that NIST OSCAL artifacts are projected outward from the underlying runtime evidence graph. 
+OSKAL does not treat OSCAL as an internal runtime data model. Instead, **Invariant I-06** specifies that NIST OSCAL artifacts are projected outward from the underlying runtime evidence graph.
 
-The projected models conform strictly to NIST OSCAL 1.2.3 metaschema definitions, verified against `ckodex-oscal-cli` (Rust validator) and `ckodex-xoscal` (governance vector state verifier).
+Every projected document conforms strictly to embedded NIST OSCAL v1.2.3 schemas and is offline-validatable with `oskal validate`.
 
 ---
 
 ## 1. Export Live Assurance State to OSCAL Assessment Results
 
-Export the active cluster assurance state into an OSCAL Assessment Results JSON file:
+Export the active assurance state for a workload into an OSCAL Assessment Results JSON file:
 
 ```bash
-oskal export oscal \
-  --model assessment-results \
-  --subject-namespace production \
-  --output /tmp/assessment-results.json
+oskal export assessment-results \
+  --subject k8s://ckodex-assurance-test/Deployment/payments-api \
+  --evidence-dir ./evidence > /tmp/assessment-results.json
 ```
 
-The resulting document contains:
-- `assessment-results` root element with UUID and metadata timestamp.
+OSKAL supports projecting all five operational NIST OSCAL v1.2.3 models:
+- `oskal export assessment-results --subject <uri>`
+- `oskal export component-definition --component <name>`
+- `oskal export assessment-plan --subject <uri>`
+- `oskal export ssp --subject <uri>`
+- `oskal export poam --subject <uri>`
+
+The resulting Assessment Results document contains:
+- `assessment-results` root element with UUID and metadata timestamp (`oscal-version: "1.2.3"`).
 - Concrete `findings` linked to specific control identifiers (e.g. `AC-6`).
-- Source `observations` containing the exact `integrity_digest` and Merkle evidence root references.
+- Source `observations` carrying integrity digests and Merkle evidence root references.
 
 ---
 
-## 2. Validate with `ckodex-oscal-cli`
+## 2. Validate with Embedded NIST OSCAL v1.2.3 Schemas (`oskal validate`)
 
-Run the official NIST OSCAL 1.2.3 metaschema validator:
+Run the embedded sub-millisecond NIST OSCAL v1.2.3 validator (100% air-gap compatible):
 
 ```bash
-oscal-cli validate --input /tmp/assessment-results.json
+oskal validate /tmp/assessment-results.json
+```
+
+Or override schema auto-detection explicitly with `--schema`:
+
+```bash
+oskal validate /tmp/assessment-results.json --schema assessment-results --output json
 ```
 
 Output:
 
 ```text
-[PASS] Document successfully validated against NIST OSCAL 1.2.3 Metaschema.
-Schema valid:      true
-Constraints valid: true
-Warnings:          0
-Errors:            0
-```
-
----
-
-## 3. Verify Multi-Dimensional Governance Vector with `ckodex-xoscal`
-
-Verify that the generated assessment results maintain strict semantic vector invariants:
-
-```bash
-xoscal-ctl verify --input /tmp/assessment-results.json
-```
-
-Output:
-
-```text
-[PASS] S(e,t) Product State Verified:
-Vector:            <P=PRESENT, V=POSITIVE, A=0, C=COHERENT, E=VERIFIED, L=NORMAL>
-Operational State: NORMAL (No degraded controls or anti-conflicts)
-Attestation:       Ed25519 receipt verified against cluster root key.
+[PASS] Document valid against NIST OSCAL v1.2.3 schema (assessment-results).
 ```

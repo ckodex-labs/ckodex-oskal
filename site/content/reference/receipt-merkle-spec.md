@@ -14,33 +14,35 @@ To satisfy non-repudiation in regulated environments, OSKAL does not rely on mut
 
 ## 2. Canonical Merkle Tree Derivation
 
-Given a set of $N$ verified leaf evidence envelopes:
+Given a set of `N` verified leaf evidence envelopes:
 
-$$E = \{e_1, e_2, \dots, e_N\}$$
-
-Each envelope contains a canonical SHA-256 integrity digest:
-
-$$h_i = \text{SHA-256}(\text{Canonicalize}(e_i))$$
+```text
+E   = { e_1, e_2, ..., e_N }
+h_i = SHA-256(Canonicalize(e_i))
+```
 
 ### Lexicographical Sorting
 
-To ensure deterministic root derivation regardless of ingestion order, the digests are sorted lexicographically:
+To guarantee deterministic root derivation regardless of ingestion order, leaf digests are sorted lexicographically:
 
-$$H_0 = \text{Sort}([h_1, h_2, \dots, h_N])$$
+```text
+H_0 = Sort([h_1, h_2, ..., h_N])
+```
 
 ### Pairwise Compression
 
-At each layer $k$, adjacent pairs are concatenated and hashed:
+At each layer `k`, adjacent pairs are concatenated and hashed; if a layer has an odd number of elements, the trailing element is carried forward:
 
-$$H_{k+1}[j] = \text{SHA-256}(H_k[2j] \mathbin{\Vert} H_k[2j+1])$$
+```text
+H_{k+1}[j]    = SHA-256(H_k[2j] || H_k[2j+1])
+H_{k+1}[last] = H_k[last]                       (when len(H_k) is odd)
+```
 
-If a layer contains an odd number of elements, the final element is carried forward:
+Reduction terminates when `|H_M| = 1`. The single surviving digest is the **Canonical Merkle Evidence Root**:
 
-$$H_{k+1}[\text{last}] = H_k[\text{last}]$$
-
-The process terminates when $|H_M| = 1$. The single surviving element is the **Canonical Merkle Evidence Root**:
-
-$$\text{EvidenceRoot} = H_M[0]$$
+```text
+EvidenceRoot = H_M[0]
+```
 
 ---
 
@@ -48,16 +50,14 @@ $$\text{EvidenceRoot} = H_M[0]$$
 
 ```text
 ControlReceipt = {
-    receipt_id:        String (UUID or deterministic identifier),
-    control:           ControlRef { framework, control_id },
-    subject:           SubjectRef { kind, namespace, name, generation },
-    state:             AssuranceStateEnum,
-    evidence_root:     Hex-encoded SHA-256 digest,
-    issued_at:         RFC3339 Timestamp,
-    expires_at:        RFC3339 Timestamp,
-    signer_spiffe_id:  SPIFFE ID of issuing authority,
-    public_key:        Hex-encoded Ed25519 public key,
-    signature:         Hex-encoded Ed25519 signature over canonical payload
+    subject:        SubjectRef { scheme, id },
+    control:        ControlRef { namespace, id },
+    state:          AssuranceState ("ASSURED" | "VERIFIED" | "STALE" | "FAILED" | "UNKNOWN"),
+    epoch:          AssuranceEpoch { subjectDigest, implementationDigest, policyDigest, authorityDigest, environmentDigest },
+    evidenceRoot:   "sha256:<hex>",
+    evaluator:      AuthorityRef { scheme, subject },
+    evaluatedAt:    RFC3339 Timestamp,
+    signature:      Hex-encoded Ed25519 signature over canonical payload
 }
 ```
 
@@ -65,10 +65,11 @@ ControlReceipt = {
 
 ## 4. Signing & Verification Protocol
 
-The signature covers the canonical wire representation of the receipt fields excluding the signature itself:
+The Ed25519 signature binds the canonical serialized receipt fields (excluding `signature`):
 
-$$\text{Payload} = \text{ReceiptID} \mathbin{\Vert} \text{Control} \mathbin{\Vert} \text{Subject} \mathbin{\Vert} \text{State} \mathbin{\Vert} \text{EvidenceRoot} \mathbin{\Vert} \text{IssuedAt} \mathbin{\Vert} \text{ExpiresAt}$$
+```text
+Payload   = CanonicalSerialize(subject, control, state, epoch, evidenceRoot, evaluator, evaluatedAt)
+Signature = Ed25519_Sign(PrivateKey_Signer, Payload)
+```
 
-$$\text{Signature} = \text{Ed25519\_Sign}(\text{PrivateKey}_{\text{Signer}}, \text{Payload})$$
-
-An auditor or external verifier can independently verify the receipt without access to the Kubernetes API server or OSKAL cluster using the public key and payload.
+An auditor or external verifier can independently verify the receipt offline without access to the Kubernetes API server or OSKAL cluster using `oskal assurance receipt verify --receipt-file <receipt.json> --public-key <key.pub>` or `oskal.VerifyIndependentReceipt(...)`.

@@ -10,6 +10,6 @@ Explanation documents illuminate the architectural choices, theoretical foundati
 ## Core Conceptual Areas
 
 - **The Canonical Triad**: Why OSCAL sits above, semantics in the center, and Kubernetes below.
-- **Vector State vs. Boolean Compliance**: Why binary pass/fail fails in complex infrastructure, and how multi-dimensional product state $S(e,t)$ preserves operational truth.
+- **Vector State vs. Boolean Compliance**: Why binary pass/fail fails in complex infrastructure, and how multi-dimensional product state `S(e,t)` preserves operational truth.
 - **The Ten Constitutional Invariants**: Exhaustive examination of invariants I-01 through I-10.
 - **Air-Gap Architecture & Anti-Contamination**: How OSKAL operates securely in disconnected, high-assurance environments without leaking authority.
