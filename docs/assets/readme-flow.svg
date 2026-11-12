@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 220" width="100%" role="img" aria-labelledby="flow-title flow-desc">
+  <title id="flow-title">How ckodex-oskal evaluates Kubernetes runtime evidence</title>
+  <desc id="flow-desc">Four-stage pipeline from Kubernetes runtime collectors to content-addressed storage, pure Go assurance kernel, and NIST OSCAL v1.2.3 plus MCP and UTCP interfaces.</desc>
+
+  <rect x="0.5" y="0.5" width="1199" height="219" rx="6" fill="#F6F1E8" stroke="#D8CFC2" stroke-width="1"/>
+
+  <!-- Stage 1 -->
+  <rect x="28" y="28" width="256" height="164" fill="#EFE8DB" stroke="#D8CFC2"/>
+  <rect x="28" y="28" width="256" height="4" fill="#B4532A"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+    <text x="44" y="54" font-size="11" font-weight="700" fill="#B4532A">01 // COLLECTORS</text>
+    <text x="44" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#211B14">Runtime &amp; admission signals</text>
+    <text x="44" y="106" font-size="12" fill="#6E6457">- Admission webhook &amp; CEL</text>
+    <text x="44" y="126" font-size="12" fill="#6E6457">- SPIRE workload SVIDs</text>
+    <text x="44" y="146" font-size="12" fill="#6E6457">- Sigstore image provenance</text>
+    <text x="44" y="166" font-size="12" fill="#6E6457">- Cilium &amp; Tetragon eBPF</text>
+  </g>
+
+  <!-- Arrow 1 -> 2 -->
+  <line x1="284" y1="110" x2="314" y2="110" stroke="#6E6457" stroke-width="1.5"/>
+  <polygon points="314,105 322,110 314,115" fill="#6E6457"/>
+
+  <!-- Stage 2 -->
+  <rect x="324" y="28" width="256" height="164" fill="#EFE8DB" stroke="#D8CFC2"/>
+  <rect x="324" y="28" width="256" height="4" fill="#211B14"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+    <text x="340" y="54" font-size="11" font-weight="700" fill="#211B14">02 // PURE KERNEL</text>
+    <text x="340" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#211B14">core/assurance [Go stdlib]</text>
+    <text x="340" y="106" font-size="12" fill="#6E6457">- Producer &amp; epoch checks</text>
+    <text x="340" y="126" font-size="12" fill="#6E6457">- Freshness window SLAs</text>
+    <text x="340" y="146" font-size="12" fill="#6E6457">- 9-dimension vector state</text>
+    <text x="340" y="166" font-size="12" fill="#B91C1C">- Adverse signal -&gt; FAILED</text>
+  </g>
+
+  <!-- Arrow 2 -> 3 -->
+  <line x1="580" y1="110" x2="610" y2="110" stroke="#6E6457" stroke-width="1.5"/>
+  <polygon points="610,105 618,110 610,115" fill="#6E6457"/>
+
+  <!-- Stage 3 (Sealed CAS & Receipts) -->
+  <polygon points="628,28 866,28 876,38 876,192 620,192 620,36" fill="#EFE8DB" stroke="#6D28D9" stroke-width="1.5"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+    <text x="636" y="54" font-size="11" font-weight="700" fill="#6D28D9">03 // EVIDENCE STORE</text>
+    <text x="636" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#211B14">CAS &amp; Ed25519 receipts</text>
+    <text x="636" y="106" font-size="12" fill="#6E6457">- SHA-256 atomic blob store</text>
+    <text x="636" y="126" font-size="12" fill="#6E6457">- Keeps raw blobs off etcd</text>
+    <text x="636" y="146" font-size="12" fill="#6E6457">- Signed Merkle lineage</text>
+    <text x="636" y="166" font-size="12" fill="#6E6457">- Portable air-gap bundles</text>
+  </g>
+
+  <!-- Arrow 3 -> 4 -->
+  <line x1="876" y1="110" x2="906" y2="110" stroke="#6E6457" stroke-width="1.5"/>
+  <polygon points="906,105 914,110 906,115" fill="#6E6457"/>
+
+  <!-- Stage 4 -->
+  <rect x="916" y="28" width="256" height="164" fill="#EFE8DB" stroke="#D8CFC2"/>
+  <rect x="916" y="28" width="256" height="4" fill="#6D28D9"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+    <text x="932" y="54" font-size="11" font-weight="700" fill="#6D28D9">04 // OUTPUTS &amp; AGENTS</text>
+    <text x="932" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#211B14">OSCAL, K8s CRDs &amp; tools</text>
+    <text x="932" y="106" font-size="12" fill="#6E6457">- NIST OSCAL v1.2.3 JSON</text>
+    <text x="932" y="126" font-size="12" fill="#6E6457">- AssuranceState K8s CRDs</text>
+    <text x="932" y="146" font-size="12" fill="#6E6457">- MCP stdio server</text>
+    <text x="932" y="166" font-size="12" fill="#6E6457">- UTCP v1.0.1 HTTP &amp; CLI</text>
+  </g>
+</svg>

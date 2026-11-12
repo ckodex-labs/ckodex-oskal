@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 390" width="100%" role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">ckodex-oskal: Continuous assurance for Kubernetes, backed by signed receipts</title>
+  <desc id="hero-desc">Evidence Editorial hero card showing the ckodex-oskal runtime title on warm paper alongside a chamfered Ed25519-signed NIST SP 800-53 AC-6 control receipt specimen.</desc>
+
+  <!-- Warm paper ground (CKODEX-DS-3) -->
+  <rect x="0.5" y="0.5" width="1199" height="389" rx="6" fill="#F6F1E8" stroke="#D8CFC2" stroke-width="1"/>
+
+  <!-- Subtle ledger margin rule -->
+  <line x1="44" y1="28" x2="44" y2="362" stroke="#E5DDD0" stroke-width="1"/>
+
+  <!-- Top metadata badges -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="11" font-weight="600" letter-spacing="0.6">
+    <rect x="64" y="36" width="142" height="24" fill="#EFE8DB" stroke="#D8CFC2"/>
+    <text x="76" y="52" fill="#B4532A">SPEC: CKX-OSKAL-001</text>
+
+    <rect x="216" y="36" width="116" height="24" fill="#EFE8DB" stroke="#D8CFC2"/>
+    <text x="228" y="52" fill="#211B14">RELEASE v1.0.0</text>
+
+    <rect x="342" y="36" width="136" height="24" fill="#EFE8DB" stroke="#D8CFC2"/>
+    <text x="354" y="52" fill="#6E6457">NIST OSCAL v1.2.3</text>
+  </g>
+
+  <!-- Project name and plain-language value -->
+  <text x="64" y="114" font-family="Georgia, 'Times New Roman', serif" font-size="42" fill="#211B14">ckodex-oskal</text>
+  <text x="64" y="154" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#211B14">Continuous assurance for Kubernetes, backed by signed receipts.</text>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#6E6457">
+    <text x="64" y="192">Collect live evidence from webhooks, CEL, SPIRE, Sigstore, Cilium, and Tetragon.</text>
+    <text x="64" y="216">Evaluate formal contracts in a pure Go stdlib kernel. Export valid NIST OSCAL v1.2.3.</text>
+  </g>
+
+  <!-- Terminal prompt bar -->
+  <rect x="64" y="246" width="556" height="44" fill="#EFE8DB" stroke="#D8CFC2"/>
+  <rect x="64" y="246" width="3" height="44" fill="#B4532A"/>
+  <text x="82" y="273" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="13" fill="#B4532A" font-weight="700">$</text>
+  <text x="98" y="273" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="13" fill="#211B14">./examples/quickstart-walkthrough.sh</text>
+  <text x="488" y="273" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="11" fill="#6E6457">30s offline loop</text>
+
+  <!-- Bottom invariant callout -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12">
+    <text x="64" y="330" fill="#211B14" font-weight="600">INVARIANT:</text>
+    <text x="148" y="330" fill="#6E6457">Missing evidence resolves to UNKNOWN, never an optimistic pass.</text>
+    <text x="64" y="352" fill="#6E6457">AGENT PROTOCOLS: MCP 2025-06-18 stdio  |  UTCP v1.0.1 HTTP &amp; CLI  |  gRPC</text>
+  </g>
+
+  <!-- Right side: Sealed Control Receipt specimen (10px chamfered corners per DS-3) -->
+  <polygon points="668,36 1146,36 1156,46 1156,354 658,354 658,46" fill="#EFE8DB" stroke="#6D28D9" stroke-width="2"/>
+  <rect x="658" y="46" width="4" height="308" fill="#6D28D9"/>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+    <text x="682" y="66" font-size="11" font-weight="700" fill="#6D28D9" letter-spacing="0.8">SEALED CONTROL RECEIPT  //  ED25519 VERIFIED</text>
+    <line x1="682" y1="78" x2="1134" y2="78" stroke="#D8CFC2" stroke-width="1"/>
+
+    <text x="682" y="104" font-size="12" fill="#6E6457">subject</text>
+    <text x="790" y="104" font-size="12" fill="#211B14" font-weight="600">k8s://prod/payments/Deployment/payments-api</text>
+
+    <text x="682" y="130" font-size="12" fill="#6E6457">control</text>
+    <text x="790" y="130" font-size="12" fill="#211B14" font-weight="600">nist-sp-800-53#AC-6  [Least Privilege]</text>
+
+    <text x="682" y="156" font-size="12" fill="#6E6457">state</text>
+    <rect x="790" y="142" width="74" height="20" fill="#F6F1E8" stroke="#6D28D9"/>
+    <text x="800" y="156" font-size="11" fill="#6D28D9" font-weight="700">ASSURED</text>
+    <text x="876" y="156" font-size="12" fill="#6E6457">coherence=COHERENT  epoch=gen:42</text>
+
+    <text x="682" y="184" font-size="12" fill="#6E6457">channels</text>
+    <text x="790" y="184" font-size="12" fill="#211B14">telemetry | execution | decision | evidence</text>
+
+    <text x="682" y="210" font-size="12" fill="#6E6457">cas_digest</text>
+    <text x="790" y="210" font-size="12" fill="#211B14">sha256:72befc91fd3d7d21...272ab1448664e49c</text>
+
+    <text x="682" y="236" font-size="12" fill="#6E6457">signature</text>
+    <text x="790" y="236" font-size="12" fill="#6D28D9">ed25519:9b4e0c71a8d2...verified [offline]</text>
+
+    <line x1="682" y1="256" x2="1134" y2="256" stroke="#D8CFC2" stroke-width="1"/>
+
+    <text x="682" y="280" font-size="11" fill="#6E6457">PROJECTED ARTIFACTS [SUB-MS SCHEMA VALIDATED]</text>
+    <rect x="682" y="294" width="142" height="26" fill="#F6F1E8" stroke="#D8CFC2"/>
+    <text x="693" y="311" font-size="11" fill="#211B14">assessment-results</text>
+
+    <rect x="832" y="294" width="154" height="26" fill="#F6F1E8" stroke="#D8CFC2"/>
+    <text x="843" y="311" font-size="11" fill="#211B14">component-definition</text>
+
+    <rect x="994" y="294" width="140" height="26" fill="#F6F1E8" stroke="#D8CFC2"/>
+    <text x="1006" y="311" font-size="11" fill="#211B14">ssp &amp; poam json</text>
+
+    <text x="682" y="340" font-size="11" fill="#B91C1C">violation dominance: 1 authorized adverse signal -&gt; FAILED</text>
+  </g>
+</svg>
