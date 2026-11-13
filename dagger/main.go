@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	golangVersion   = "1.27"
+	golangVersion   = "1.27.4"
 	golangciVersion = "v2.14.0"
 	syftImage       = "anchore/syft:v1.52.0"
 	grypeImage      = "anchore/grype:v0.119.0"

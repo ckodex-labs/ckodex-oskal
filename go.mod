@@ -1,6 +1,6 @@
 module github.com/ckodex-labs/ckodex-oskal
 
-go 1.27.1
+go 1.27.4
 
 require (
 	github.com/cilium/cilium v1.20.4
