@@ -2,115 +2,147 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ['v*']
+    branches: [p1/release]
+  workflow_dispatch:
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: read
 
 jobs:
-  build-release:
-    name: Build & Publish Release Artifacts
+  build:
+    name: Build, attest and rehearse verification
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: 'go.mod'
-
-      - name: Install Syft
-        uses: anchore/sbom-action/download-syft@v0.18.0
-
-      - name: Build Multi-Architecture Binaries
+          go-version-file: go.mod
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+      - name: Validate release identity
+        env:
+          RELEASE_REF: ${{ github.ref }}
         run: |
+          set -euo pipefail
+          VERSION=v1.0.1
+          if [[ "$RELEASE_REF" == refs/tags/* ]]; then
+            VERSION="${RELEASE_REF#refs/tags/}"
+            [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Use a stable vMAJOR.MINOR.PATCH tag' >&2; exit 1; }
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Build and test
+        run: |
+          go build ./...
+          go vet ./...
+          go test -count=1 -race ./...
+      - name: Package binaries
+        run: |
+          set -euo pipefail
           mkdir -p dist
-          VERSION=${GITHUB_REF_NAME}
-          COMMIT=$(git rev-parse --short HEAD)
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}"
-
-          # Target matrix
-          PLATFORMS=(
-            "linux/amd64"
-            "linux/arm64"
-            "darwin/amd64"
-            "darwin/arm64"
-            "windows/amd64"
-          )
-
-          for PLATFORM in "${PLATFORMS[@]}"; do
-            GOOS=${PLATFORM%/*}
-            GOARCH=${PLATFORM#*/}
-            EXT=""
-            if [ "$GOOS" = "windows" ]; then
-              EXT=".exe"
+          FLAGS="-s -w -X main.version=$VERSION -X main.commit=$GITHUB_SHA -X main.date=$BUILD_DATE"
+          for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            OS=${TARGET%/*}
+            ARCH=${TARGET#*/}
+            STAGE=$(mktemp -d)
+            EXT=''
+            if [[ "$OS" == windows ]]; then EXT='.exe'; fi
+            CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -buildvcs=false -ldflags="$FLAGS" -o "$STAGE/oskal$EXT" ./cmd/oskal
+            if [[ "$OS" != windows ]]; then
+              CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -buildvcs=false -ldflags="$FLAGS" -o "$STAGE/oskal-controller" ./cmd/oskal-controller
             fi
-
-            echo "Compiling for ${GOOS}/${GOARCH}..."
-
-            # 1. oskal CLI
-            CLI_BIN="dist/oskal-${GOOS}-${GOARCH}${EXT}"
-            CGO_ENABLED=0 GOOS=${GOOS} GOARCH=${GOARCH} go build -trimpath -ldflags="${LDFLAGS}" -o "${CLI_BIN}" ./cmd/oskal
-
-            # 2. oskal-controller (unix only)
-            if [ "$GOOS" != "windows" ]; then
-              CTRL_BIN="dist/oskal-controller-${GOOS}-${GOARCH}"
-              CGO_ENABLED=0 GOOS=${GOOS} GOARCH=${GOARCH} go build -trimpath -ldflags="${LDFLAGS}" -o "${CTRL_BIN}" ./cmd/oskal-controller
-            fi
-
-            # Package tarball or zip
-            ARCHIVE="dist/ckodex-oskal_${VERSION#v}_${GOOS}_${GOARCH}.tar.gz"
-            if [ "$GOOS" = "windows" ]; then
-              ARCHIVE="dist/ckodex-oskal_${VERSION#v}_${GOOS}_${GOARCH}.zip"
-              zip -j "${ARCHIVE}" "${CLI_BIN}" LICENSE README.md
-            else
-              tar -czf "${ARCHIVE}" -C dist "oskal-${GOOS}-${GOARCH}" "oskal-controller-${GOOS}-${GOARCH}" -C ../ LICENSE README.md
-            fi
+            cp LICENSE README.md "$STAGE/"
+            tar -czf "dist/oskal_${VERSION#v}_${OS}_${ARCH}.tar.gz" -C "$STAGE" .
           done
-
-      - name: Generate Checksums
+      - name: Build the container without publishing
         run: |
-          cd dist
-          sha256sum ckodex-oskal_*.* > checksums.txt
-          cd ..
-
-      - name: Generate CycloneDX SBOM with Syft
-        run: |
-          syft scan dir:. -o cyclonedx-json=dist/ckodex-oskal_${GITHUB_REF_NAME#v}_sbom.cyclonedx.json
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+          set -euo pipefail
+          docker build --build-arg VERSION="$VERSION" --build-arg COMMIT="$GITHUB_SHA" -t oskal-release:local .
+          docker save oskal-release:local | gzip > dist/oskal-controller-image.tar.gz
+      - name: Produce checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > checksums.txt
+      - name: Generate SLSA build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and Publish OCI Container Image
+          subject-checksums: dist/checksums.txt
+      - name: Preserve provenance and keyless-sign checksums
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
         run: |
-          docker build \
-            --build-arg VERSION=${GITHUB_REF_NAME} \
-            --build-arg COMMIT=$(git rev-parse --short HEAD) \
-            --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
-            -t ghcr.io/ckodex-labs/oskal-controller:${GITHUB_REF_NAME} \
-            -t ghcr.io/ckodex-labs/oskal-controller:latest .
-          docker push ghcr.io/ckodex-labs/oskal-controller:${GITHUB_REF_NAME}
-          docker push ghcr.io/ckodex-labs/oskal-controller:latest
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+          set -euo pipefail
+          cp "$PROVENANCE_BUNDLE" dist/provenance.sigstore.json
+          cosign sign-blob --yes --bundle dist/checksums.sigstore.json dist/checksums.txt
+      - name: Verify exactly what was built
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          cosign verify-blob --bundle dist/checksums.sigstore.json --certificate-identity "$RELEASE_IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com dist/checksums.txt
+          (cd dist && sha256sum --check checksums.txt)
+          for ARTIFACT in dist/*.tar.gz; do
+            gh attestation verify "$ARTIFACT" --repo "$GITHUB_REPOSITORY" --bundle dist/provenance.sigstore.json --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+          done
+          cp dist/checksums.txt "$RUNNER_TEMP/tampered-checksums.txt"
+          echo 'tamper' >> "$RUNNER_TEMP/tampered-checksums.txt"
+          if cosign verify-blob --bundle dist/checksums.sigstore.json --certificate-identity "$RELEASE_IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$RUNNER_TEMP/tampered-checksums.txt"; then
+            echo 'Tampered checksums were accepted' >&2
+            exit 1
+          fi
+          echo 'VERIFIED: keyless checksum signature, artifact digests, SLSA provenance; tampering rejected.'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          files: |
-            dist/ckodex-oskal_*.tar.gz
-            dist/ckodex-oskal_*.zip
-            dist/checksums.txt
-            dist/*.json
-          draft: false
-          prerelease: false
-          generate_release_notes: true
+          name: release-candidate
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish only when the author pushes a stable tag
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-candidate
+          path: dist
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+      - name: Publish and sign container by digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/oskal-controller"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker load -i dist/oskal-controller-image.tar.gz
+          docker tag oskal-release:local "$IMAGE:$RELEASE_VERSION"
+          docker push "$IMAGE:$RELEASE_VERSION"
+          DIGEST=$(docker inspect "$IMAGE:$RELEASE_VERSION" --format '{{index .RepoDigests 0}}')
+          [[ "$DIGEST" == "$IMAGE@sha256:"* ]]
+          cosign sign --yes "$DIGEST"
+          cosign verify --certificate-identity "https://github.com/$GITHUB_WORKFLOW_REF" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$DIGEST"
+          printf '%s\n' "$DIGEST" > dist/image-reference.txt
+      - name: Publish the release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_VERSION" --generate-notes dist/*
