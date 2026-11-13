@@ -3,7 +3,6 @@ package cockpit
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,95 +10,101 @@ import (
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
+	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 )
 
-func TestCockpitRenderSnapshot(t *testing.T) {
-	emptyDir := t.TempDir()
-	buf := new(bytes.Buffer)
-	cockpit := NewCockpit(CockpitConfig{
-		Once:        true,
-		EvidenceDir: emptyDir,
-		Writer:      buf,
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	if err := cockpit.Run(ctx); err != nil {
-		t.Fatalf("cockpit.Run failed: %v", err)
+func TestArchiveInventoryDoesNotInferStanding(t *testing.T) {
+	directory := t.TempDir()
+	repo, err := storage.NewFilesystemEvidenceRepository(directory)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	out := buf.String()
-	if !strings.Contains(out, "OSKAL ASSURANCE COCKPIT") {
-		t.Fatalf("expected title in cockpit output:\n%s", out)
+	var output bytes.Buffer
+	view := NewCockpit(CockpitConfig{Once: true, EvidenceDir: directory, Writer: &output})
+	if err := view.Run(t.Context()); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(out, "payments-api") {
-		t.Fatalf("expected payments-api in workload list:\n%s", out)
+	if strings.Contains(output.String(), "payments") || !strings.Contains(output.String(), "No archived subjects") {
+		t.Fatal(output.String())
 	}
-	if !strings.Contains(out, "UNKNOWN") {
-		t.Fatalf("expected UNKNOWN state without evidence (Invariant I-02):\n%s", out)
+	producer := assurance.AuthorityRef{Scheme: "local", Subject: "cockpit-archive-test"}
+	signer, err := receipts.NewReceiptManager(producer)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(out, "CRYPTOGRAPHIC MERKLE LINEAGE") {
-		t.Fatalf("expected Merkle lineage section:\n%s", out)
-	}
-
-	// Verify 100% pure ASCII (0x00 - 0x7F)
-	for idx, b := range buf.Bytes() {
-		if b > 127 {
-			t.Fatalf("non-ASCII character detected at offset %d: %d", idx, b)
+	subject := assurance.SubjectRef{Scheme: "k8s", ID: "fixture/Pod/archive-only"}
+	payload := []byte(`{"stored":"material"}`)
+	digest := assurance.ComputeDigest(payload)
+	for _, kind := range []string{"admission", "kubernetes.admission.violation"} {
+		envelope := assurance.EvidenceEnvelope{Schema: "assurance.ckodex.io/evidence/v1alpha1", ID: kind, Subject: subject, ObservationType: kind, CapturedAt: time.Now().Add(-time.Hour), Producer: producer, Artifact: assurance.EvidenceRef{URI: "cas://sha256/" + strings.TrimPrefix(digest, "sha256:"), Digest: digest, MediaType: "application/json"}, IntegrityDigest: digest}
+		signed, err := signer.SignEvidence(t.Context(), envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.Put(t.Context(), signed, bytes.NewReader(payload)); err != nil {
+			t.Fatal(err)
 		}
 	}
+	output.Reset()
+	if err := view.Run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := view.gatherWorkloads(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].State != "UNKNOWN" || rows[0].Archived != 2 || rows[0].Verified != 0 || rows[0].Presence != "PRESENT" || rows[0].Coherence != "UNKNOWN" || rows[0].EvidenceRoot != "" || rows[0].Controls != "" {
+		t.Fatalf("archive invented assessment: %+v", rows)
+	}
+	for _, invented := range []string{"ASSURED", "FAILED", "DECOHERENT", "SPIRE verified", "In Sync", "NIST SP 800-53", "Mode: NORMAL", "AC-6"} {
+		if strings.Contains(output.String(), invented) {
+			t.Fatalf("invented %s: %s", invented, output.String())
+		}
+	}
+	if !strings.Contains(output.String(), "VERIFIED") || !strings.Contains(output.String(), "Live assessment: NOT CONFIGURED") {
+		t.Fatal(output.String())
+	}
+}
 
-	// Now test with populated evidence directory
-	evDir := t.TempDir()
-	env := assurance.EvidenceEnvelope{
-		Schema:          "assurance.ckodex.io/evidence/v1alpha1",
-		ID:              "ev-cockpit-1",
-		Subject:         assurance.SubjectRef{Scheme: "k8s", ID: "prod/payments/Deployment/payments-api"},
-		ObservationType: "admission",
-		CapturedAt:      time.Now().UTC(),
-		Producer:        assurance.AuthorityRef{Scheme: "spiffe", Subject: "prod/ns/system/sa/observer"},
-		Artifact:        assurance.EvidenceRef{URI: "cas://sha256/1234", Digest: assurance.ComputeStringDigest("cockpit-ev"), MediaType: "application/json"},
-		IntegrityDigest: assurance.ComputeStringDigest("cockpit-ev"),
+func TestArchiveFailuresRemainErrorsAndDoNotCreateStores(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent")
+	view := NewCockpit(CockpitConfig{Once: true, EvidenceDir: missing, Writer: &bytes.Buffer{}})
+	if err := view.Run(t.Context()); err == nil {
+		t.Fatal("missing archive silently became empty")
 	}
-	raw, _ := json.Marshal(env)
-	if err := os.WriteFile(filepath.Join(evDir, "ev.json"), raw, 0644); err != nil {
-		t.Fatalf("failed to write evidence file: %v", err)
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("read-only cockpit created archive: %v", err)
 	}
-
-	bufAssured := new(bytes.Buffer)
-	cockpitAssured := NewCockpit(CockpitConfig{
-		Once:        true,
-		EvidenceDir: evDir,
-		Writer:      bufAssured,
-	})
-	if err := cockpitAssured.Run(ctx); err != nil {
-		t.Fatalf("cockpitAssured.Run failed: %v", err)
+	directory := t.TempDir()
+	repo, err := storage.NewFilesystemEvidenceRepository(directory)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(bufAssured.String(), "ASSURED") {
-		t.Fatalf("expected ASSURED state when evidence exists:\n%s", bufAssured.String())
+	payload := []byte("actual stored fixture")
+	digest := assurance.ComputeDigest(payload)
+	envelope := assurance.EvidenceEnvelope{ID: "corruption-case", Subject: assurance.SubjectRef{Scheme: "k8s", ID: "fixture/Pod/material"}, ObservationType: "material", CapturedAt: time.Now(), Artifact: assurance.EvidenceRef{URI: "cas://sha256/" + strings.TrimPrefix(digest, "sha256:"), Digest: digest, MediaType: "text/plain"}, IntegrityDigest: digest}
+	if _, err := repo.Put(t.Context(), envelope, bytes.NewReader(payload)); err != nil {
+		t.Fatal(err)
 	}
-
-	// Verify violation envelope transitions cockpit display to FAILED / NEGATIVE / DECOHERENT
-	violDir := t.TempDir()
-	violEnv := env
-	violEnv.ID = "ev-cockpit-viol"
-	violEnv.ObservationType = "kubernetes.admission.violation"
-	violRaw, _ := json.Marshal(violEnv)
-	if err := os.WriteFile(filepath.Join(violDir, "viol.json"), violRaw, 0644); err != nil {
-		t.Fatalf("failed to write violation evidence: %v", err)
+	blob := filepath.Join(directory, "blobs", "sha256", strings.TrimPrefix(digest, "sha256:")+".bin")
+	if err := os.WriteFile(blob, []byte("corrupted test fixture"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	bufViol := new(bytes.Buffer)
-	cockpitViol := NewCockpit(CockpitConfig{
-		Once:        true,
-		EvidenceDir: violDir,
-		Writer:      bufViol,
-	})
-	if err := cockpitViol.Run(ctx); err != nil {
-		t.Fatalf("cockpitViol.Run failed: %v", err)
+	var output bytes.Buffer
+	view = NewCockpit(CockpitConfig{Once: true, EvidenceDir: directory, Writer: &output})
+	if err := view.Run(t.Context()); err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("corruption not surfaced: %v", err)
 	}
-	violOut := bufViol.String()
-	if !strings.Contains(violOut, "FAILED") || !strings.Contains(violOut, "NEGATIVE") || !strings.Contains(violOut, "DECOHERENT") {
-		t.Fatalf("expected FAILED / NEGATIVE / DECOHERENT in cockpit output on violation:\n%s", violOut)
+	if output.Len() != 0 {
+		t.Fatal("failed archive published a dashboard frame")
+	}
+	if data, err := os.ReadFile(blob); err != nil || string(data) != "corrupted test fixture" {
+		t.Fatal("cockpit changed forensic bytes")
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := view.Run(canceled); err == nil {
+		t.Fatal("cancellation ignored")
 	}
 }

@@ -17,14 +17,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/health"
-	"google.golang.org/grpc/health/grpc_health_v1"
-	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/status"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/mcp"
@@ -34,12 +26,10 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/diagnostics"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/evaluation"
 	"github.com/ckodex-labs/ckodex-oskal/internal/config"
-	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	recoscal "github.com/ckodex-labs/ckodex-oskal/internal/reconciler/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/scaffold"
-	"github.com/ckodex-labs/ckodex-oskal/internal/service"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ui/cockpit"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ui/format"
 	commonv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
@@ -49,30 +39,16 @@ import (
 )
 
 var (
-	version     = "v1.0.0"
-	commit      = "dev"
-	date        = "unknown"
-	serverAddr  string
-	evidenceDir string
-	tlsCAFile   string
+	version           = "v1.0.0"
+	commit            = "dev"
+	date              = "unknown"
+	serverAddr        string
+	evidenceDir       string
+	tlsCAFile         string
+	tlsServerName     string
+	tlsClientCertFile string
+	tlsClientKeyFile  string
 )
-
-func getGRPCClient(ctx context.Context, addr string) (servicesv1.AssuranceServiceClient, *grpc.ClientConn, error) {
-	creds := insecure.NewCredentials()
-	if tlsCAFile != "" {
-		tlsCreds, err := credentials.NewClientTLSFromFile(tlsCAFile, "")
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to load TLS CA file %s: %w", tlsCAFile, err)
-		}
-		creds = tlsCreds
-	}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to connect to gRPC server at %s: %w", addr, err)
-	}
-	client := servicesv1.NewAssuranceServiceClient(conn)
-	return client, conn, nil
-}
 
 func loadLocalEvidence(dir string, sub assurance.SubjectRef) ([]assurance.EvidenceEnvelope, error) {
 	if dir == "" {
@@ -169,7 +145,10 @@ and projects defensible results into standard OSCAL artifacts.`,
 	rootCmd.PersistentFlags().StringVar(&configFileFlag, "config", "", "Path to OSKAL configuration file (default .oskal.yaml)")
 	rootCmd.PersistentFlags().StringVar(&serverAddr, "server", "", "AssuranceService gRPC address (e.g. localhost:9090)")
 	rootCmd.PersistentFlags().StringVar(&evidenceDir, "evidence-dir", "", "Path to directory containing local EvidenceEnvelope JSON files")
-	rootCmd.PersistentFlags().StringVar(&tlsCAFile, "tls-ca-file", "", "Optional path to TLS CA certificate for gRPC client connections")
+	rootCmd.PersistentFlags().StringVar(&tlsCAFile, "tls-ca-file", "", "Explicit trusted CA bundle for gRPC client connections")
+	rootCmd.PersistentFlags().StringVar(&tlsServerName, "tls-server-name", "", "Exact expected gRPC server DNS name or IP SAN")
+	rootCmd.PersistentFlags().StringVar(&tlsClientCertFile, "tls-client-cert-file", "", "Client certificate chain for gRPC mutual TLS")
+	rootCmd.PersistentFlags().StringVar(&tlsClientKeyFile, "tls-client-key-file", "", "Private key paired with the gRPC client certificate")
 
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		cfg, _, err := config.LoadConfig(configFileFlag)
@@ -682,98 +661,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 
 	importCmd.AddCommand(importOscalCmd)
 
-	// 7. oscal serve --port <port>
-	var (
-		port         int
-		serveTLSCert string
-		serveTLSKey  string
-	)
-	serveCmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Start the gRPC AssuranceService daemon",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-			if err != nil {
-				return fmt.Errorf("failed to listen on port %d: %w", port, err)
-			}
-
-			serverOpts := []grpc.ServerOption{
-				grpc.MaxRecvMsgSize(16 << 20),
-				grpc.MaxSendMsgSize(16 << 20),
-				grpc.MaxConcurrentStreams(256),
-				grpc.KeepaliveParams(keepalive.ServerParameters{
-					MaxConnectionIdle: 5 * time.Minute,
-					Time:              2 * time.Minute,
-					Timeout:           20 * time.Second,
-				}),
-				grpc.UnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-					defer func() {
-						if rec := recover(); rec != nil {
-							err = status.Errorf(codes.Internal, "panic recovered in %s: %v", info.FullMethod, rec)
-						}
-					}()
-					return handler(ctx, req)
-				}),
-				grpc.StreamInterceptor(func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
-					defer func() {
-						if rec := recover(); rec != nil {
-							err = status.Errorf(codes.Internal, "stream panic recovered in %s: %v", info.FullMethod, rec)
-						}
-					}()
-					return handler(srv, ss)
-				}),
-			}
-			if serveTLSCert != "" && serveTLSKey != "" {
-				tlsCreds, err := credentials.NewServerTLSFromFile(serveTLSCert, serveTLSKey)
-				if err != nil {
-					return fmt.Errorf("failed to load server TLS credentials: %w", err)
-				}
-				serverOpts = append(serverOpts, grpc.Creds(tlsCreds))
-			}
-
-			var repo ports.EvidenceRepository
-			if evidenceDir != "" {
-				fsRepo, err := storage.OpenFilesystemEvidenceRepository(evidenceDir)
-				if err != nil {
-					return fmt.Errorf("failed to open evidence repository at %s: %w", evidenceDir, err)
-				}
-				repo = fsRepo
-			}
-
-			grpcServer := grpc.NewServer(serverOpts...)
-			srv := service.NewServer(nil, repo)
-			servicesv1.RegisterAssuranceServiceServer(grpcServer, srv)
-
-			healthSrv := health.NewServer()
-			healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-			healthSrv.SetServingStatus(servicesv1.AssuranceService_ServiceDesc.ServiceName, grpc_health_v1.HealthCheckResponse_SERVING)
-			grpc_health_v1.RegisterHealthServer(grpcServer, healthSrv)
-
-			fmt.Printf("OSKAL AssuranceService gRPC daemon listening on port %d\n", port)
-
-			stopCh := make(chan os.Signal, 1)
-			signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
-			defer signal.Stop(stopCh)
-
-			go func() {
-				select {
-				case <-stopCh:
-				case <-cmd.Context().Done():
-				}
-				fmt.Println("Shutting down OSKAL AssuranceService gRPC daemon...")
-				healthSrv.Shutdown()
-				grpcServer.GracefulStop()
-			}()
-
-			if err := grpcServer.Serve(lis); err != nil && err != grpc.ErrServerStopped {
-				return fmt.Errorf("gRPC server error: %w", err)
-			}
-			return nil
-		},
-	}
-	serveCmd.Flags().IntVar(&port, "port", 9090, "Port for gRPC service to listen on")
-	serveCmd.Flags().StringVar(&serveTLSCert, "tls-cert-file", "", "Optional path to TLS server certificate file")
-	serveCmd.Flags().StringVar(&serveTLSKey, "tls-key-file", "", "Optional path to TLS server private key file")
+	serveCmd := newGRPCServeCommand()
 
 	// 8. oscal webhook
 	var (
@@ -1207,9 +1095,9 @@ for Claude Code, Cursor, OpenCode, and AI developer environments over stdio.`,
 	)
 	cockpitCmd := &cobra.Command{
 		Use:   "cockpit",
-		Short: "Interactive ASCII continuous assurance monitoring dashboard",
-		Long: `Displays a live pure-ASCII terminal dashboard of workload vector states,
-Merkle roots, drift alerts, and reconciliation loops.`,
+		Short: "Read-only ASCII archive inventory with explicit unknown assurance",
+		Long: `Displays archived material counts without inferring current assurance,
+producer trust, freshness, drift, or live enforcement.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := cockpit.NewCockpit(cockpit.CockpitConfig{
 				RefreshInterval: cockpitRefresh,
@@ -1494,6 +1382,12 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 				explicitConfig = true
 			case "tls-ca-file":
 				tlsCAFile = val
+			case "tls-server-name":
+				tlsServerName = val
+			case "tls-client-cert-file":
+				tlsClientCertFile = val
+			case "tls-client-key-file":
+				tlsClientKeyFile = val
 			case "projection-context":
 				if strings.HasPrefix(val, "UTCP_ARG_") && strings.HasSuffix(val, "_UTCP_END") {
 					continue
