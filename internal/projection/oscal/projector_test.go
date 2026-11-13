@@ -3,6 +3,7 @@ package oscal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -11,366 +12,295 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v5"
 )
 
-func TestProjectAssessmentResultsExposesSourceEvidenceReference(t *testing.T) {
-	projector := NewProjector()
-	now := time.Now().UTC()
-
-	sub := assurance.SubjectRef{
-		Scheme: "k8s",
-		ID:     "payments/payments-api/Deployment/payments-api",
-	}
-
-	epoch := assurance.AssuranceEpoch{
-		SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload"),
-		PolicyDigest:         assurance.ComputeStringDigest("cel:policy:restricted-containers"),
-		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
-		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
-	}
-
-	evidenceDigest := assurance.ComputeStringDigest("payload-json-content-01")
-	evidenceURI := "s3://evidence/payments/ev-01.json"
-
-	eval := assurance.ClaimEvaluation{
-		ID:      "eval-01",
-		Control: assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-		Subject: sub,
-		State:   assurance.AssuranceStateAssured,
-		Epoch:   epoch,
-		Evidence: []assurance.EvidenceRef{
-			{
-				URI:       evidenceURI,
-				Digest:    evidenceDigest,
-				MediaType: "application/json",
-			},
+// These are explicit domain examples, not claims about a running cluster. Imported
+// documents are deliberately not resolved: projection checks shape, not provenance.
+func exampleContext() ProjectionContext {
+	return ProjectionContext{
+		AssessmentPlanHref: "assessment-plan.json", SystemSecurityPlanHref: "system-security-plan.json",
+		ControlSource: "catalog.json", ControlNamespace: "nist-sp-800-53",
+		Component: &ComponentContext{Type: "software", Description: "Example payment service", Implementations: map[string]string{"nist-sp-800-53:AC-6": "Example service uses a dedicated unprivileged account."}},
+		System: &SystemContext{
+			ProfileHref:                      "profile.json",
+			Characteristics:                  OscalSystemCharacteristics{SystemIDs: []OscalSystemID{{ID: "payments-system"}}, SystemName: "payments-system", Description: "Example payment system", SystemInformation: OscalSystemInformation{InformationTypes: []OscalInformationType{{Title: "Example transactions", Description: "Example payment transaction records"}}}, Status: OscalStatus{State: "other", Remarks: "Operational status has not been assessed by this example."}, AuthorizationBoundary: OscalAuthorizationBoundary{Description: "Example namespace payments, as declared by the caller; enforcement is not verified by projection."}},
+			Implementation:                   OscalSystemImplementation{Components: []OscalSSPComponent{{UUID: "586bc654-a3bd-4c9b-9e8c-b294d1391911", Type: "this-system", Title: "payments-system", Description: "Example payment system component", Status: OscalStatus{State: "other", Remarks: "Component operational status is not assessed."}}}},
+			ControlImplementationDescription: "Caller-supplied example implementation narratives.", Implementations: map[string]string{"nist-sp-800-53:AC-6": "Example service uses a dedicated unprivileged account."},
 		},
-		Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 1},
-		EvidenceRoot: assurance.ComputeStringDigest("merkle-root-123"),
-		EvaluatedAt:  now,
-		ValidUntil:   now.Add(5 * time.Minute),
+		FindingTargets: map[string]FindingTargetMapping{"nist-sp-800-53:AC-6": {Type: "objective-id", TargetID: "ac-6_obj.a"}},
 	}
+}
 
-	finding := assurance.Finding{
-		ID:          "find-01",
-		Subject:     sub,
-		Control:     assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-		Severity:    "HIGH",
-		Title:       "Test finding",
-		Description: "Simulated vulnerability finding",
+func exampleEvaluation() (assurance.SubjectRef, assurance.ClaimEvaluation) {
+	subject := assurance.SubjectRef{Scheme: "k8s", ID: "payments/Deployment/payments-api"}
+	now := time.Now().UTC().Add(-time.Minute)
+	return subject, assurance.ClaimEvaluation{ID: "evaluation-1", Subject: subject, Control: assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}, State: assurance.AssuranceStateUnknown, Epoch: assurance.AssuranceEpoch{SubjectDigest: subject.Digest()}, EvaluatedAt: now, ValidUntil: now.Add(5 * time.Minute), Completeness: assurance.EvidenceCompleteness{Required: 1}, Evidence: []assurance.EvidenceRef{{URI: "urn:example:evidence:1", Digest: assurance.ComputeStringDigest("example source bytes"), MediaType: "application/json"}}}
+}
+
+func exampleFinding(subject assurance.SubjectRef, e assurance.ClaimEvaluation) assurance.Finding {
+	return assurance.Finding{ID: "finding-1", Subject: subject, Control: e.Control, Title: "Example confirmed violation", Description: "Example source finding supplied for projection.", Severity: "HIGH", DiscoveredAt: e.EvaluatedAt, EvidenceRefs: e.Evidence}
+}
+
+func assertInputError(t *testing.T, data []byte, err error, field string) {
+	t.Helper()
+	var input *ProjectionInputError
+	if data != nil || !errors.As(err, &input) || !strings.Contains(input.Field, field) {
+		t.Fatalf("expected no bytes and input error for %s, got %s %v", field, data, err)
 	}
+	t.Logf("Rejected missing/incompatible input: %v", err)
+}
 
-	data, err := projector.ProjectAssessmentResults(context.Background(), sub, []assurance.ClaimEvaluation{eval}, []assurance.Finding{finding})
+func validateProjection(t *testing.T, dt DocumentType, data []byte) {
+	t.Helper()
+	compiler := jsonschema.NewCompiler()
+	compiler.Draft = jsonschema.Draft7
+	schema, err := compiler.Compile("testdata/" + schemaFileMap[dt])
 	if err != nil {
-		t.Fatalf("failed to project assessment results: %v", err)
+		t.Fatal(err)
 	}
-
-	// Milestone 10 Exit Criteria:
-	// Every projected assertion exposes source assurance/evidence reference.
-	var parsed AssessmentResultsWrapper
+	var parsed any
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("projected document is not valid JSON: %v", err)
+		t.Fatal(err)
 	}
-
-	if parsed.AssessmentResults.Metadata.OscalVersion != "1.2.3" {
-		t.Fatalf("expected OSCAL version 1.2.3, got %s", parsed.AssessmentResults.Metadata.OscalVersion)
+	if err := schema.Validate(parsed); err != nil {
+		t.Fatalf("%s violates strict NIST 1.2.3 schema: %v\n%s", dt, err, data)
 	}
+}
 
-	if len(parsed.AssessmentResults.Results) == 0 {
-		t.Fatalf("expected at least one result")
+func TestProjectionRequiresSemanticInputs(t *testing.T) {
+	subject, e := exampleEvaluation()
+	p := NewProjector()
+	data, err := p.ProjectAssessmentResults(context.Background(), subject, []assurance.ClaimEvaluation{e}, nil)
+	assertInputError(t, data, err, "assessment_plan_href")
+	data, err = p.ProjectComponentDefinition(context.Background(), "payments", []assurance.ClaimEvaluation{e})
+	assertInputError(t, data, err, "component")
+	data, err = p.ProjectSSP(context.Background(), "payments", []assurance.ClaimEvaluation{e})
+	assertInputError(t, data, err, "system")
+	data, err = p.ProjectAssessmentPlan(context.Background(), subject, assurance.EvidenceContract{}, []assurance.ControlRef{e.Control})
+	assertInputError(t, data, err, "system_security_plan_href")
+	data, err = p.ProjectPOAM(context.Background(), subject, nil)
+	assertInputError(t, data, err, "findings")
+}
+
+func TestProjectionDoesNotInventEmptyBaselineOrTasks(t *testing.T) {
+	subject, e := exampleEvaluation()
+	p := NewProjectorWithContext(exampleContext())
+	data, err := p.ProjectAssessmentResults(context.Background(), subject, nil, nil)
+	assertInputError(t, data, err, "controls")
+	data, err = p.ProjectSSP(context.Background(), "payments-system", nil)
+	assertInputError(t, data, err, "controls")
+	data, err = p.ProjectAssessmentPlan(context.Background(), subject, assurance.EvidenceContract{}, nil)
+	assertInputError(t, data, err, "controls")
+	data, err = p.ProjectComponentDefinition(context.Background(), "payments", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	res := parsed.AssessmentResults.Results[0]
-	if len(res.Observations) == 0 {
-		t.Fatalf("expected at least one observation")
+	validateProjection(t, DocTypeComponentDefinition, data)
+	if strings.Contains(string(data), "implemented-requirements") || strings.Contains(string(data), "AC-6") {
+		t.Fatalf("empty component fabricated controls: %s", data)
 	}
-
-	obs := res.Observations[0]
-	if len(obs.RelevantEvidence) == 0 {
-		t.Fatalf("M10 Exit Failure: Observation has no relevant-evidence links")
+	data, err = p.ProjectAssessmentPlan(context.Background(), subject, assurance.EvidenceContract{}, []assurance.ControlRef{e.Control})
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	resourceUUID := strings.TrimPrefix(obs.RelevantEvidence[0].Href, "#")
-	if resourceUUID == "" {
-		t.Fatalf("M10 Exit Failure: Expected non-empty resource UUID in href: %s", obs.RelevantEvidence[0].Href)
+	validateProjection(t, DocTypeAssessmentPlan, data)
+	if strings.Contains(string(data), "tasks") || strings.Contains(string(data), "include-all") || strings.Contains(string(data), "assessment-subjects") {
+		t.Fatalf("plan fabricated tasks or scope: %s", data)
 	}
+}
 
-	// Back-matter must contain the referenced resource with the matching digest and UUID
-	if parsed.AssessmentResults.BackMatter == nil || len(parsed.AssessmentResults.BackMatter.Resources) == 0 {
-		t.Fatalf("M10 Exit Failure: Back-matter contains no resources")
+func TestAssessmentResultsPreserveUnknownScopeTimeAndEvidence(t *testing.T) {
+	subject, e := exampleEvaluation()
+	p := NewProjectorWithContext(exampleContext())
+	later := e
+	later.ID = "evaluation-2"
+	later.EvaluatedAt = e.EvaluatedAt.Add(30 * time.Second)
+	later.Epoch.PolicyDigest = assurance.ComputeStringDigest("different example policy")
+	later.Evidence = append([]assurance.EvidenceRef(nil), e.Evidence...)
+	later.Evidence[0].URI = "urn:example:evidence:alternate-location"
+	data, err := p.ProjectAssessmentResults(context.Background(), subject, []assurance.ClaimEvaluation{later, e}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	if len(res.Findings) == 0 || len(res.Findings[0].RelatedObservations) == 0 {
-		t.Fatalf("Finding must link RelatedObservations")
+	validateProjection(t, DocTypeAssessmentResults, data)
+	var got AssessmentResultsWrapper
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
 	}
-
-	foundResource := false
-	for _, r := range parsed.AssessmentResults.BackMatter.Resources {
-		if r.UUID == resourceUUID {
-			for _, p := range r.Props {
-				if p.Name == "digest" && p.Value == evidenceDigest {
-					foundResource = true
-					break
-				}
+	ar := got.AssessmentResults
+	r := ar.Results[0]
+	if !r.Start.Equal(e.EvaluatedAt) || !r.End.Equal(later.EvaluatedAt) {
+		t.Fatalf("result execution interval changed: %s -> %s", r.Start, r.End)
+	}
+	if r.Observations[0].Expires == nil || !r.Observations[0].Expires.Equal(later.ValidUntil) {
+		t.Fatal("evaluation validity must remain expiry, never completed execution time")
+	}
+	if !ar.Metadata.Published.IsZero() || len(r.Findings) != 0 || r.ReviewedControls.ControlSelections[0].IncludeAll != nil {
+		t.Fatalf("fabricated publication/findings/scope: %s", data)
+	}
+	selected := r.ReviewedControls.ControlSelections[0].IncludeControls
+	if len(selected) != 1 || selected[0].ControlID != e.Control.ID {
+		t.Fatalf("incorrect exact controls: %+v", selected)
+	}
+	for _, obs := range r.Observations {
+		unknown := false
+		for _, prop := range obs.Props {
+			if prop.Name == "assurance-state" && prop.Value == "UNKNOWN" {
+				unknown = true
 			}
 		}
+		if !unknown {
+			t.Fatalf("UNKNOWN changed: %+v", obs)
+		}
 	}
-	if !foundResource {
-		t.Fatalf("M10 Exit Failure: Back-matter does not contain matching resource %s for evidence digest %s", resourceUUID, evidenceDigest)
+	if ar.BackMatter == nil || len(ar.BackMatter.Resources) != 2 {
+		t.Fatal("distinct source evidence locations must survive projection")
 	}
-
-	// Empty evaluations must not panic and must produce valid JSON
-	emptyData, err := projector.ProjectAssessmentResults(context.Background(), sub, nil, nil)
-	if err != nil {
-		t.Fatalf("failed to project empty assessment results: %v", err)
+	resources := make(map[string]BackMatterResource)
+	for _, resource := range ar.BackMatter.Resources {
+		resources[resource.UUID] = resource
 	}
-	if !strings.Contains(string(emptyData), "assessment-results") {
-		t.Fatalf("unexpected empty assessment results output: %s", string(emptyData))
+	for i, obs := range r.Observations {
+		resource := resources[strings.TrimPrefix(obs.RelevantEvidence[0].Href, "#")]
+		source := []assurance.ClaimEvaluation{later, e}[i].Evidence[0]
+		if resource.Props[0].Value != source.Digest || resource.Rlinks[0].Href != source.URI {
+			t.Fatalf("evidence source was reinterpreted: %+v", resource)
+		}
 	}
-
-	t.Logf("Projected OSCAL Assessment Results:\n%s", string(data[:400])+"...")
+	t.Logf("UNKNOWN preserved; exact control selection=%s; no satisfaction assertion; end=%s, expiry=%s", selected[0].ControlID, r.End, r.Observations[0].Expires)
 }
 
-func TestProjectComponentDefinitionAndSSP(t *testing.T) {
-	projector := NewProjector()
-	now := time.Now().UTC()
-	sub := assurance.SubjectRef{Scheme: "k8s", ID: "payments/payments-api"}
-	epoch := assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest("subject-01")}
-
-	eval := assurance.ClaimEvaluation{
-		ID:           "eval-01",
-		Control:      assurance.ControlRef{Namespace: "ckodex", ID: "container.least-privilege"},
-		Subject:      sub,
-		State:        assurance.AssuranceStateAssured,
-		Epoch:        epoch,
-		EvidenceRoot: assurance.ComputeStringDigest("root-evidence"),
-		EvaluatedAt:  now,
-		ValidUntil:   now.Add(5 * time.Minute),
-	}
-
-	// Component Definition
-	cdBytes, err := projector.ProjectComponentDefinition(context.Background(), "payments-api", []assurance.ClaimEvaluation{eval})
+func TestAssessmentFindingsRequireActualTargetAndExactEvidenceLink(t *testing.T) {
+	subject, e := exampleEvaluation()
+	e.State = assurance.AssuranceStateFailed
+	f := exampleFinding(subject, e)
+	c := exampleContext()
+	p := NewProjectorWithContext(c)
+	data, err := p.ProjectAssessmentResults(context.Background(), subject, []assurance.ClaimEvaluation{e}, []assurance.Finding{f})
 	if err != nil {
-		t.Fatalf("failed to project component definition: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(cdBytes), "component-definition") || !strings.Contains(string(cdBytes), "container.least-privilege") {
-		t.Fatalf("unexpected component definition output: %s", string(cdBytes))
+	validateProjection(t, DocTypeAssessmentResults, data)
+	var got AssessmentResultsWrapper
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
 	}
-
-	// SSP
-	sspBytes, err := projector.ProjectSSP(context.Background(), "Payments System", []assurance.ClaimEvaluation{eval})
-	if err != nil {
-		t.Fatalf("failed to project SSP: %v", err)
+	r := got.AssessmentResults.Results[0]
+	if r.Findings[0].Target.TargetID != "ac-6_obj.a" || r.Findings[0].RelatedObservations[0].ObservationUUID != r.Observations[0].UUID {
+		t.Fatalf("target/provenance mapping changed: %+v", r)
 	}
-	if !strings.Contains(string(sspBytes), "system-security-plan") || !strings.Contains(string(sspBytes), "Payments System") {
-		t.Fatalf("unexpected SSP output: %s", string(sspBytes))
-	}
-	if !strings.Contains(string(sspBytes), "import-profile") {
-		t.Fatalf("expected SSP to include import-profile: %s", string(sspBytes))
-	}
+	c.FindingTargets = nil
+	data, err = NewProjectorWithContext(c).ProjectAssessmentResults(context.Background(), subject, []assurance.ClaimEvaluation{e}, []assurance.Finding{f})
+	assertInputError(t, data, err, "finding_targets")
+	c = exampleContext()
+	f.EvidenceRefs = nil
+	data, err = NewProjectorWithContext(c).ProjectAssessmentResults(context.Background(), subject, []assurance.ClaimEvaluation{e}, []assurance.Finding{f})
+	assertInputError(t, data, err, "findings.evidenceRefs")
+	f = exampleFinding(subject, e)
+	f.Control.ID = "AC-60"
+	c.FindingTargets[f.Control.Canonical()] = FindingTargetMapping{Type: "objective-id", TargetID: "ac-60_obj.a"}
+	data, err = NewProjectorWithContext(c).ProjectAssessmentResults(context.Background(), subject, []assurance.ClaimEvaluation{e}, []assurance.Finding{f})
+	assertInputError(t, data, err, "findings.evidenceRefs")
 }
 
-func TestProjectAssessmentPlanAndPOAM(t *testing.T) {
-	projector := NewProjector()
-	sub := assurance.SubjectRef{Scheme: "k8s", ID: "payments/payments-api"}
-	contract := assurance.EvidenceContract{
-		ID: "contract-01",
-		Requirements: []assurance.EvidenceRequirement{
-			{ID: "req-1", EvidenceType: "admission", MaxAge: 5 * time.Minute},
-		},
-	}
-	controls := []assurance.ControlRef{
-		{Namespace: "nist-sp-800-53", ID: "AC-6"},
-	}
-
-	// 1. Assessment Plan
-	apBytes, err := projector.ProjectAssessmentPlan(context.Background(), sub, contract, controls)
+func TestSSPRequiresActualBoundaryStatusAndNarrative(t *testing.T) {
+	_, e := exampleEvaluation()
+	c := exampleContext()
+	data, err := NewProjectorWithContext(c).ProjectSSP(context.Background(), "payments-system", []assurance.ClaimEvaluation{e})
 	if err != nil {
-		t.Fatalf("failed to project assessment plan: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(apBytes), "assessment-plan") || !strings.Contains(string(apBytes), "admission") {
-		t.Fatalf("unexpected assessment plan output: %s", string(apBytes))
+	validateProjection(t, DocTypeSSP, data)
+	var got SSPWrapper
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
 	}
+	facts := got.SystemSecurityPlan.SystemCharacteristics
+	if facts.Status.State != "other" || facts.Status.Remarks != c.System.Characteristics.Status.Remarks || facts.AuthorizationBoundary.Description != c.System.Characteristics.AuthorizationBoundary.Description {
+		t.Fatalf("caller system facts replaced: %+v", facts)
+	}
+	c.System.Characteristics.Status.Remarks = ""
+	data, err = NewProjectorWithContext(c).ProjectSSP(context.Background(), "payments-system", []assurance.ClaimEvaluation{e})
+	assertInputError(t, data, err, "status.remarks")
+	c = exampleContext()
+	c.System.Characteristics.AuthorizationBoundary.Description = ""
+	data, err = NewProjectorWithContext(c).ProjectSSP(context.Background(), "payments-system", []assurance.ClaimEvaluation{e})
+	assertInputError(t, data, err, "authorization-boundary")
+	c = exampleContext()
+	c.System.Implementations = nil
+	data, err = NewProjectorWithContext(c).ProjectSSP(context.Background(), "payments-system", []assurance.ClaimEvaluation{e})
+	assertInputError(t, data, err, "system.implementations")
+}
 
-	// 2. POA&M
-	findings := []assurance.Finding{
-		{
-			ID:           "find-01",
-			Subject:      sub,
-			Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-			Severity:     "HIGH",
-			Title:        "Remediation required for privileged container",
-			Description:  "Pod security admission denied root execution",
-			DiscoveredAt: time.Now().UTC(),
-		},
-	}
-	poamBytes, err := projector.ProjectPOAM(context.Background(), sub, findings)
-	if err != nil {
-		t.Fatalf("failed to project poam: %v", err)
-	}
-	if !strings.Contains(string(poamBytes), "plan-of-action-and-milestones") || !strings.Contains(string(poamBytes), "Remediation required") {
-		t.Fatalf("unexpected poam output: %s", string(poamBytes))
-	}
-	if !strings.Contains(string(poamBytes), "system-id") {
-		t.Fatalf("expected POAM to include system-id: %s", string(poamBytes))
-	}
+func TestProjectionRejectsCrossSubjectAndFrameworkInputs(t *testing.T) {
+	subject, e := exampleEvaluation()
+	p := NewProjectorWithContext(exampleContext())
+	e.Subject.ID = "another-workload"
+	data, err := p.ProjectAssessmentResults(context.Background(), subject, []assurance.ClaimEvaluation{e}, nil)
+	assertInputError(t, data, err, "evaluations.subject")
+	_, e = exampleEvaluation()
+	e.Control.Namespace = "unrelated-framework"
+	data, err = p.ProjectComponentDefinition(context.Background(), "payments", []assurance.ClaimEvaluation{e})
+	assertInputError(t, data, err, "controls")
+	_, e = exampleEvaluation()
+	e.EvaluatedAt = time.Now().UTC().Add(time.Hour)
+	data, err = p.ProjectAssessmentResults(context.Background(), subject, []assurance.ClaimEvaluation{e}, nil)
+	assertInputError(t, data, err, "evaluations.evaluatedAt")
 }
 
 func TestStrictNISTOscalV123SchemaConformance(t *testing.T) {
-	compiler := jsonschema.NewCompiler()
-	compiler.Draft = jsonschema.Draft7
+	subject, e := exampleEvaluation()
+	f := exampleFinding(subject, e)
+	p := NewProjectorWithContext(exampleContext())
+	tests := []struct {
+		name    DocumentType
+		project func() ([]byte, error)
+	}{
+		{DocTypeAssessmentResults, func() ([]byte, error) {
+			return p.ProjectAssessmentResults(context.Background(), subject, []assurance.ClaimEvaluation{e}, []assurance.Finding{f})
+		}},
+		{DocTypeComponentDefinition, func() ([]byte, error) {
+			return p.ProjectComponentDefinition(context.Background(), "payments", []assurance.ClaimEvaluation{e})
+		}},
+		{DocTypeSSP, func() ([]byte, error) {
+			return p.ProjectSSP(context.Background(), "payments-system", []assurance.ClaimEvaluation{e})
+		}},
+		{DocTypeAssessmentPlan, func() ([]byte, error) {
+			return p.ProjectAssessmentPlan(context.Background(), subject, assurance.EvidenceContract{ID: "example-contract", Requirements: []assurance.EvidenceRequirement{{ID: "r1", EvidenceType: "admission", Required: true, MaxAge: time.Minute, AcceptedProducers: []string{"spiffe://example.test/collector"}}}}, []assurance.ControlRef{e.Control})
+		}},
+		{DocTypePOAM, func() ([]byte, error) { return p.ProjectPOAM(context.Background(), subject, []assurance.Finding{f}) }},
+	}
+	for _, test := range tests {
+		t.Run(string(test.name), func(t *testing.T) {
+			data, err := test.project()
+			if err != nil {
+				t.Fatal(err)
+			}
+			validateProjection(t, test.name, data)
+			t.Logf("strict NIST 1.2.3 schema accepted %s", test.name)
+		})
+	}
+}
 
-	// 1. Assessment Results Schema
-	arSchema, err := compiler.Compile("testdata/schemas/oscal_assessment-results_schema.json")
+func TestDecodeProjectionContextStrictBoundedJSON(t *testing.T) {
+	valid, err := json.Marshal(exampleContext())
 	if err != nil {
-		t.Fatalf("failed to compile Assessment Results schema: %v", err)
+		t.Fatal(err)
 	}
+	got, err := DecodeProjectionContext(valid)
+	if err != nil || got.AssessmentPlanHref != "assessment-plan.json" || got.System.Characteristics.Status.State != "other" {
+		t.Fatalf("context decode lost facts: %+v %v", got, err)
+	}
+	for _, input := range []string{"", "null", "[]", `{`, `{"unknown":"field"}`, `{"component":{"unexpected_field":"typo"}}`, `{} {}`, `{} trailing`, strings.Repeat(" ", MaxProjectionContextBytes+1)} {
+		if _, err := DecodeProjectionContext([]byte(input)); err == nil {
+			t.Fatalf("accepted invalid/oversized context %q", input[:min(len(input), 100)])
+		}
+	}
+}
 
-	// 2. Component Definition Schema
-	cdSchema, err := compiler.Compile("testdata/schemas/oscal_component_schema.json")
-	if err != nil {
-		t.Fatalf("failed to compile Component Definition schema: %v", err)
-	}
-
-	// 3. System Security Plan Schema
-	sspSchema, err := compiler.Compile("testdata/schemas/oscal_ssp_schema.json")
-	if err != nil {
-		t.Fatalf("failed to compile SSP schema: %v", err)
-	}
-
-	// 4. Assessment Plan Schema
-	apSchema, err := compiler.Compile("testdata/schemas/oscal_assessment-plan_schema.json")
-	if err != nil {
-		t.Fatalf("failed to compile Assessment Plan schema: %v", err)
-	}
-
-	// 5. POAM Schema
-	poamSchema, err := compiler.Compile("testdata/schemas/oscal_poam_schema.json")
-	if err != nil {
-		t.Fatalf("failed to compile POAM schema: %v", err)
-	}
-
-	projector := NewProjector()
-	sub := assurance.SubjectRef{Scheme: "k8s", ID: "payments/payments-api/Deployment/payments-api"}
-	now := time.Now().UTC()
-	epoch := assurance.AssuranceEpoch{
-		SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:workload"),
-		PolicyDigest:         assurance.ComputeStringDigest("cel:policy:restricted-containers"),
-		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/server"),
-		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
-	}
-
-	eval := assurance.ClaimEvaluation{
-		ID:      "eval-01",
-		Control: assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-		Subject: sub,
-		State:   assurance.AssuranceStateAssured,
-		Epoch:   epoch,
-		Evidence: []assurance.EvidenceRef{
-			{
-				URI:       "s3://evidence/payments/ev-01.json",
-				Digest:    assurance.ComputeStringDigest("payload-json-content-01"),
-				MediaType: "application/json",
-			},
-		},
-		Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 1},
-		EvidenceRoot: assurance.ComputeStringDigest("merkle-root-123"),
-		EvaluatedAt:  now,
-		ValidUntil:   now.Add(5 * time.Minute),
-	}
-
-	finding := assurance.Finding{
-		ID:          "find-01",
-		Subject:     sub,
-		Control:     assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-		Severity:    "HIGH",
-		Title:       "Test finding",
-		Description: "Simulated vulnerability finding",
-	}
-
-	// Validate Assessment Results
-	arBytes, err := projector.ProjectAssessmentResults(context.Background(), sub, []assurance.ClaimEvaluation{eval}, []assurance.Finding{finding})
-	if err != nil {
-		t.Fatalf("failed to project AR: %v", err)
-	}
-	var arVal interface{}
-	if err := json.Unmarshal(arBytes, &arVal); err != nil {
-		t.Fatalf("failed to unmarshal AR JSON: %v", err)
-	}
-	if err := arSchema.Validate(arVal); err != nil {
-		t.Fatalf("Assessment Results failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(arBytes))
-	}
-
-	// Validate Component Definition
-	cdBytes, err := projector.ProjectComponentDefinition(context.Background(), "payments-api", []assurance.ClaimEvaluation{eval})
-	if err != nil {
-		t.Fatalf("failed to project Component Definition: %v", err)
-	}
-	var cdVal interface{}
-	if err := json.Unmarshal(cdBytes, &cdVal); err != nil {
-		t.Fatalf("failed to unmarshal CD JSON: %v", err)
-	}
-	if err := cdSchema.Validate(cdVal); err != nil {
-		t.Fatalf("Component Definition failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(cdBytes))
-	}
-
-	// Validate System Security Plan (SSP)
-	sspBytes, err := projector.ProjectSSP(context.Background(), "payments-system", []assurance.ClaimEvaluation{eval})
-	if err != nil {
-		t.Fatalf("failed to project SSP: %v", err)
-	}
-	var sspVal interface{}
-	if err := json.Unmarshal(sspBytes, &sspVal); err != nil {
-		t.Fatalf("failed to unmarshal SSP JSON: %v", err)
-	}
-	if err := sspSchema.Validate(sspVal); err != nil {
-		t.Fatalf("SSP failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(sspBytes))
-	}
-
-	// Validate Assessment Plan
-	contract := assurance.EvidenceContract{
-		ID: "contract-01",
-		Requirements: []assurance.EvidenceRequirement{
-			{ID: "req-1", EvidenceType: "admission", Required: true, MaxAge: 5 * time.Minute},
-		},
-	}
-	controls := []assurance.ControlRef{
-		{Namespace: "nist-sp-800-53", ID: "AC-6"},
-	}
-	apBytes, err := projector.ProjectAssessmentPlan(context.Background(), sub, contract, controls)
-	if err != nil {
-		t.Fatalf("failed to project Assessment Plan: %v", err)
-	}
-	var apVal interface{}
-	if err := json.Unmarshal(apBytes, &apVal); err != nil {
-		t.Fatalf("failed to unmarshal AP JSON: %v", err)
-	}
-	if err := apSchema.Validate(apVal); err != nil {
-		t.Fatalf("Assessment Plan failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(apBytes))
-	}
-
-	// Validate POAM (with findings and without findings)
-	poamWithFindings, err := projector.ProjectPOAM(context.Background(), sub, []assurance.Finding{finding})
-	if err != nil {
-		t.Fatalf("failed to project POAM: %v", err)
-	}
-	var poamVal1 interface{}
-	if err := json.Unmarshal(poamWithFindings, &poamVal1); err != nil {
-		t.Fatalf("failed to unmarshal POAM JSON: %v", err)
-	}
-	if err := poamSchema.Validate(poamVal1); err != nil {
-		t.Fatalf("POAM (with findings) failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(poamWithFindings))
-	}
-
-	poamWithoutFindings, err := projector.ProjectPOAM(context.Background(), sub, nil)
-	if err != nil {
-		t.Fatalf("failed to project empty POAM: %v", err)
-	}
-	var poamVal2 interface{}
-	if err := json.Unmarshal(poamWithoutFindings, &poamVal2); err != nil {
-		t.Fatalf("failed to unmarshal empty POAM JSON: %v", err)
-	}
-	if err := poamSchema.Validate(poamVal2); err != nil {
-		t.Fatalf("POAM (without findings) failed strict NIST OSCAL v1.2.3 schema validation: %v\nJSON:\n%s", err, string(poamWithoutFindings))
-	}
+func TestImplementationProjectionRejectsAmbiguousDuplicateSnapshots(t *testing.T) {
+	_, e := exampleEvaluation()
+	p := NewProjectorWithContext(exampleContext())
+	data, err := p.ProjectComponentDefinition(context.Background(), "payments", []assurance.ClaimEvaluation{e, e})
+	assertInputError(t, data, err, "evaluations.control")
+	data, err = p.ProjectSSP(context.Background(), "payments-system", []assurance.ClaimEvaluation{e, e})
+	assertInputError(t, data, err, "evaluations.control")
 }

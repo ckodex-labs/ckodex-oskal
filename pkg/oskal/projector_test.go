@@ -3,13 +3,24 @@ package oskal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
 
 func TestProjectorExport(t *testing.T) {
 	ctx := context.Background()
-	projector := NewProjector()
+	// Explicit example facts test projection without claiming a live deployment.
+	projector := NewProjectorWithContext(ProjectionContext{
+		AssessmentPlanHref: "assessment-plan.json", SystemSecurityPlanHref: "system-security-plan.json", ControlNamespace: "nist-sp-800-53", ControlSource: "catalog.json",
+		Component: &ComponentContext{Type: "software", Description: "Example payments API", Implementations: map[string]string{"nist-sp-800-53:AC-6": "Example service uses a dedicated account."}},
+		System: &SystemContext{
+			ProfileHref:                      "profile.json",
+			Characteristics:                  SystemCharacteristics{SystemIDs: []SystemID{{ID: "payments-cluster"}}, SystemName: "payments-cluster", Description: "Example payments cluster", SystemInformation: SystemInformation{InformationTypes: []InformationType{{Title: "Example transactions", Description: "Example payment records"}}}, Status: OperationalStatus{State: "other", Remarks: "Operational status not assessed."}, AuthorizationBoundary: AuthorizationBoundary{Description: "Example caller-declared namespace boundary."}},
+			Implementation:                   SystemImplementation{Components: []SystemComponent{{UUID: "6306c850-eebc-4e46-bab7-44527f3d94be", Type: "this-system", Title: "payments-cluster", Description: "Example payments system", Status: OperationalStatus{State: "other", Remarks: "Operational status not assessed."}}}},
+			ControlImplementationDescription: "Example implementation narrative.", Implementations: map[string]string{"nist-sp-800-53:AC-6": "Example service uses a dedicated account."},
+		},
+	})
 
 	sub := SubjectRef{Scheme: "k8s", ID: "prod/payments/Deployment/payments-api"}
 	ctrl := ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
@@ -102,5 +113,13 @@ func TestProjectorExport(t *testing.T) {
 	var sspMap map[string]interface{}
 	if err := json.Unmarshal(sspBytes, &sspMap); err != nil {
 		t.Fatalf("invalid JSON generated for SSP: %v", err)
+	}
+}
+
+func TestProjectorWithoutContextReturnsActionableError(t *testing.T) {
+	data, err := NewProjector().ProjectSSP(context.Background(), "payments", nil)
+	var input *ProjectionInputError
+	if data != nil || !errors.As(err, &input) || input.Field != "system" {
+		t.Fatalf("expected missing system facts, got %s %v", data, err)
 	}
 }

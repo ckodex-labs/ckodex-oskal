@@ -25,7 +25,7 @@ func TestValidatorValidDocuments(t *testing.T) {
 		t.Fatalf("failed to get default validator: %v", err)
 	}
 
-	projector := NewProjector()
+	projector := NewProjectorWithContext(exampleContext())
 	now := time.Now().UTC()
 	sub := assurance.SubjectRef{Scheme: "k8s", ID: "prod/payments/Deployment/payments-api"}
 	epoch := assurance.AssuranceEpoch{
@@ -119,8 +119,8 @@ func TestValidatorValidDocuments(t *testing.T) {
 		t.Fatalf("expected valid AP, got errors: %+v", reportAP.Errors)
 	}
 
-	// 5. Validate POAM
-	poamBytes, err := projector.ProjectPOAM(context.Background(), sub, nil)
+	// 5. Validate a POAM with an actual supplied remediation finding.
+	poamBytes, err := projector.ProjectPOAM(context.Background(), sub, []assurance.Finding{exampleFinding(sub, eval)})
 	if err != nil {
 		t.Fatalf("failed to project POAM: %v", err)
 	}
@@ -131,6 +131,7 @@ func TestValidatorValidDocuments(t *testing.T) {
 	if !reportPOAM.Valid {
 		t.Fatalf("expected valid POAM, got errors: %+v", reportPOAM.Errors)
 	}
+
 }
 
 func TestValidatorInvalidDocumentCatchesErrors(t *testing.T) {
