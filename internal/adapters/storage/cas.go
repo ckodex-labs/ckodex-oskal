@@ -3,7 +3,6 @@ package storage
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -194,31 +193,15 @@ func validStoredEnvelope(env assurance.EvidenceEnvelope) bool {
 
 func (r *ContentAddressedEvidenceRepository) restoreReceipt(path string, data []byte) error {
 	var receipt assurance.ControlReceipt
-	if err := json.Unmarshal(data, &receipt); err != nil {
-		return &IntegrityError{Path: path, Reason: "invalid receipt JSON"}
+	if err := json.Unmarshal(data, &receipt); err != nil || !validReceiptEncoding(receipt) {
+		return &IntegrityError{Path: path, Reason: "invalid receipt JSON, identity, control or signature encoding"}
 	}
-	sig, err := hex.DecodeString(receipt.Signature)
-	if err != nil || len(sig) != ed25519.SignatureSize || receipt.Subject.Validate() != nil || receipt.Control.Validate() != nil {
-		return &IntegrityError{Path: path, Reason: "malformed receipt identity, control or Ed25519 signature encoding"}
-	}
-	// Parsing and content addressing do not authenticate the receipt. Verification
-	// requires an explicit trusted public key at the inspection/admission boundary.
-	h := sha256.Sum256(data)
-	hash := hex.EncodeToString(h[:])
+	hash := strings.TrimPrefix(assurance.ComputeDigest(data), "sha256:")
 	key := strings.TrimSuffix(filepath.Base(path), ".json")
-	suffix := strings.TrimPrefix(key, "rcpt-")
-	if len(suffix) == 12 && key != "rcpt-"+receipt.Control.ID {
-		if _, err := hex.DecodeString(suffix); err == nil && suffix != hash[:12] {
-			return &IntegrityError{Path: path, Reason: "receipt content does not match its digest filename"}
-		}
+	if err := validateStoredReceiptName(key, hash, receipt); err != nil {
+		return &IntegrityError{Path: path, Reason: err.Error()}
 	}
-	r.receipts[key] = receipt
-	r.receipts[hash] = receipt
-	_, _, leaf := extractSubjectNamespaceKindAndLeaf(receipt.Subject)
-	if leaf != "" && receipt.Control.ID != "" {
-		r.receipts[fmt.Sprintf("%s-%s", leaf, receipt.Control.ID)] = receipt
-		r.receipts[fmt.Sprintf("rcpt-%s-%s", leaf, receipt.Control.ID)] = receipt
-	}
+	r.indexReceipt(receipt, hash, key)
 	return nil
 }
 
@@ -269,15 +252,19 @@ func (r *ContentAddressedEvidenceRepository) loadFromDisk() error {
 			continue
 		}
 		path := filepath.Join(r.baseDir, name)
-		data, err := readEvidenceFile(path)
-		if err != nil {
-			return err
-		}
 		if strings.HasPrefix(name, "rcpt-") {
+			data, err := readLegacyReceipt(r.baseDir, name)
+			if err != nil {
+				return &IntegrityError{Path: path, Reason: err.Error()}
+			}
 			if err := r.restoreReceipt(path, data); err != nil {
 				return err
 			}
 			continue
+		}
+		data, err := readEvidenceFile(path)
+		if err != nil {
+			return err
 		}
 		var list []assurance.EvidenceEnvelope
 		if err := json.Unmarshal(data, &list); err == nil {
@@ -315,28 +302,7 @@ func (r *ContentAddressedEvidenceRepository) loadFromDisk() error {
 		}
 		r.indexEnvelope(env, data)
 	}
-	receiptsDir := filepath.Join(r.baseDir, "receipts")
-	entries, err = os.ReadDir(receiptsDir)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return &IntegrityError{Path: receiptsDir, Reason: "cannot enumerate receipts: " + err.Error()}
-	}
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(receiptsDir, entry.Name())
-		data, err := readEvidenceFile(path)
-		if err != nil {
-			return err
-		}
-		if err := r.restoreReceipt(path, data); err != nil {
-			return err
-		}
-	}
-	return nil
+	return r.loadReceipts()
 }
 
 // Put stores an immutable EvidenceEnvelope and optional raw payload into the content-addressed store.
@@ -767,72 +733,43 @@ func (r *ContentAddressedEvidenceRepository) ListAll(ctx context.Context) ([]ass
 	return results, nil
 }
 
-// PutReceipt stores a signed ControlReceipt in memory and on disk (if baseDir is configured).
-// It returns the receipt ID (rcpt-<controlID> or rcpt-<shortHash>).
+// PutReceipt stores receipt JSON immutably and returns rcpt-<fullSHA256>.
+// Safe control aliases remain latest-by-evaluation-time compatibility lookups.
 func (r *ContentAddressedEvidenceRepository) PutReceipt(ctx context.Context, receipt assurance.ControlReceipt) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if !validReceiptEncoding(receipt) {
+		return "", errors.New("receipt identity, control and signature encoding are required")
+	}
+	aliases, err := receiptAliases(receipt)
+	if err != nil {
+		return "", err
+	}
 	data, err := json.MarshalIndent(receipt, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("failed to serialize control receipt: %w", err)
+		return "", fmt.Errorf("serialize receipt: %w", err)
 	}
-
 	if len(data) > MaxPayloadBytes {
 		return "", fmt.Errorf("receipt exceeds %d-byte storage bound", MaxPayloadBytes)
 	}
-
-	h := sha256.Sum256(data)
-	hexHash := hex.EncodeToString(h[:])
-	rcptID := fmt.Sprintf("rcpt-%s", hexHash[:12])
-	if receipt.Control.ID != "" {
-		rcptID = fmt.Sprintf("rcpt-%s", receipt.Control.ID)
-	}
-
-	_, _, subLeaf := extractSubjectNamespaceKindAndLeaf(receipt.Subject)
-	subControlKey := ""
-	subControlRcptKey := ""
-	if subLeaf != "" && receipt.Control.ID != "" {
-		subControlKey = fmt.Sprintf("%s-%s", subLeaf, receipt.Control.ID)
-		subControlRcptKey = fmt.Sprintf("rcpt-%s-%s", subLeaf, receipt.Control.ID)
-	}
-
+	hash := strings.TrimPrefix(assurance.ComputeDigest(data), "sha256:")
+	id := "rcpt-" + hash
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
+	updates := make([]string, 0, len(aliases))
+	for _, alias := range aliases {
+		if previous, exists := r.receipts[alias]; !exists || latestReceipt(receipt, previous) {
+			updates = append(updates, alias)
+		}
+	}
 	if r.baseDir != "" {
-		receiptsDir := filepath.Join(r.baseDir, "receipts")
-		if err := os.MkdirAll(receiptsDir, 0755); err != nil {
-			return "", fmt.Errorf("failed to create receipts directory: %w", err)
-		}
-		byIDPath := filepath.Join(receiptsDir, fmt.Sprintf("%s.json", rcptID))
-		if err := writeFileAtomic(byIDPath, data, 0644); err != nil {
-			return "", fmt.Errorf("failed to write receipt by ID: %w", err)
-		}
-		byHashPath := filepath.Join(receiptsDir, fmt.Sprintf("rcpt-%s.json", hexHash[:12]))
-		if byHashPath != byIDPath {
-			if err := writeFileAtomic(byHashPath, data, 0644); err != nil {
-				return "", fmt.Errorf("persist receipt digest alias: %w", err)
-			}
-		}
-		if subControlRcptKey != "" {
-			bySubControlPath := filepath.Join(receiptsDir, fmt.Sprintf("%s.json", subControlRcptKey))
-			if err := writeFileAtomic(bySubControlPath, data, 0644); err != nil {
-				return "", fmt.Errorf("persist receipt subject alias: %w", err)
-			}
-		}
-		topPath := filepath.Join(r.baseDir, fmt.Sprintf("%s.json", rcptID))
-		if err := writeFileAtomic(topPath, data, 0644); err != nil {
-			return "", fmt.Errorf("persist legacy receipt alias: %w", err)
+		if err := r.persistReceipt(id, data, updates); err != nil {
+			return "", err
 		}
 	}
-
-	r.receipts[rcptID] = receipt
-	r.receipts[hexHash] = receipt
-	r.receipts[fmt.Sprintf("rcpt-%s", hexHash[:12])] = receipt
-	if subControlKey != "" {
-		r.receipts[subControlKey] = receipt
-		r.receipts[subControlRcptKey] = receipt
-	}
-
-	return rcptID, nil
+	r.indexReceipt(receipt, hash, id)
+	return id, nil
 }
 
 // VerifyIntegrity scans all content-addressed blobs on disk and in memory to detect bit-rot or tampering.
@@ -887,21 +824,23 @@ func (r *ContentAddressedEvidenceRepository) VerifyIntegrity(ctx context.Context
 	return verified, nil
 }
 
-// GetReceipt retrieves a stored ControlReceipt by receipt ID or digest prefix.
+// GetReceipt retrieves a complete immutable digest or a safe legacy alias.
 func (r *ContentAddressedEvidenceRepository) GetReceipt(ctx context.Context, idOrDigest string) (assurance.ControlReceipt, error) {
+	if err := ctx.Err(); err != nil {
+		return assurance.ControlReceipt{}, err
+	}
+	key, err := canonicalReceiptKey(idOrDigest)
+	if err != nil {
+		return assurance.ControlReceipt{}, err
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-
-	if rcpt, ok := r.receipts[idOrDigest]; ok {
-		return rcpt, nil
+	if receipt, ok := r.receipts[key]; ok {
+		return receipt, nil
 	}
-	trimmed := strings.TrimPrefix(idOrDigest, "sha256:")
-	if rcpt, ok := r.receipts[trimmed]; ok {
-		return rcpt, nil
-	}
-	if !strings.HasPrefix(idOrDigest, "rcpt-") {
-		if rcpt, ok := r.receipts["rcpt-"+idOrDigest]; ok {
-			return rcpt, nil
+	if !strings.HasPrefix(key, "rcpt-") {
+		if receipt, ok := r.receipts["rcpt-"+key]; ok {
+			return receipt, nil
 		}
 	}
 	return assurance.ControlReceipt{}, fmt.Errorf("receipt not found: %s", idOrDigest)

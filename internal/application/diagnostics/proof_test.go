@@ -112,14 +112,22 @@ func TestInspectPersistedReceiptRequiresTrustAndBinding(t *testing.T) {
 	}
 	// Persist genuinely tampered signed bytes, then verify under the original key.
 	receipt.EvidenceRoot = assurance.ComputeStringDigest("tampered root")
-	if _, err := restored.PutReceipt(ctx, receipt); err != nil {
+	tamperedID, err := restored.PutReceipt(ctx, receipt)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if tamperedID == receiptID {
+		t.Fatal("tampering reused an immutable receipt identity")
 	}
 	tamperedStore, err := storage.NewFilesystemEvidenceRepository(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tampered, err := InspectStoredSubject(ctx, subject, eval, envelopes, tamperedStore, receiptID, signer.PublicKey())
+	original, err := InspectStoredSubject(ctx, subject, eval, envelopes, tamperedStore, receiptID, signer.PublicKey())
+	if err != nil || original.Evidence.ReceiptVerification != StatusPass {
+		t.Fatalf("original immutable receipt changed: %+v %v", original, err)
+	}
+	tampered, err := InspectStoredSubject(ctx, subject, eval, envelopes, tamperedStore, tamperedID, signer.PublicKey())
 	if err == nil || tampered.Evidence.ReceiptVerification != StatusFail {
 		t.Fatalf("tampered persisted receipt accepted: %+v err=%v", tampered, err)
 	}
