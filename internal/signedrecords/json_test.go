@@ -28,7 +28,7 @@ func TestDecodeJSONStrictTypedRecords(t *testing.T) {
 	if err := signedrecords.DecodeJSON(valid, &result, 1024); err != nil {
 		t.Fatal(err)
 	}
-	if result.Version != 1 || result.Detail.Name != "🚀" || result.At.IsZero() || result.Items[0].Name != "one" {
+	if result.Version != 1 || result.Detail.Name != "\U0001f680" || result.At.IsZero() || result.Items[0].Name != "one" {
 		t.Fatal("typed record changed")
 	}
 	cases := map[string][]byte{
