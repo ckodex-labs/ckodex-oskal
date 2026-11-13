@@ -80,3 +80,46 @@ golangci-lint run ./...
 See [architecture](docs/architecture/CKX-OSKAL-001.md),
 [contribution guidance](CONTRIBUTING.md) and [security reporting](SECURITY.md).
 The Apache 2.0 [license](LICENSE) applies.
+
+## Verify this release
+
+Verify the signature and provenance before running a downloaded binary.
+
+The prepared version is **v1.0.1**. It has not been published by this work.
+The release workflow builds five binary archives and one Linux container image
+archive, attaches SHA-256 checksums and signing/provenance bundles, and signs the
+versioned registry image by digest. Cross-compilation is not native platform testing.
+The [SLSA 1.2 specification](https://slsa.dev/spec/v1.2/) uses the
+`https://slsa.dev/provenance/v1` build predicate; no SLSA level is claimed.
+
+With cosign **3.1.4**, GitHub CLI supporting `gh attestation verify`, and the assets
+downloaded into one directory, use the following commands. For rehearsal artifacts,
+set `OSKAL_REF=refs/heads/p1/release`; after the author publishes v1.0.1, use
+`OSKAL_REF=refs/tags/v1.0.1`. Branch evidence must never substitute for the tag identity.
+
+```sh
+OSKAL_REF=refs/tags/v1.0.1
+OSKAL_IDENTITY="https://github.com/ckodex-labs/ckodex-oskal/.github/workflows/release.yml@$OSKAL_REF"
+cosign verify-blob --bundle checksums.sigstore.json \
+  --certificate-identity "$OSKAL_IDENTITY" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+sha256sum --check checksums.txt
+gh attestation verify oskal_1.0.1_linux_amd64.tar.gz \
+  --repo ckodex-labs/ckodex-oskal --bundle provenance.sigstore.json \
+  --cert-identity "$OSKAL_IDENTITY" --source-ref "$OSKAL_REF" \
+  --deny-self-hosted-runners
+```
+
+Verify provenance for each archive you will use. The workflow also pins verification
+to the source commit. The checksum signature covers all five binary archives and
+the container archive. For registry use, the separately signed `image-reference.txt`
+identifies the digest; verify that pointer and the image with the same exact tag
+identity before pulling or executing it. Tag-specific verification is unexecuted
+until the real tag exists. The branch rehearsal cannot prove registry publication.
+
+Branch pushes to `p1/release` and manual workflow dispatch run the non-publishing
+rehearsal. Only a stable tag push can publish a release or registry image. Rehearsal
+does create real public signing/attestation records and an Actions artifact bundle.
+The author must review the PRs and push the real tag. Existing release/image versions
+and unexpected registry/API lookup responses stop publication. A partial publication
+requires operator investigation; rerunning does not replace an existing version.
