@@ -50,8 +50,8 @@ func (t TelemetryEvidence) ValidateAt(evaluatedAt time.Time) error {
 		}
 	}
 	for _, gap := range i.Gaps {
-		if (gap.Kind != "HEARTBEAT" && gap.Kind != "SEQUENCE") || gap.First == 0 || gap.Last < gap.First {
-			return fmt.Errorf("telemetry gaps require a known kind and a positive inclusive range")
+		if (gap.Kind != "HEARTBEAT" && gap.Kind != "SEQUENCE") || (gap.Kind == "SEQUENCE" && gap.First == 0) || gap.Last < gap.First {
+			return fmt.Errorf("telemetry gaps require a known kind and an inclusive range; sequence numbers must be positive")
 		}
 	}
 	for _, reason := range i.Reasons {

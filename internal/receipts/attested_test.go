@@ -204,3 +204,40 @@ func TestValidDSSESignatureCannotBypassReceiptSemantics(t *testing.T) {
 		t.Fatal("canceled verification continued")
 	}
 }
+
+func TestInitialHeartbeatSlotZeroRemainsSignedUnknown(t *testing.T) {
+	m, receipt, telemetry, now := attestedFixture(t)
+	receipt.State, receipt.EvidenceRoot = assurance.AssuranceStateUnknown, ""
+	// Session.Snapshot before the first heartbeat deadline has no completed
+	// interval. Once that deadline passes, missing scheduled slot 0 is an actual
+	// inclusive heartbeat gap, not a missing positive record sequence number.
+	telemetry.Integrity.State = assurance.AssuranceStateUnknown
+	telemetry.Integrity.WindowStart, telemetry.Integrity.WindowEnd = time.Time{}, time.Time{}
+	telemetry.Integrity.Gaps = []assurance.TelemetryGap{{Kind: "HEARTBEAT", First: 0, Last: 0}}
+	telemetry.Integrity.Reasons = []string{"initial scheduled heartbeat slot 0 was not received"}
+	telemetry.Integrity.Recovery = assurance.TelemetryFreshSessionRequired
+	telemetry.RecordDigest = ""
+	raw, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := VerifyAttestedReceipt(t.Context(), raw, pinnedAttestedKey(t, m), nil, now)
+	if err != nil || result.EffectiveState != assurance.AssuranceStateUnknown || len(result.Body.Telemetry.Integrity.Gaps) != 1 || result.Body.Telemetry.Integrity.Gaps[0] != telemetry.Integrity.Gaps[0] {
+		t.Fatalf("initial missing slot was rejected or rewritten: %+v %v", result, err)
+	}
+	for _, gap := range []assurance.TelemetryGap{
+		{Kind: "SEQUENCE", First: 0, Last: 0},
+		{Kind: "HEARTBEAT", First: 1, Last: 0},
+	} {
+		changed := telemetry
+		changed.Integrity.Gaps = []assurance.TelemetryGap{gap}
+		if _, err := m.SignAttestedReceipt(t.Context(), receipt, changed); err == nil {
+			t.Fatalf("invalid inclusive gap admitted: %+v", gap)
+		}
+	}
+	positiveManager, positiveReceipt, positiveTelemetry, _ := attestedFixture(t)
+	positiveTelemetry.Integrity.Gaps = []assurance.TelemetryGap{{Kind: "HEARTBEAT", First: 0, Last: 0}}
+	if _, err := positiveManager.SignAttestedReceipt(t.Context(), positiveReceipt, positiveTelemetry); err == nil {
+		t.Fatal("missing initial slot acquired positive standing")
+	}
+}
