@@ -515,11 +515,11 @@ func TestAdditionalCRDReconcilersAndDerogation(t *testing.T) {
 	}
 	var updatedLease assurancev1alpha1.CapabilityLease
 	_ = fakeClient.Get(ctx, types.NamespacedName{Namespace: "payments", Name: "agent-lease"}, &updatedLease)
-	if updatedLease.Status.Phase != "Active" {
-		t.Fatalf("expected Active phase on CapabilityLease, got %s", updatedLease.Status.Phase)
+	if updatedLease.Status.Phase != "SafeHold" {
+		t.Fatalf("lease without a real UID or exact resource scope must remain SafeHold, got %s", updatedLease.Status.Phase)
 	}
-	if updatedLease.Status.LastReceiptHash == "" {
-		t.Fatalf("expected non-empty LastReceiptHash on Active CapabilityLease")
+	if updatedLease.Status.LastReceiptHash != "" || updatedLease.Status.LastExecutionHash != "" || len(updatedLease.Status.ExecutionHistory) != 0 {
+		t.Fatalf("reconciliation must not fabricate execution evidence")
 	}
 }
 

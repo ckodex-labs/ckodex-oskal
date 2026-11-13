@@ -1,122 +1,87 @@
 package airgap
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
-	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/cel"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/evaluation"
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 )
 
-// Section 92 Acceptance Test: Air Gap
-// Verifies full offline continuous assurance without external network access.
+// This offline test covers actual file/CAS bytes, receipt cryptography and
+// projection. It does not establish Kubernetes admission or workload identity.
 func TestAirGapAcceptanceWithoutPublicNetwork(t *testing.T) {
 	now := time.Now().UTC()
-
-	// 1. Local Subject
-	sub := assurance.SubjectRef{
-		Scheme: "k8s",
-		ID:     "airgap-cluster/secure-zone/Deployment/isolated-workload",
-		Attributes: map[string]string{
-			"zone":      "airgap",
-			"namespace": "secure-zone",
-			"name":      "isolated-workload",
-		},
+	path := filepath.Join(t.TempDir(), "material.json")
+	payload := []byte(`{"scope":"local untrusted material"}`)
+	if err := os.WriteFile(path, payload, 0600); err != nil {
+		t.Fatal(err)
 	}
-
-	// 2. Local Policy & Admission (CEL in-process, no webhook or SaaS egress)
-	policy := cel.SampleRestrictedContainerPolicy()
-	policyDigest := cel.ComputePolicyDigest(policy)
-
-	epoch := assurance.AssuranceEpoch{
-		SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-		ImplementationDigest: assurance.ComputeStringDigest("local-cel-engine:v1"),
-		PolicyDigest:         policyDigest,
-		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://airgap-pki/root-ca"),
-		EnvironmentDigest:    assurance.ComputeStringDigest("k8s:local:v1.31"),
-	}
-
-	// 3. Local SPIFFE Authority
-	localAuthority := assurance.AuthorityRef{
-		Scheme:      "spiffe",
-		Subject:     "airgap-pki/ns/oskal/sa/airgap-observer",
-		TrustDomain: "airgap-pki",
-	}
-
-	observer := cel.NewAdmissionObserver(localAuthority)
-	evidence, err := observer.GenerateAdmissionEvidence(sub, policy, true, epoch, now)
+	actual, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("local admission evidence generation failed: %v", err)
+		t.Fatal(err)
 	}
-
-	// 4. Local Evidence Contract Evaluation
-	contract := assurance.EvidenceContract{
-		ID:   "airgap-least-privilege",
-		Name: "Air-gap Verification Contract",
-		Requirements: []assurance.EvidenceRequirement{
-			{
-				ID:                "admission",
-				EvidenceType:      "kubernetes.admission",
-				Required:          true,
-				MaxAge:            10 * time.Minute,
-				AcceptedProducers: []string{"spiffe://airgap-pki/ns/oskal/sa/airgap-observer"},
-			},
-		},
-		OnMissingRequiredState: assurance.AssuranceStateUnknown,
-	}
-
-	contractResult := contract.Evaluate([]assurance.EvidenceEnvelope{evidence}, epoch, now)
-	if contractResult.State != assurance.AssuranceStateVerified {
-		t.Fatalf("Air-gap acceptance failure: Expected state VERIFIED, got %s", contractResult.State)
-	}
-
-	// 5. Local Cryptographic Receipt Signing (Offline Ed25519)
-	receiptMgr, err := receipts.NewReceiptManager(localAuthority)
+	sub := assurance.SubjectRef{Scheme: "file", ID: path}
+	authority := assurance.AuthorityRef{Scheme: "local", Subject: "airgap-material-observer"}
+	hash := assurance.ComputeDigest(actual)
+	evidence := assurance.EvidenceEnvelope{Schema: "assurance.ckodex.io/material/v1", ID: "local-material", Subject: sub, ObservationType: "local.file.read", CapturedAt: now, Producer: authority, Artifact: assurance.EvidenceRef{URI: "cas://sha256/" + strings.TrimPrefix(hash, "sha256:"), Digest: hash, MediaType: "application/json"}, IntegrityDigest: hash}
+	repo, err := storage.NewFilesystemEvidenceRepository(t.TempDir())
 	if err != nil {
-		t.Fatalf("failed to create local receipt manager: %v", err)
+		t.Fatal(err)
 	}
-
-	ctrl := assurance.ControlRef{Namespace: "ckodex", ID: "container.least-privilege"}
-	receipt, err := receiptMgr.IssueReceipt(sub, ctrl, assurance.AssuranceStateAssured, epoch, []assurance.EvidenceRef{evidence.Artifact}, now)
+	if _, err := repo.Put(t.Context(), evidence, bytes.NewReader(actual)); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := repo.Get(t.Context(), evidence.Artifact)
 	if err != nil {
-		t.Fatalf("failed to sign local receipt: %v", err)
+		t.Fatal(err)
 	}
-
-	// Independent local verification
-	valid, err := receipts.VerifyIndependentReceipt(receipt, receiptMgr.PublicKey())
-	if err != nil || !valid {
-		t.Fatalf("failed to verify local receipt: %v", err)
-	}
-
-	// 6. Local XOSCAL Projection & OSCAL Export
-	eval := assurance.ClaimEvaluation{
-		ID:           "airgap-eval-01",
-		Subject:      sub,
-		Control:      ctrl,
-		State:        assurance.AssuranceStateAssured,
-		Epoch:        epoch,
-		Evidence:     []assurance.EvidenceRef{evidence.Artifact},
-		Completeness: contractResult.Completeness,
-		EvidenceRoot: receipt.EvidenceRoot,
-		EvaluatedAt:  now,
-		ValidUntil:   now.Add(10 * time.Minute),
-	}
-
-	projector := oscal.NewProjector()
-	oscalJSON, err := projector.ProjectAssessmentResults(context.Background(), sub, []assurance.ClaimEvaluation{eval}, nil)
+	restored, err := io.ReadAll(reader)
 	if err != nil {
-		t.Fatalf("failed to project local OSCAL assessment results: %v", err)
+		t.Fatal(err)
 	}
-
-	if len(oscalJSON) == 0 {
-		t.Fatalf("OSCAL export yielded empty bytes")
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
 	}
-
-	t.Logf("Air-gap acceptance test successful: Complete lifecycle executed without external dependencies.")
+	if !bytes.Equal(restored, actual) {
+		t.Fatal("offline artifact bytes changed")
+	}
+	control := assurance.ControlRef{Namespace: "example", ID: "local-material"}
+	evaluated := evaluation.UnverifiedEvaluation(sub, control, []assurance.EvidenceEnvelope{evidence}, now)
+	if evaluated.State != assurance.AssuranceStateUnknown || evaluated.Completeness.Verified != 0 {
+		t.Fatal("local material became live assurance")
+	}
+	signer, err := receipts.NewReceiptManager(authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := signer.IssueReceipt(sub, control, evaluated.State, evaluated.Epoch, []assurance.EvidenceRef{evidence.Artifact}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := receipts.VerifyIndependentReceipt(receipt, signer.PublicKey())
+	if err != nil || !verified {
+		t.Fatalf("offline signature: %v", err)
+	}
+	projector := oscal.NewProjectorWithContext(oscal.ProjectionContext{AssessmentPlanHref: "example-assessment-plan.json", ControlNamespace: control.Namespace})
+	projected, err := projector.ProjectAssessmentResults(t.Context(), sub, []assurance.ClaimEvaluation{evaluated}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projected) == 0 {
+		t.Fatal("empty projection")
+	}
+	t.Log("actual local file/CAS bytes and receipt signature verified offline; control standing remains UNKNOWN")
 }
 
 func TestAirgapBundleTampering(t *testing.T) {

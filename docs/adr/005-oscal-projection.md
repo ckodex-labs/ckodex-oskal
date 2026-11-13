@@ -70,9 +70,20 @@ Definition     Results       (Snapshot)
 
 ### Positive:
 - The Assurance Core remains hyper-performant, typed, and decoupled from standard schema updates.
-- Full, native compatibility with official NIST OSCAL v1.2.3 tooling and FedRAMP/DoD submission workflows.
+- Structurally validated OSCAL v1.2.3 JSON output when all required projection facts are supplied. Submission acceptance, imported-document resolution, and Metaschema constraint conformance require separate verification.
 - Clean separation between internal evidence storage (content-addressed CAS) and external audit representation (OSCAL back-matter references).
 
 ### Negative / Trade-offs:
 - Requires maintaining projection serialization logic in the `projection/oscal` package.
 - High-frequency live claims must be batched or sampled when exporting to static OSCAL documents to avoid generating gigabyte-sized assessment reports.
+
+## 4. Semantic input boundary
+
+The serializer requires explicit caller-supplied document relationships and system
+facts. A claim evaluation cannot establish a component implementation, authorization
+boundary, production operating status, catalog/profile identity, or objective ID.
+Missing mandatory facts produce an actionable error with no output document.
+`UNKNOWN` is retained as an assurance-state property; empty evaluations or findings
+never manufacture control requirements or conformance assertions. See
+[OSCAL projection inputs](../oscal-projection-inputs.md) for the context contract,
+compatibility changes, and evidence limits.

@@ -1,35 +1,40 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
-	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/kubernetes"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/spire"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/webhook"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/binding"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/evaluation"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/reconcile"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
-	"github.com/ckodex-labs/ckodex-oskal/internal/verifier"
 )
 
 var (
-	version  = "v1.0.0"
+	version  = "v1.0.1"
 	commit   = "dev"
 	date     = "unknown"
 	scheme   = runtime.NewScheme()
@@ -54,12 +59,15 @@ func main() {
 	var webhookTLSKeyFile string
 	var evidenceDir string
 	var showVersion bool
+	var sourcesPath, workloadAPI, expectedSPIFFEID, managedNamespace string
+	var evaluationInterval, sourceWindow, clockAhead time.Duration
+	archiveLimits := storage.DefaultArchiveLimits()
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. Enabling this will ensure only one active controller manager.")
-	flag.BoolVar(&enableWebhook, "enable-webhook", true, "Enable validating admission webhook with in-flight attestation.")
+	flag.BoolVar(&enableWebhook, "enable-webhook", true, "Enable admission request validation; this does not provide hardware attestation.")
 	flag.IntVar(&webhookPort, "webhook-port", 8443, "The port the validating admission webhook listens on.")
 	flag.StringVar(&webhookServiceName, "webhook-service-name", "oskal-webhook", "Kubernetes Service name for the admission webhook.")
 	flag.StringVar(&webhookNamespace, "webhook-namespace", "ckodex-system", "Kubernetes Namespace for the admission webhook.")
@@ -67,7 +75,17 @@ func main() {
 	flag.StringVar(&webhookTLSCertFile, "webhook-tls-cert-file", "", "Path to TLS certificate file for the admission webhook.")
 	flag.StringVar(&webhookTLSKeyFile, "webhook-tls-key-file", "", "Path to TLS private key file for the admission webhook.")
 	flag.StringVar(&evidenceDir, "evidence-dir", "/tmp/oskal/evidence", "Path to local directory for content-addressed evidence storage.")
+	flag.Int64Var(&archiveLimits.MaxBytes, "archive-max-bytes", storage.DefaultArchiveBytes, "Maximum accounted archive bytes (1..1099511627776)")
+	flag.IntVar(&archiveLimits.MaxEntries, "archive-max-entries", storage.DefaultArchiveEntries, "Maximum accounted archive objects (1..1000000)")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
+
+	flag.StringVar(&sourcesPath, "sources", "", "Authenticated evidence source JSON configuration")
+	flag.StringVar(&managedNamespace, "namespace", "", "Only reconcile OSKAL resources in this namespace (empty means cluster-wide)")
+	flag.DurationVar(&evaluationInterval, "evaluation-interval", 2*time.Second, "Control re-evaluation interval (500ms..5m)")
+	flag.DurationVar(&sourceWindow, "source-session-window", time.Minute, "Bounded source session lifetime (1s..5m)")
+	flag.DurationVar(&clockAhead, "source-clock-ahead", 0, "Explicit source clock-ahead allowance (0..1s), preserving timestamps")
+	flag.StringVar(&workloadAPI, "workload-api", "", "Explicit SPIRE Workload API Unix socket URI")
+	flag.StringVar(&expectedSPIFFEID, "spiffe-id", "", "Exact own SPIFFE ID required when Workload API is configured")
 
 	opts := zap.Options{
 		Development: false,
@@ -81,9 +99,73 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if err := archiveLimits.Validate(); err != nil {
+		setupLog.Error(err, "correct archive budgets before files or external effects")
+		os.Exit(1)
+	}
+
+	ctx := ctrl.SetupSignalHandler()
+	if evaluationInterval < 500*time.Millisecond || evaluationInterval > 5*time.Minute {
+		setupLog.Error(fmt.Errorf("invalid interval"), "use --evaluation-interval in 500ms..5m")
+		os.Exit(1)
+	}
+	if sourceWindow < time.Second || sourceWindow > 5*time.Minute || clockAhead < 0 || clockAhead > time.Second {
+		setupLog.Error(fmt.Errorf("invalid source timing"), "source window must be 1s..5m and clock allowance 0..1s")
+		os.Exit(1)
+	}
+
+	sourceConfig, err := readSourceConfiguration(sourcesPath)
+	if err != nil {
+		setupLog.Error(err, "correct --sources configuration before starting")
+		os.Exit(1)
+	}
+	if err := validateAdmissionSources(sourceConfig, enableWebhook); err != nil {
+		setupLog.Error(err, "configure admission scope explicitly")
+		os.Exit(1)
+	}
+	for _, source := range sourceConfig.Sources {
+		if source.OPA != nil && source.OPA.TLSMode == "spiffe" && (workloadAPI == "" || expectedSPIFFEID == "") {
+			setupLog.Error(fmt.Errorf("SPIFFE policy listener requires explicit own Workload API and SPIFFE ID"), "correct source identity configuration", "source", source.ID)
+			os.Exit(1)
+		}
+	}
+	if err := validatePolicyWindow(sourceConfig, sourceWindow); err != nil {
+		setupLog.Error(err, "correct source timing before creating storage or keys")
+		os.Exit(1)
+	}
+
+	producer := assurance.AuthorityRef{Scheme: "local", Subject: "oskal-controller"}
+	var identity *spire.WorkloadClient
+	var bundleDigest string
+	if workloadAPI != "" || expectedSPIFFEID != "" {
+		identity, err = spire.NewWorkloadClient(ctx, workloadAPI, expectedSPIFFEID, 5*time.Second)
+		if err != nil {
+			setupLog.Error(err, "configure an exact SPIRE identity and reachable Unix Workload API")
+			os.Exit(1)
+		}
+		defer func() { _ = identity.Close() }()
+		actual, err := identity.Identity(ctx)
+		if err != nil {
+			setupLog.Error(err, "SPIRE identity unavailable; refusing local identity fallback")
+			os.Exit(1)
+		}
+		bundleDigest, err = identity.TrustBundleDigest(ctx)
+		if err != nil {
+			setupLog.Error(err, "cannot pin fresh public SPIFFE trust before signing authority is initialized")
+			os.Exit(1)
+		}
+
+		producer = assurance.AuthorityRef{Scheme: "spiffe", Subject: strings.TrimPrefix(actual.SPIFFEID, "spiffe://"), TrustDomain: actual.TrustDomain}
+	}
+
+	cacheOptions := cache.Options{}
+	if managedNamespace != "" {
+		cacheOptions.DefaultNamespaces = map[string]cache.Config{managedNamespace: {}}
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
+		Cache:  cacheOptions,
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
 		},
@@ -96,56 +178,63 @@ func main() {
 		os.Exit(1)
 	}
 
-	var evidenceRepo ports.EvidenceRepository
-	if evidenceDir != "" {
-		fsRepo, err := storage.NewFilesystemEvidenceRepository(evidenceDir)
-		if err != nil {
-			setupLog.Error(err, "unable to initialize filesystem evidence repository, falling back to in-memory", "path", evidenceDir)
-			evidenceRepo = storage.NewMemoryEvidenceRepository()
-		} else {
-			evidenceRepo = fsRepo
-			setupLog.Info("Initialized filesystem content-addressed evidence repository", "path", evidenceDir)
-		}
-	} else {
-		evidenceRepo = storage.NewMemoryEvidenceRepository()
-		setupLog.Info("Initialized in-memory content-addressed evidence repository")
-	}
-
-	evaluator := &reconcile.ContractEvaluator{
-		EvidenceRepo: evidenceRepo,
-		Verifier:     verifier.NewDefaultEvidenceVerifier(),
-	}
-
-	receiptMgr, err := receipts.LoadOrCreateReceiptManager(assurance.AuthorityRef{
-		Scheme:      "spiffe",
-		Subject:     "prod/ns/ckodex-system/sa/oskal-controller",
-		TrustDomain: "prod",
-	}, evidenceDir)
-	if err != nil {
-		setupLog.Error(err, "unable to initialize receipt manager")
+	if err := validatePolicyAPIConfiguration(sourceConfig, mgr.GetConfig()); err != nil {
+		setupLog.Error(err, "correct policy API trust before creating storage or keys")
 		os.Exit(1)
 	}
 
-	subjectResolver := kubernetes.NewSubjectResolver(mgr.GetClient())
-	controlResolver := kubernetes.NewControlResolver(mgr.GetClient())
-	svidValidator := spire.NewSVIDValidator(spire.NewTrustBundle(), assurance.AuthorityRef{
-		Scheme:      "spiffe",
-		Subject:     "prod/ns/ckodex-system/sa/oskal-controller",
-		TrustDomain: "prod",
-	})
+	evidenceRepo, err := openEvidenceRepositoryWithLimits(evidenceDir, archiveLimits)
+	if err != nil {
+		setupLog.Error(err, "cannot initialize durable evidence storage; inspect the path and permissions before restarting", "path", evidenceDir)
+		os.Exit(1)
+	}
+	setupLog.Info("Initialized durable content-addressed evidence repository", "path", evidenceDir, "archiveMaxBytes", archiveLimits.MaxBytes, "archiveMaxEntries", archiveLimits.MaxEntries)
 
-	if err = (&reconcile.ControlBindingReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		Log:             ctrl.Log.WithName("controllers").WithName("ControlBinding"),
-		ClaimEvaluator:  evaluator,
-		EvidenceRepo:    evidenceRepo,
-		SubjectResolver: subjectResolver,
-		ControlResolver: controlResolver,
-		ReceiptSigner:   receiptMgr,
-		SVIDValidator:   svidValidator,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "ControlBinding")
+	receiptMgr, err := receipts.LoadOrCreateReceiptManager(producer, evidenceDir)
+	if err != nil {
+		setupLog.Error(err, "initialize explicit persistent signing identity")
+		os.Exit(1)
+	}
+	signer := &identitySigner{ReceiptManager: receiptMgr, workload: identity, bundleDigest: bundleDigest}
+	sourceGroup, verification, authorityDigest, err := prepareSources(sourceConfig, evidenceRepo, signer, producer, binding.NewResolver(mgr.GetAPIReader()), sourceWindow, clockAhead, mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "initialize bounded authenticated evidence sources")
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(filepath.Join(evidenceDir, "configuration"), 0755); err != nil {
+		setupLog.Error(err, "initialize public configuration directory")
+		os.Exit(1)
+	}
+	if err := writePublicFact(filepath.Join(evidenceDir, "configuration", "authority-snapshot.json"), sourceGroup.authoritySnapshot); err != nil {
+		setupLog.Error(err, "persist public authority snapshot")
+		os.Exit(1)
+	}
+	publicKeys, err := json.Marshal(map[string]string{producer.Canonical(): receiptMgr.PublicKey()})
+	if err != nil {
+		setupLog.Error(err, "encode public producer keys")
+		os.Exit(1)
+	}
+	if err := writePublicFact(filepath.Join(evidenceDir, "configuration", "producer-keys.json"), publicKeys); err != nil {
+		setupLog.Error(err, "persist public producer keys")
+		os.Exit(1)
+	}
+	setupLog.Info("Configured producer authority", "producer", producer.Canonical(), "authorityDigest", authorityDigest, "sourceCount", len(sourceConfig.Sources), "root", "local signing key; no hardware attestation")
+	evaluator, err := evaluation.NewEvaluator(sourceGroup.candidates, verification)
+	if err != nil {
+		setupLog.Error(err, "initialize strict evidence evaluation")
+		os.Exit(1)
+	}
+	receiptStore, ok := evidenceRepo.(ports.ReceiptRepository)
+	if !ok {
+		setupLog.Error(fmt.Errorf("receipt persistence not available"), "a durable receipt store is required")
+		os.Exit(1)
+	}
+	if err = mgr.Add(sourceGroup); err != nil {
+		setupLog.Error(err, "register source lifecycle")
+		os.Exit(1)
+	}
+	if err = (&reconcile.LiveControlReconciler{Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Resolver: sourceGroup.resolver, Evaluator: evaluator, Signer: signer, Receipts: receiptStore, Interval: evaluationInterval, Sources: sourceGroup.candidates}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "register live evaluation")
 		os.Exit(1)
 	}
 
@@ -191,27 +280,26 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("sources", sourceGroup.Ready); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
 
 	if enableWebhook {
 		whCfg := webhook.ServerConfig{
-			ListenAddr: fmt.Sprintf(":%d", webhookPort),
-			Mode:       webhook.WebhookMode(webhookMode),
-			ObserverAuth: assurance.AuthorityRef{
-				Scheme:  "k8s:admission-controller",
-				Subject: fmt.Sprintf("%s/%s", webhookNamespace, webhookServiceName),
-			},
-			EvidenceSink: func(env assurance.EvidenceEnvelope) {
-				sinkCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if _, putErr := evidenceRepo.Put(sinkCtx, env, nil); putErr != nil {
-					setupLog.Error(putErr, "failed to persist in-flight evidence envelope", "envelopeID", env.ID)
-				} else {
-					setupLog.Info("Persisted in-flight admission evidence envelope", "envelopeID", env.ID, "subject", env.Subject.URI())
+			ListenAddr:   fmt.Sprintf(":%d", webhookPort),
+			Mode:         webhook.WebhookMode(webhookMode),
+			ObserverAuth: producer,
+			EvidenceSink: func(ctx context.Context, envelope assurance.EvidenceEnvelope, payload []byte) error {
+				signed, err := signer.SignEvidence(ctx, envelope)
+				if err != nil {
+					return fmt.Errorf("sign admission capture: %w", err)
 				}
+				if _, err := evidenceRepo.Put(ctx, signed, bytes.NewReader(payload)); err != nil {
+					return fmt.Errorf("persist admission capture: %w", err)
+				}
+				setupLog.Info("Persisted admission request capture", "envelopeID", signed.ID, "subject", signed.Subject.URI())
+				return nil
 			},
 		}
 
@@ -250,10 +338,27 @@ func main() {
 	}
 
 	setupLog.Info("Starting OSKAL Controller Manager", "version", version, "commit", commit, "built", date, "metrics", metricsAddr, "probes", probeAddr, "leaderElection", enableLeaderElection)
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func openEvidenceRepository(path string) (ports.EvidenceRepository, error) {
+	return openEvidenceRepositoryWithLimits(path, storage.DefaultArchiveLimits())
+}
+func openEvidenceRepositoryWithLimits(path string, limits storage.ArchiveLimits) (ports.EvidenceRepository, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("--evidence-dir must name a durable writable directory")
+	}
+	repo, err := storage.NewFilesystemEvidenceRepositoryWithLimits(path, limits)
+	if err != nil {
+		return nil, fmt.Errorf("open durable evidence store: %w", err)
+	}
+	return repo, nil
 }
 
 func fileReadable(path string) bool {

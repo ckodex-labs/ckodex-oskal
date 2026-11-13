@@ -1,6 +1,7 @@
 package oskal
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -13,7 +14,8 @@ type ReceiptManager struct {
 	inner *receipts.ReceiptManager
 }
 
-// NewReceiptManager creates a ReceiptManager with an evaluator authority identity.
+// NewReceiptManager requires an explicit evaluator authority. A signing key does
+// not authenticate that authority claim or establish trust in its evidence.
 func NewReceiptManager(evaluator AuthorityRef) (*ReceiptManager, error) {
 	mgr, err := receipts.NewReceiptManager(evaluator)
 	if err != nil {
@@ -39,13 +41,19 @@ func (m *ReceiptManager) IssueReceipt(
 	return m.inner.IssueReceipt(subject, control, state, epoch, evidences, evaluatedAt)
 }
 
-// VerifyReceipt checks the Ed25519 digital signature and structural integrity of a ControlReceipt.
+// VerifyReceipt requires this manager's configured full evaluator and key. It
+// does not authenticate external identity, supplemental metadata or observations.
 func (m *ReceiptManager) VerifyReceipt(rcpt assurance.ControlReceipt) bool {
-	valid, _ := receipts.VerifyIndependentReceipt(rcpt, m.inner.PublicKey())
+	if m == nil {
+		return false
+	}
+	valid, _ := m.inner.VerifyReceipt(context.Background(), rcpt)
 	return valid
 }
 
-// VerifyIndependentReceipt verifies a ControlReceipt using an explicit evaluator public key hex string.
+// VerifyIndependentReceipt checks evaluator semantics and the legacy canonical
+// signature under an explicit public key. Supplemental JSON metadata and external
+// identity are not authenticated by this operation.
 func VerifyIndependentReceipt(rcpt assurance.ControlReceipt, publicKeyHex string) (bool, error) {
 	return receipts.VerifyIndependentReceipt(rcpt, publicKeyHex)
 }

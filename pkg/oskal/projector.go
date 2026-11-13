@@ -6,6 +6,28 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 )
 
+// ProjectionContext supplies actual document references and system metadata for projection.
+type ProjectionContext = oscal.ProjectionContext
+type ComponentContext = oscal.ComponentContext
+type SystemContext = oscal.SystemContext
+type FindingTargetMapping = oscal.FindingTargetMapping
+type ProjectionInputError = oscal.ProjectionInputError
+type SystemCharacteristics = oscal.OscalSystemCharacteristics
+type SystemInformation = oscal.OscalSystemInformation
+type InformationType = oscal.OscalInformationType
+type SystemID = oscal.OscalSystemID
+type OperationalStatus = oscal.OscalStatus
+type AuthorizationBoundary = oscal.OscalAuthorizationBoundary
+type SystemImplementation = oscal.OscalSystemImplementation
+type SystemComponent = oscal.OscalSSPComponent
+
+const MaxProjectionContextBytes = oscal.MaxProjectionContextBytes
+
+// DecodeProjectionContext strictly decodes a bounded JSON context object.
+func DecodeProjectionContext(data []byte) (ProjectionContext, error) {
+	return oscal.DecodeProjectionContext(data)
+}
+
 // Projector serializes continuous assurance states into standard NIST OSCAL 1.2.3 JSON artifacts.
 type Projector struct {
 	inner *oscal.Projector
@@ -14,6 +36,12 @@ type Projector struct {
 // NewProjector initializes an OSCAL 1.2.3 projector.
 func NewProjector() *Projector {
 	return &Projector{inner: oscal.NewProjector()}
+}
+
+// NewProjectorWithContext initializes a projector with caller-supplied OSCAL facts.
+// It validates required inputs when each document is projected.
+func NewProjectorWithContext(c ProjectionContext) *Projector {
+	return &Projector{inner: oscal.NewProjectorWithContext(c)}
 }
 
 // ProjectAssessmentResults exports evaluation claims and findings into an OSCAL Assessment Results JSON document.

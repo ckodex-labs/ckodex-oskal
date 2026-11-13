@@ -3,14 +3,30 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
+	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
+
+func signStoredTestReceipt(t *testing.T, receipt assurance.ControlReceipt) assurance.ControlReceipt {
+	t.Helper()
+	signer, err := receipts.NewReceiptManager(assurance.AuthorityRef{Scheme: "local", Subject: "storage-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := signer.SignReceipt(context.Background(), receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signed
+}
 
 func createTestEnvelope(id, subjectID, obsType string) assurance.EvidenceEnvelope {
 	now := time.Now().UTC()
@@ -291,14 +307,14 @@ func TestEvidenceRepository_ListAllAndReceipts(t *testing.T) {
 		Control:      assurance.ControlRef{Namespace: "ckodex", ID: "AC-6"},
 		State:        assurance.AssuranceStateAssured,
 		EvidenceRoot: "sha256:1234",
-		Signature:    "deadbeef",
 	}
+	rcpt = signStoredTestReceipt(t, rcpt)
 	rcptID, err := repo.PutReceipt(ctx, rcpt)
 	if err != nil {
 		t.Fatalf("PutReceipt failed: %v", err)
 	}
-	if rcptID != "rcpt-AC-6" {
-		t.Fatalf("expected receipt ID rcpt-AC-6, got %s", rcptID)
+	if len(rcptID) != 69 || !strings.HasPrefix(rcptID, "rcpt-") {
+		t.Fatalf("expected immutable full receipt digest, got %s", rcptID)
 	}
 
 	repoReloaded, err := NewFilesystemEvidenceRepository(tmpDir)
@@ -309,8 +325,8 @@ func TestEvidenceRepository_ListAllAndReceipts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetReceipt after reload failed: %v", err)
 	}
-	if gotRcpt.Signature != "deadbeef" {
-		t.Fatalf("expected signature deadbeef, got %s", gotRcpt.Signature)
+	if gotRcpt.Signature != rcpt.Signature {
+		t.Fatalf("receipt signature changed after reload")
 	}
 }
 
@@ -364,51 +380,65 @@ func TestEvidenceRepository_NamespacePrefixAndDiskTamper(t *testing.T) {
 		Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
 		State:        assurance.AssuranceStateAssured,
 		EvidenceRoot: "sha256:aaaa",
-		Signature:    "sig-a",
 	}
 	rcptB := assurance.ControlReceipt{
 		Subject:      assurance.SubjectRef{Scheme: "k8s", ID: "payments/Deployment/billing-api"},
 		Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
 		State:        assurance.AssuranceStateAssured,
 		EvidenceRoot: "sha256:bbbb",
-		Signature:    "sig-b",
 	}
+	rcptA = signStoredTestReceipt(t, rcptA)
+	rcptB = signStoredTestReceipt(t, rcptB)
 	_, _ = repo.PutReceipt(ctx, rcptA)
 	_, _ = repo.PutReceipt(ctx, rcptB)
 
 	gotA, err := repo.GetReceipt(ctx, "rcpt-payments-api-AC-6")
-	if err != nil || gotA.Signature != "sig-a" {
+	if err != nil || gotA.Signature != rcptA.Signature {
 		t.Fatalf("expected rcpt-payments-api-AC-6 with sig-a, got %+v, err=%v", gotA, err)
 	}
 	gotB, err := repo.GetReceipt(ctx, "rcpt-billing-api-AC-6")
-	if err != nil || gotB.Signature != "sig-b" {
+	if err != nil || gotB.Signature != rcptB.Signature {
 		t.Fatalf("expected rcpt-billing-api-AC-6 with sig-b, got %+v, err=%v", gotB, err)
 	}
 
-	// 3. Tampered blob file in blobs/sha256/<hash>.json must be rejected by loadFromDisk
-	tamperedHash := "0000000000000000000000000000000000000000000000000000000000000000"
-	blobDir := tmpDir + "/blobs/sha256"
-	_ = os.MkdirAll(blobDir, 0755)
-	fakeEnvJSON := `{"id":"ev-forged","subject":{"scheme":"k8s","id":"payments/Deployment/forged"},"observation_type":"kubernetes.admission"}`
-	_ = os.WriteFile(blobDir+"/"+tamperedHash+".json", []byte(fakeEnvJSON), 0644)
-
-	reloaded, err := NewFilesystemEvidenceRepository(tmpDir)
+	// Corrupt real durable bytes, reject the entire restore, preserve them, and
+	// recover only after explicitly restoring the original digest-verified bytes.
+	ref, err := repo.Put(ctx, envPayments, nil)
 	if err != nil {
-		t.Fatalf("reload failed: %v", err)
+		t.Fatal(err)
 	}
-	forgedList, _ := reloaded.ListBySubject(ctx, assurance.SubjectRef{Scheme: "k8s", ID: "payments/Deployment/forged"})
-	if len(forgedList) != 0 {
-		t.Fatalf("expected tampered blob file to be rejected on loadFromDisk, got: %+v", forgedList)
+	path := filepath.Join(tmpDir, "blobs", "sha256", ref.Digest[len("sha256:"):]+".json")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// 4. VerifyIntegrity detects on-disk tampering immediately
-	if _, err := reloaded.VerifyIntegrity(ctx); err == nil {
-		t.Fatal("expected VerifyIntegrity to detect tampered CAS blob on disk, got nil")
+	corrupted := append([]byte(nil), original...)
+	corrupted[0] = '!'
+	if err := os.WriteFile(path, corrupted, 0600); err != nil {
+		t.Fatal(err)
 	}
-	_ = os.Remove(blobDir + "/" + tamperedHash + ".json")
+	reloaded, err := NewFilesystemEvidenceRepository(tmpDir)
+	var integrityErr *IntegrityError
+	if reloaded != nil || !errors.As(err, &integrityErr) || integrityErr.Path != path {
+		t.Fatalf("expected fail-closed typed integrity error; repo=%v err=%v", reloaded, err)
+	}
+	preserved, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(preserved, corrupted) {
+		t.Fatalf("corrupt bytes were not preserved: %v", err)
+	}
+	if _, err := repo.VerifyIntegrity(ctx); err == nil {
+		t.Fatal("live integrity check accepted corrupt disk bytes")
+	}
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err = NewFilesystemEvidenceRepository(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	verifiedBlobs, err := reloaded.VerifyIntegrity(ctx)
 	if err != nil || verifiedBlobs == 0 {
-		t.Fatalf("expected VerifyIntegrity to pass after removing tampered file, got count=%d err=%v", verifiedBlobs, err)
+		t.Fatalf("recovery verification failed: count=%d err=%v", verifiedBlobs, err)
 	}
 
 	// 5. Idempotent Put deduplicates subjectIndex and rejects oversized payloads

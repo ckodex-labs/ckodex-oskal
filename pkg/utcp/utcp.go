@@ -15,6 +15,8 @@ import (
 
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/utcp"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/workcell"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
+	"k8s.io/client-go/rest"
 )
 
 const (
@@ -25,16 +27,18 @@ const (
 )
 
 type (
-	UTCPManual     = utcp.UTCPManual
-	Info           = utcp.Info
-	Tool           = utcp.Tool
-	CallTemplate   = utcp.CallTemplate
-	CLICommand     = utcp.CLICommand
-	AuthConfig     = utcp.AuthConfig
-	ProviderConfig = utcp.ProviderConfig
-	ManualOptions  = utcp.ManualOptions
-	ToolCallResult = utcp.ToolCallResult
-	SDKBundle      = utcp.SDKBundle
+	ExecutionBroker   = ports.ExecutionBroker
+	PrincipalResolver = ports.PrincipalResolver
+	UTCPManual        = utcp.UTCPManual
+	Info              = utcp.Info
+	Tool              = utcp.Tool
+	CallTemplate      = utcp.CallTemplate
+	CLICommand        = utcp.CLICommand
+	AuthConfig        = utcp.AuthConfig
+	ProviderConfig    = utcp.ProviderConfig
+	ManualOptions     = utcp.ManualOptions
+	ToolCallResult    = utcp.ToolCallResult
+	SDKBundle         = utcp.SDKBundle
 )
 
 // WithLease attaches a CapabilityLease ID and prior receipt hash to a context for governed UTCP operations.
@@ -56,8 +60,8 @@ func NewClient(evidenceDir string) (*Client, error) {
 	return &Client{registry: reg}, nil
 }
 
-// NewGovernedClient initializes a UTCP Client gated by a CapabilityLease EffectBroker.
-func NewGovernedClient(evidenceDir string, broker *workcell.EffectBroker) (*Client, error) {
+// NewGovernedClient initializes a UTCP Client gated by a durable execution broker.
+func NewGovernedClient(evidenceDir string, broker ExecutionBroker) (*Client, error) {
 	reg, err := utcp.NewRegistry(evidenceDir, broker)
 	if err != nil {
 		return nil, err
@@ -95,14 +99,14 @@ func (c *Client) RegisterToolProvider(ctx context.Context, cfg ProviderConfig) e
 	return c.registry.RegisterToolProvider(ctx, cfg)
 }
 
-// DeregisterManual removes a registered UTCP manual/provider under optional CapabilityLease governance.
+// DeregisterManual removes a registered UTCP manual/provider under mandatory CapabilityLease governance.
 func (c *Client) DeregisterManual(ctx context.Context, name, leaseID, prevReceiptHash string) error {
 	return c.registry.DeregisterManual(ctx, name, leaseID, prevReceiptHash)
 }
 
 // DeregisterToolProvider removes a registered UTCP tool provider.
-func (c *Client) DeregisterToolProvider(name string) {
-	c.registry.DeregisterToolProvider(name)
+func (c *Client) DeregisterToolProvider(name string) error {
+	return c.registry.DeregisterToolProvider(name)
 }
 
 // GetTool looks up a registered UTCP tool by exact or namespaced name ("<manual>.<tool>").
@@ -143,4 +147,20 @@ func (c *Client) HTTPHandler(baseURL string) http.Handler {
 // GenerateSDKConfigs generates provider configurations and code snippets for go-utcp, rs-utcp, typescript-utcp, python-utcp, and utcp-mcp.
 func GenerateSDKConfigs(baseURL, binaryPath string) []SDKBundle {
 	return utcp.GenerateSDKConfigs(baseURL, binaryPath)
+}
+
+// NewKubernetesClient uses a direct Kubernetes lease store and a required identity
+// resolver. A multi-user transport must resolve the verified caller per request.
+func NewKubernetesClient(evidenceDir string, config *rest.Config, principal PrincipalResolver) (*Client, error) {
+	broker, err := workcell.NewKubernetesBroker(config, principal)
+	if err != nil {
+		return nil, err
+	}
+	return NewGovernedClient(evidenceDir, broker)
+}
+
+// NewKubernetesPrincipal authenticates a local process using SelfSubjectReview.
+// Never use the server's local identity as a substitute for a remote caller.
+func NewKubernetesPrincipal(config *rest.Config) (PrincipalResolver, error) {
+	return workcell.NewKubernetesPrincipal(config)
 }

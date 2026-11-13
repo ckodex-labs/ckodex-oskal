@@ -57,7 +57,7 @@ func TestCryptographicReceiptIssueAndIndependentVerification(t *testing.T) {
 		t.Fatalf("M12 Exit Failure: Independent process failed to verify valid receipt: %v", err)
 	}
 
-	// 3. Tampering with any field invalidates signature
+	// 3. Tampering with fields in the canonical signed tuple invalidates its signature
 	// Tamper subject
 	tamperedReceiptSub := receipt
 	tamperedReceiptSub.Subject = assurance.SubjectRef{Scheme: "k8s", ID: "attacker/fake-deployment"}

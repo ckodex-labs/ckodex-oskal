@@ -46,8 +46,8 @@ func TestTutorialInProcessSDKIntegration(t *testing.T) {
 		t.Fatalf("failed to query assurance state: %v", err)
 	}
 
-	if state.State != oskal.StateAssured {
-		t.Fatalf("expected state ASSURED, got %v", state.State)
+	if state.State != oskal.StateUnknown {
+		t.Fatalf("expected state UNKNOWN without live evaluation, got %v", state.State)
 	}
 
 	epoch := oskal.AssuranceEpoch{

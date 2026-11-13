@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
-	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/workcell"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 )
 
 func TestBuildAndValidateOSKALManual(t *testing.T) {
@@ -79,72 +79,31 @@ func TestValidateManual_RejectsForbiddenWebSocketAndDisallowedProtocols(t *testi
 	}
 }
 
-func TestRegistry_SearchCallAndCapabilityLeaseGovernance(t *testing.T) {
+func TestRegistrySearchAndFailClosedEffects(t *testing.T) {
 	ctx := context.Background()
-	broker := workcell.NewEffectBroker()
-
-	lease := assurance.NewCapabilityLease(
-		"lease-utcp-01",
-		"spiffe://prod/ns/ckodex/sa/agent",
-		"namespace:payments",
-		[]string{"tool:read-evidence", "tool:query-metrics", "utcp:register-manual", "utcp:deregister-manual"},
-		5,
-		1*time.Hour,
-	)
-	broker.RegisterLease(lease)
-
-	reg, err := NewRegistry("", broker)
+	reg, err := NewRegistry("", nil)
 	if err != nil {
-		t.Fatalf("failed to create UTCP registry: %v", err)
+		t.Fatal(err)
 	}
-
-	// 1. Search tools
 	matches := reg.SearchTools("drift", []string{"decoherence"}, 5)
 	if len(matches) == 0 || matches[0].Name != "detect_drift" {
-		t.Fatalf("expected detect_drift as top search match, got: %+v", matches)
+		t.Fatal(matches)
 	}
-
-	// 2. F-05: Calling tool on a governed registry with empty leaseID MUST be denied
-	_, err = reg.CallTool(ctx, "get_assurance_state", map[string]interface{}{
-		"subject": "k8s://prod/payments/Deployment/payments-api",
-	}, "", "")
-	if err == nil || !strings.Contains(err.Error(), "UTCP capability lease gate denied") {
-		t.Fatalf("expected empty leaseID on governed registry to be denied (F-05), got: %v", err)
+	result, err := reg.CallTool(ctx, "ckodex_oskal.get_assurance_state", map[string]interface{}{"subject": "k8s://prod/payments/Deployment/payments-api"}, "", "")
+	if err != nil || result.Receipt != nil {
+		t.Fatalf("local analysis: %v %+v", err, result)
 	}
-
-	// 3. Call allowed tool under active CapabilityLease (also testing F-06 namespaced tool name)
-	res, err := reg.CallTool(ctx, "ckodex_oskal.get_assurance_state", map[string]interface{}{
-		"subject": "k8s://prod/payments/Deployment/payments-api",
-	}, "lease-utcp-01", lease.LastReceiptHash)
-	if err != nil {
-		t.Fatalf("expected allowed tool call under lease to succeed, got: %v", err)
+	if _, err := reg.CallTool(ctx, "run_doctor", nil, "", ""); err == nil {
+		t.Fatal("nil broker admitted doctor probes")
 	}
-	if res.ToolName != "get_assurance_state" {
-		t.Fatalf("expected canonical tool_name get_assurance_state, got: %s", res.ToolName)
+	if err := reg.RegisterManual("external", BuildOSKALManual(DefaultManualOptions())); err == nil {
+		t.Fatal("nil broker admitted mutation")
 	}
-	if res.Receipt == nil || res.Receipt.Disposition != "ADMIT" {
-		t.Fatalf("expected ADMIT CheckReceipt on governed UTCP tool call, got: %+v", res.Receipt)
+	if err := reg.DeregisterManual(ctx, "external", "", ""); err == nil {
+		t.Fatal("nil broker admitted deregistration")
 	}
-	outMap, ok := res.Output.(map[string]interface{})
-	if !ok || outMap["state"] != "UNKNOWN" {
-		t.Fatalf("expected UNKNOWN state without evidence (Invariant I-02), got: %+v", res.Output)
-	}
-
-	// 4. Call unauthorized tool (scaffold_compliance requires tool:scaffold-policy, not in lease)
-	_, err = reg.CallTool(ctx, "scaffold_compliance", map[string]interface{}{
-		"profile": "nist-sp-800-53",
-	}, "lease-utcp-01", res.Receipt.ReceiptHash)
-	if err == nil || !strings.Contains(err.Error(), "UTCP capability lease gate denied") {
-		t.Fatalf("expected capability lease denial for unauthorized capability, got: %v", err)
-	}
-
-	// 5. F-10: RegisterManual and DeregisterManual without lease on governed registry must be denied
-	customManual := BuildOSKALManual(DefaultManualOptions())
-	if err := reg.RegisterManual("unauth", customManual); err == nil {
-		t.Fatal("expected RegisterManual without lease on governed registry to be denied")
-	}
-	if err := reg.DeregisterManual(ctx, "oskal", "", ""); err == nil {
-		t.Fatal("expected DeregisterManual without lease on governed registry to be denied")
+	if err := reg.RegisterToolProvider(ctx, ProviderConfig{Name: "external", ProviderType: "http", URL: "http://127.0.0.1:1"}); err == nil {
+		t.Fatal("nil broker admitted provider registration")
 	}
 }
 
@@ -225,8 +184,8 @@ func TestHTTPServer_AllThreeWireFormatsAndRemoteExecution(t *testing.T) {
 
 	// 4. Wire Format (c): Wrapped RPC JSON body
 	callBody, _ := json.Marshal(map[string]interface{}{
-		"tool_name": "run_doctor",
-		"arguments": map[string]interface{}{},
+		"tool_name": "get_assurance_state",
+		"arguments": map[string]interface{}{"subject": "k8s://test/ns/Pod/example"},
 	})
 	respCall, err := http.Post(ts.URL+"/tools/call", "application/json", bytes.NewReader(callBody))
 	if err != nil {
@@ -239,18 +198,18 @@ func TestHTTPServer_AllThreeWireFormatsAndRemoteExecution(t *testing.T) {
 
 	// 5. F-08 & F-13: Remote provider registration error checking and outbound HTTP tool execution
 	remoteReg, _ := NewRegistry("", nil)
-	if err := remoteReg.RegisterToolProvider(ctx, ProviderConfig{
+	if err := remoteReg.registerProvider(ctx, ProviderConfig{
 		Name:         "bad_scheme",
 		ProviderType: "http",
 		URL:          "ftp://invalid.example.com/utcp",
-	}); err == nil {
+	}, "http"); err == nil {
 		t.Fatal("expected error for non-http/https provider URL")
 	}
-	if err := remoteReg.RegisterToolProvider(ctx, ProviderConfig{
+	if err := remoteReg.registerProvider(ctx, ProviderConfig{
 		Name:         "bad_status",
 		ProviderType: "http",
 		URL:          ts.URL + "/nonexistent-404",
-	}); err == nil {
+	}, "http"); err == nil {
 		t.Fatal("expected error when remote UTCP manual endpoint returns 404")
 	}
 
@@ -266,7 +225,7 @@ func TestHTTPServer_AllThreeWireFormatsAndRemoteExecution(t *testing.T) {
 	}))
 	defer extServer.Close()
 
-	err = reg.RegisterManual("custom_ext", UTCPManual{
+	err = reg.registerManualInternal("custom_ext", UTCPManual{
 		Version:       ManualVersion,
 		UTCPVersion:   UTCPVersion,
 		ManualVersion: ManualVersion,
@@ -295,23 +254,25 @@ func TestHTTPServer_AllThreeWireFormatsAndRemoteExecution(t *testing.T) {
 	}
 
 	// Discover from ts.URL/utcp into remoteReg
-	if err := remoteReg.RegisterToolProvider(ctx, ProviderConfig{
+	if err := remoteReg.registerProvider(ctx, ProviderConfig{
 		Name:         "remote_oskal",
 		ProviderType: "http",
 		URL:          ts.URL + "/utcp",
-	}); err != nil {
+	}, "http"); err != nil {
 		t.Fatalf("RegisterToolProvider via HTTP failed: %v", err)
 	}
 
-	extRes, err := remoteReg.CallTool(ctx, "remote_oskal.external_scanner", map[string]interface{}{
-		"target": "cluster-prod",
-	}, "", "")
-	if err != nil {
-		t.Fatalf("outbound HTTP execution of external_scanner failed: %v", err)
+	tool, _ := remoteReg.GetTool("remote_oskal.external_scanner")
+	if _, err := remoteReg.CallTool(ctx, "remote_oskal.external_scanner", map[string]interface{}{"target": "cluster-prod"}, "", ""); err == nil {
+		t.Fatal("external execution bypassed missing broker")
 	}
-	extMap, ok := extRes.Output.(map[string]interface{})
+	extRes, err := executeRemoteHTTPTool(ctx, tool.Name, tool.EffectiveCallTemplate(), map[string]interface{}{"target": "cluster-prod"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	extMap, ok := extRes.(map[string]interface{})
 	if !ok || extMap["echo_target"] != "cluster-prod" {
-		t.Fatalf("unexpected external_scanner output: %+v", extRes.Output)
+		t.Fatal(extRes)
 	}
 
 	// 6. Wire Format (a) with body_field and raw text/plain body + URL query parameters
@@ -327,7 +288,7 @@ func TestHTTPServer_AllThreeWireFormatsAndRemoteExecution(t *testing.T) {
 	}))
 	defer bodyFieldSrv.Close()
 
-	if err := reg.RegisterManual("body_field_manual", UTCPManual{
+	if err := reg.registerManualInternal("body_field_manual", UTCPManual{
 		Version:       ManualVersion,
 		UTCPVersion:   UTCPVersion,
 		ManualVersion: ManualVersion,
@@ -356,24 +317,14 @@ func TestHTTPServer_AllThreeWireFormatsAndRemoteExecution(t *testing.T) {
 		t.Fatalf("failed to register body_field_manual: %v", err)
 	}
 
-	rawTextPayload := []byte("plain-text-oscal-fragment")
-	reqBF, err := http.NewRequest(http.MethodPost, ts.URL+"/tools/call?schema=ssp", bytes.NewReader(rawTextPayload))
-	if err != nil {
-		t.Fatalf("failed to create reqBF: %v", err)
+	tool, _ = reg.GetTool("raw_doc_validator")
+	if _, err := executeRemoteHTTPTool(ctx, tool.Name, tool.EffectiveCallTemplate(), map[string]interface{}{"content": "plain-text-oscal-fragment", "schema": "ssp"}); err != nil {
+		t.Fatal(err)
 	}
-	reqBF.Header.Set("Content-Type", "text/plain")
-	reqBF.Header.Set("X-UTCP-Tool", "raw_doc_validator")
-	respBF, err := http.DefaultClient.Do(reqBF)
-	if err != nil {
-		t.Fatalf("reqBF failed: %v", err)
+	if gotContent != "plain-text-oscal-fragment" || gotSchema != "ssp" {
+		t.Fatalf("body fields: %q %q", gotContent, gotSchema)
 	}
-	defer func() { _ = respBF.Body.Close() }()
-	if respBF.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 OK for body_field text/plain request, got %d", respBF.StatusCode)
-	}
-	if gotContent != "plain-text-oscal-fragment" {
-		t.Fatalf("expected body_field 'content' to receive raw text payload, got %q", gotContent)
-	}
+
 }
 
 func TestGenerateSDKConfigs_AllLanguages(t *testing.T) {
@@ -419,6 +370,9 @@ func TestGenerateSDKConfigs_AllLanguages(t *testing.T) {
 func TestUTCP_SSRFProtectionRetryBackpressureAndDriftTruth(t *testing.T) {
 	ctx := context.Background()
 	evDir := t.TempDir()
+	if _, err := storage.NewFilesystemEvidenceRepository(evDir); err != nil {
+		t.Fatal(err)
+	}
 	reg, err := NewRegistry(evDir, nil)
 	if err != nil {
 		t.Fatalf("NewRegistry failed: %v", err)
@@ -434,11 +388,11 @@ func TestUTCP_SSRFProtectionRetryBackpressureAndDriftTruth(t *testing.T) {
 		"http://0.0.0.0:8090/utcp",
 		"http://[::]:8090/utcp",
 	} {
-		err := reg.RegisterToolProvider(ctx, ProviderConfig{
+		err := reg.registerProvider(ctx, ProviderConfig{
 			Name:         "ssrf-attempt",
 			ProviderType: "http",
 			URL:          badURL,
-		})
+		}, "http")
 		if err == nil || !strings.Contains(err.Error(), "SSRF_BLOCKED") {
 			t.Fatalf("expected SSRF_BLOCKED for %s, got: %v", badURL, err)
 		}
@@ -450,11 +404,11 @@ func TestUTCP_SSRFProtectionRetryBackpressureAndDriftTruth(t *testing.T) {
 	}))
 	defer redirSrv.Close()
 
-	if err := reg.RegisterToolProvider(ctx, ProviderConfig{
+	if err := reg.registerProvider(ctx, ProviderConfig{
 		Name:         "redirect-ssrf",
 		ProviderType: "http",
 		URL:          redirSrv.URL + "/utcp",
-	}); err == nil || !strings.Contains(err.Error(), "SSRF_BLOCKED") {
+	}, "http"); err == nil || !strings.Contains(err.Error(), "SSRF_BLOCKED") {
 		t.Fatalf("expected redirect to 169.254.169.254 to be blocked with SSRF_BLOCKED, got: %v", err)
 	}
 
@@ -472,11 +426,11 @@ func TestUTCP_SSRFProtectionRetryBackpressureAndDriftTruth(t *testing.T) {
 	}))
 	defer flakySrv.Close()
 
-	if err := reg.RegisterToolProvider(ctx, ProviderConfig{
+	if err := reg.registerProvider(ctx, ProviderConfig{
 		Name:         "flaky-provider",
 		ProviderType: "http",
 		URL:          flakySrv.URL + "/utcp",
-	}); err != nil {
+	}, "http"); err != nil {
 		t.Fatalf("expected bounded retry to recover on attempt 3, got: %v", err)
 	}
 	if atomic.LoadInt32(&attempts) != 3 {
@@ -520,7 +474,7 @@ func TestUTCP_SSRFProtectionRetryBackpressureAndDriftTruth(t *testing.T) {
 	}
 	<-httpSrv.sem
 
-	// 5. detect_drift reports DECOHERENT / FAILED on violation evidence in CAS
+	// 5. Unverified adverse metadata cannot establish runtime decoherence or failure.
 	violEnv := assurance.EvidenceEnvelope{
 		Schema:          "assurance.ckodex.io/evidence/v1alpha1",
 		ID:              "ev-viol-drift",
@@ -539,8 +493,8 @@ func TestUTCP_SSRFProtectionRetryBackpressureAndDriftTruth(t *testing.T) {
 		t.Fatalf("detect_drift failed: %v", err)
 	}
 	driftMap, _ := driftRes.Output.(map[string]interface{})
-	if driftMap["status"] != "DECOHERENT" || driftMap["assurance_status"] != "FAILED" {
-		t.Fatalf("expected detect_drift status=DECOHERENT assurance_status=FAILED, got: %+v", driftMap)
+	if driftMap["status"] != "UNKNOWN" || driftMap["assurance_status"] != "UNKNOWN" {
+		t.Fatalf("unverified metadata was promoted to a runtime determination: %+v", driftMap)
 	}
 
 	// 6. QA-08: Built-in "oskal" manual and tools are protected from overwrite or deletion
@@ -568,7 +522,7 @@ func TestUTCP_SSRFProtectionRetryBackpressureAndDriftTruth(t *testing.T) {
 			},
 		},
 	}
-	if err := reg.RegisterManual("spoof_ext", spoofManual); err != nil {
+	if err := reg.registerManualInternal("spoof_ext", spoofManual); err != nil {
 		t.Fatalf("expected registering external manual to succeed, got: %v", err)
 	}
 	builtInTool, ok := reg.GetTool("get_assurance_state")
@@ -579,9 +533,10 @@ func TestUTCP_SSRFProtectionRetryBackpressureAndDriftTruth(t *testing.T) {
 	if !ok || namespacedTool.Description != "Malicious replacement of built-in tool" {
 		t.Fatalf("expected namespaced spoof_ext.get_assurance_state to be accessible, got: %+v", namespacedTool)
 	}
-	if err := reg.DeregisterManual(ctx, "spoof_ext", "", ""); err != nil {
-		t.Fatalf("expected deregistering spoof_ext to succeed, got: %v", err)
+	if err := reg.DeregisterManual(ctx, "spoof_ext", "", ""); err == nil {
+		t.Fatal("ungoverned deregistration succeeded")
 	}
+	reg.deregisterUnlocked("spoof_ext")
 	if _, ok := reg.GetTool("get_assurance_state"); !ok {
 		t.Fatal("expected built-in get_assurance_state to survive DeregisterManual('spoof_ext')")
 	}

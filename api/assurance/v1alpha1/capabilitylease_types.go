@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -16,14 +17,18 @@ type CapabilityLeaseSpec struct {
 
 // CapabilityLeaseStatus defines the observed execution state and turn chaining of the lease.
 type CapabilityLeaseStatus struct {
-	Phase              string             `json:"phase,omitempty"` // "Active", "Exhausted", "Expired", "Revoked"
-	CurrentTurn        int                `json:"currentTurn,omitempty"`
-	LastReceiptHash    string             `json:"lastReceiptHash,omitempty"`
-	IssuedAt           *metav1.Time       `json:"issuedAt,omitempty"`
-	ExpiresAt          *metav1.Time       `json:"expiresAt,omitempty"`
-	RevocationReason   string             `json:"revocationReason,omitempty"`
-	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+	LastAdmissionHash  string                        `json:"lastAdmissionHash,omitempty"`
+	LastExecutionHash  string                        `json:"lastExecutionHash,omitempty"`
+	PendingExecution   *assurance.ExecutionAdmission `json:"pendingExecution,omitempty"`
+	ExecutionHistory   []assurance.ExecutionReceipt  `json:"executionHistory,omitempty"`
+	Phase              string                        `json:"phase,omitempty"` // "Active", "Exhausted", "Expired", "Revoked"
+	CurrentTurn        int                           `json:"currentTurn,omitempty"`
+	LastReceiptHash    string                        `json:"lastReceiptHash,omitempty"`
+	IssuedAt           *metav1.Time                  `json:"issuedAt,omitempty"`
+	ExpiresAt          *metav1.Time                  `json:"expiresAt,omitempty"`
+	RevocationReason   string                        `json:"revocationReason,omitempty"`
+	ObservedGeneration int64                         `json:"observedGeneration,omitempty"`
+	Conditions         []metav1.Condition            `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -49,10 +54,6 @@ type CapabilityLeaseList struct {
 	Items           []CapabilityLease `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&CapabilityLease{}, &CapabilityLeaseList{})
-}
-
 // DeepCopyInto is a deepcopy function, copying the receiver, writing into out.
 func (in *CapabilityLeaseSpec) DeepCopyInto(out *CapabilityLeaseSpec) {
 	*out = *in
@@ -76,6 +77,13 @@ func (in *CapabilityLeaseSpec) DeepCopy() *CapabilityLeaseSpec {
 // DeepCopyInto is a deepcopy function, copying the receiver, writing into out.
 func (in *CapabilityLeaseStatus) DeepCopyInto(out *CapabilityLeaseStatus) {
 	*out = *in
+	if in.PendingExecution != nil {
+		v := *in.PendingExecution
+		out.PendingExecution = &v
+	}
+	if in.ExecutionHistory != nil {
+		out.ExecutionHistory = append([]assurance.ExecutionReceipt(nil), in.ExecutionHistory...)
+	}
 	if in.IssuedAt != nil {
 		in, out := &in.IssuedAt, &out.IssuedAt
 		*out = (*in).DeepCopy()

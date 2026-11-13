@@ -26,7 +26,7 @@ UTCP allows autonomous agents across Go (`go-utcp`), Rust (`rs-utcp`), TypeScrip
 1. **No WebSockets (`ANTI_WEBSOCKET_FORBIDDEN`):**  
    Per CKODEX Constitution Section 10 (*"Do not introduce WebSockets"*), `utcp.ValidateManual` and `utcp.Registry.RegisterToolProvider` strictly reject any UTCP manual or tool provider declaring `websocket` or `ws` in `call_template_type`, `provider_type`, or `allowed_communication_protocols`.
 2. **Proof Before / Receipt After (`CapabilityLease` Gating):**  
-   When an AI workcell invokes a UTCP tool under a `CapabilityLease` (`internal/adapters/workcell.EffectBroker`), `Registry.CallTool` verifies the lease's allowed capability (`tool:read-evidence`, `tool:validate-oscal`, `tool:scaffold-policy`, `tool:query-metrics`) *before* execution and attaches a cryptographically chained `CheckReceipt` *after* execution.
+   `KubernetesBroker.Execute` authenticates each operation, reads the actual lease, and reserves one turn using a Kubernetes resource-version compare-and-swap before invoking an effect. Completion is a distinct `ExecutionReceipt`, persisted only after the callback returns successfully. Registry mutations, external tools, and doctor probes require a broker; a nil broker denies them. Fixed local analysis remains available. See [durable lease execution](../capability-lease-execution.md) for scope, evidence, recovery and fencing limits.
 3. **Absence of Evidence is `UNKNOWN` (Invariant I-02):**  
    All UTCP tools (`get_assurance_state`, `explain_claim`, `detect_drift`, `project_oscal`) query the verified Content-Addressable Storage (CAS) repository and return `UNKNOWN` when verified evidence is absent.
 

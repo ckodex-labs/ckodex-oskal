@@ -1,9 +1,13 @@
 package oscal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,11 +54,13 @@ type BackMatter struct {
 }
 
 type OscalMetadata struct {
-	Title        string    `json:"title"`
-	Published    time.Time `json:"published"`
-	LastModified time.Time `json:"last-modified"`
-	Version      string    `json:"version"`
-	OscalVersion string    `json:"oscal-version"`
+	Title        string     `json:"title"`
+	Published    time.Time  `json:"published,omitzero"`
+	LastModified time.Time  `json:"last-modified"`
+	Version      string     `json:"version"`
+	OscalVersion string     `json:"oscal-version"`
+	Props        []Property `json:"props,omitempty"`
+	Remarks      string     `json:"remarks,omitempty"`
 }
 
 // 1. Assessment Results Document
@@ -63,6 +69,7 @@ type OscalObservation struct {
 	Title            string                  `json:"title"`
 	Description      string                  `json:"description"`
 	Collected        time.Time               `json:"collected"`
+	Expires          *time.Time              `json:"expires,omitempty"`
 	Methods          []string                `json:"methods"`
 	Types            []string                `json:"types"`
 	RelevantEvidence []OscalRelevantEvidence `json:"relevant-evidence,omitempty"`
@@ -90,11 +97,17 @@ type OscalFinding struct {
 	Description         string                    `json:"description"`
 	Target              OscalFindingTarget        `json:"target"`
 	RelatedObservations []OscalRelatedObservation `json:"related-observations,omitempty"`
+	Props               []Property                `json:"props,omitempty"`
 }
 
 type OscalControlSelection struct {
-	Description string    `json:"description,omitempty"`
-	IncludeAll  *struct{} `json:"include-all,omitempty"`
+	Description     string                 `json:"description,omitempty"`
+	IncludeAll      *struct{}              `json:"include-all,omitempty"`
+	IncludeControls []OscalSelectedControl `json:"include-controls,omitempty"`
+}
+
+type OscalSelectedControl struct {
+	ControlID string `json:"control-id"`
 }
 
 type OscalReviewedControls struct {
@@ -177,7 +190,8 @@ type OscalSystemInformation struct {
 }
 
 type OscalStatus struct {
-	State string `json:"state"` // "operational", "under-development", etc.
+	State   string `json:"state"` // OSCAL operational status, independent of assurance state.
+	Remarks string `json:"remarks,omitempty"`
 }
 
 type OscalAuthorizationBoundary struct {
@@ -236,10 +250,11 @@ type OscalAssessmentSubject struct {
 }
 
 type OscalAssessmentActivity struct {
-	UUID        string `json:"uuid"`
-	Type        string `json:"type"`
-	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
+	Props       []Property `json:"props,omitempty"`
+	UUID        string     `json:"uuid"`
+	Type        string     `json:"type"`
+	Title       string     `json:"title"`
+	Description string     `json:"description,omitempty"`
 }
 
 type ImportSSP struct {
@@ -280,435 +295,474 @@ type POAMWrapper struct {
 
 var _ ports.OscalProjector = (*Projector)(nil)
 
-// Projector converts continuous assurance evaluations into OSCAL v1.2.3 artifacts.
-type Projector struct{}
-
-func NewProjector() *Projector {
-	return &Projector{}
+// ProjectionContext contains caller-supplied OSCAL document relationships and system facts.
+// These inputs are asserted by the caller; projection does not verify their provenance,
+// resolve imported documents, or establish their operational truth.
+type ProjectionContext struct {
+	AssessmentPlanHref     string                          `json:"assessment_plan_href,omitempty"`
+	SystemSecurityPlanHref string                          `json:"system_security_plan_href,omitempty"`
+	ControlSource          string                          `json:"control_source,omitempty"`
+	ControlNamespace       string                          `json:"control_namespace,omitempty"`
+	ControlVersion         string                          `json:"control_version,omitempty"`
+	Component              *ComponentContext               `json:"component,omitempty"`
+	System                 *SystemContext                  `json:"system,omitempty"`
+	FindingTargets         map[string]FindingTargetMapping `json:"finding_targets,omitempty"`
 }
 
-// ProjectAssessmentResults builds an official OSCAL v1.2.3 Assessment Results artifact.
-func (p *Projector) ProjectAssessmentResults(
-	ctx context.Context,
-	subject assurance.SubjectRef,
-	evaluations []assurance.ClaimEvaluation,
-	findings []assurance.Finding,
-) ([]byte, error) {
-	now := time.Now().UTC()
+// MaxProjectionContextBytes bounds context decoding for file and transport adapters.
+const MaxProjectionContextBytes = 1 << 20
 
+// DecodeProjectionContext strictly decodes one bounded JSON context object.
+// Semantic requirements are checked by each projection method.
+func DecodeProjectionContext(data []byte) (ProjectionContext, error) {
+	var c ProjectionContext
+	if len(data) > MaxProjectionContextBytes {
+		return c, fmt.Errorf("projection context exceeds %d bytes", MaxProjectionContextBytes)
+	}
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return c, fmt.Errorf("projection context must be a JSON object")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&c); err != nil {
+		return ProjectionContext{}, fmt.Errorf("decode projection context: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return ProjectionContext{}, fmt.Errorf("projection context must contain exactly one JSON object")
+	}
+	return c, nil
+}
+
+// ComponentContext describes the actual component and its implementation narratives.
+type ComponentContext struct {
+	Type            string            `json:"type"`
+	Description     string            `json:"description"`
+	Purpose         string            `json:"purpose,omitempty"`
+	Implementations map[string]string `json:"implementations,omitempty"`
+}
+
+// SystemContext supplies mandatory SSP facts that claim evaluations cannot establish.
+type SystemContext struct {
+	ProfileHref                      string                     `json:"profile_href"`
+	Characteristics                  OscalSystemCharacteristics `json:"characteristics"`
+	Implementation                   OscalSystemImplementation  `json:"implementation"`
+	ControlImplementationDescription string                     `json:"control_implementation_description"`
+	Implementations                  map[string]string          `json:"implementations"`
+}
+
+// FindingTargetMapping maps a canonical control to an actual objective or statement.
+// Control IDs are never implicitly treated as objective or statement IDs.
+type FindingTargetMapping struct {
+	Type     string `json:"type"`
+	TargetID string `json:"target_id"`
+}
+
+// ProjectionInputError identifies missing or incompatible semantic projection input.
+type ProjectionInputError struct {
+	DocumentType DocumentType
+	Field        string
+	Reason       string
+}
+
+func (e *ProjectionInputError) Error() string {
+	return fmt.Sprintf("project %s: %s: %s", e.DocumentType, e.Field, e.Reason)
+}
+
+// Projector converts supplied assurance facts into OSCAL v1.2.3 artifacts.
+type Projector struct{ context ProjectionContext }
+
+// NewProjector creates a projector without document relationships or system metadata.
+// Methods requiring those facts return a ProjectionInputError until context is supplied.
+func NewProjector() *Projector { return NewProjectorWithContext(ProjectionContext{}) }
+
+func NewProjectorWithContext(c ProjectionContext) *Projector { return &Projector{context: c} }
+
+func inputError(dt DocumentType, field, reason string) error {
+	return &ProjectionInputError{DocumentType: dt, Field: field, Reason: reason}
+}
+
+func requireText(dt DocumentType, field, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return inputError(dt, field, "provide the actual value; projection cannot infer it")
+	}
+	return nil
+}
+
+func requireHref(dt DocumentType, field, value string) error {
+	if err := requireText(dt, field, value); err != nil {
+		return err
+	}
+	u, err := url.Parse(value)
+	if err != nil || strings.ContainsAny(value, " \t\r\n") || u.Fragment != "" {
+		return inputError(dt, field, "provide a valid reference to an actual external OSCAL document (fragment-only references require back-matter not supplied by this API)")
+	}
+	return nil
+}
+
+func (p *Projector) controls(dt DocumentType, controls []assurance.ControlRef) (OscalReviewedControls, error) {
+	if len(controls) == 0 {
+		return OscalReviewedControls{}, inputError(dt, "controls", "at least one actual control is required; no baseline is inferred")
+	}
+	if err := requireText(dt, "control_namespace", p.context.ControlNamespace); err != nil {
+		return OscalReviewedControls{}, err
+	}
+	seen := make(map[string]bool)
+	selected := make([]OscalSelectedControl, 0, len(controls))
+	for _, c := range controls {
+		if err := c.Validate(); err != nil {
+			return OscalReviewedControls{}, inputError(dt, "controls", err.Error())
+		}
+		if c.Namespace != p.context.ControlNamespace || c.Version != p.context.ControlVersion {
+			return OscalReviewedControls{}, inputError(dt, "controls", fmt.Sprintf("%s does not match supplied control namespace/version", c.Canonical()))
+		}
+		if !seen[c.ID] {
+			selected = append(selected, OscalSelectedControl{ControlID: c.ID})
+			seen[c.ID] = true
+		}
+	}
+	return OscalReviewedControls{ControlSelections: []OscalControlSelection{{IncludeControls: selected}}}, nil
+}
+
+func (p *Projector) evaluations(dt DocumentType, subject *assurance.SubjectRef, evaluations []assurance.ClaimEvaluation) (OscalReviewedControls, error) {
+	controls := make([]assurance.ControlRef, 0, len(evaluations))
+	for _, e := range evaluations {
+		if err := e.Subject.Validate(); err != nil {
+			return OscalReviewedControls{}, inputError(dt, "evaluations.subject", err.Error())
+		}
+		if subject != nil && e.Subject.URI() != subject.URI() {
+			return OscalReviewedControls{}, inputError(dt, "evaluations.subject", "evaluation belongs to a different subject")
+		}
+		if e.EvaluatedAt.IsZero() || e.EvaluatedAt.After(time.Now().UTC()) {
+			return OscalReviewedControls{}, inputError(dt, "evaluations.evaluatedAt", "supply an actual evaluation timestamp, not zero or a future time")
+		}
+		controls = append(controls, e.Control)
+	}
+	return p.controls(dt, controls)
+}
+
+func requireUniqueControls(dt DocumentType, evaluations []assurance.ClaimEvaluation) error {
+	seen := make(map[string]bool)
+	for _, e := range evaluations {
+		key := e.Control.Canonical()
+		if seen[key] {
+			return inputError(dt, "evaluations.control", "multiple evaluations for "+key+" cannot become duplicate implementation requirements; supply one coherent snapshot per control")
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func metadata(title string) OscalMetadata {
+	now := time.Now().UTC()
+	return OscalMetadata{Title: title, LastModified: now, Version: "1.0.0", OscalVersion: "1.2.3", Remarks: "Projection of caller-supplied facts. Schema validation does not verify source authenticity, imported document resolution, semantic completeness, or system compliance."}
+}
+
+func properties(e assurance.ClaimEvaluation) []Property {
+	props := []Property{
+		{Name: "control-ref", Value: e.Control.Canonical(), Ns: "https://assurance.ckodex.io/ns"},
+		{Name: "subject-uri", Value: e.Subject.URI(), Ns: "https://assurance.ckodex.io/ns"},
+		{Name: "assurance-state", Value: e.State.String(), Ns: "https://assurance.ckodex.io/ns"},
+		{Name: "epoch-composite-digest", Value: e.Epoch.CompositeDigest(), Ns: "https://assurance.ckodex.io/ns"},
+	}
+	if e.EvidenceRoot != "" {
+		props = append(props, Property{Name: "evidence-root", Value: e.EvidenceRoot, Ns: "https://assurance.ckodex.io/ns"})
+	}
+	return props
+}
+
+func marshalProjection(ctx context.Context, dt DocumentType, wrapper any) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	data, err := json.MarshalIndent(wrapper, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal %s: %w", dt, err)
+	}
+	v, err := DefaultValidator()
+	if err != nil {
+		return nil, fmt.Errorf("initialize OSCAL schema validator: %w", err)
+	}
+	report, err := v.Validate(data, string(dt))
+	if err != nil {
+		return nil, err
+	}
+	if !report.Valid {
+		return nil, inputError(dt, "document", fmt.Sprintf("supplied inputs do not satisfy pinned OSCAL 1.2.3 schema: %+v", report.Errors))
+	}
+	return data, nil
+}
+
+// ProjectAssessmentResults preserves supplied evaluations, evidence, and confirmed findings.
+func (p *Projector) ProjectAssessmentResults(ctx context.Context, subject assurance.SubjectRef, evaluations []assurance.ClaimEvaluation, findings []assurance.Finding) ([]byte, error) {
+	dt := DocTypeAssessmentResults
+	if err := subject.Validate(); err != nil {
+		return nil, inputError(dt, "subject", err.Error())
+	}
+	if err := requireHref(dt, "assessment_plan_href", p.context.AssessmentPlanHref); err != nil {
+		return nil, err
+	}
+	reviewed, err := p.evaluations(dt, &subject, evaluations)
+	if err != nil {
+		return nil, err
+	}
 	wrapper := AssessmentResultsWrapper{}
 	ar := &wrapper.AssessmentResults
 	ar.UUID = uuid.NewString()
-	ar.Metadata = OscalMetadata{
-		Title:        fmt.Sprintf("OSKAL Assessment Results for %s", subject.URI()),
-		Published:    now,
-		LastModified: now,
-		Version:      "1.0.0",
-		OscalVersion: "1.2.3",
-	}
-
-	ar.ImportAP = ImportAP{
-		Href: "assessment-plan.json",
-	}
-
-	var epochDigest string
-	var startTime, endTime time.Time
-	if len(evaluations) > 0 {
-		epochDigest = evaluations[0].Epoch.CompositeDigest()
-		startTime = evaluations[0].EvaluatedAt
-		endTime = evaluations[0].ValidUntil
-	} else {
-		epochDigest = "empty"
-		startTime = time.Now().UTC()
-		endTime = startTime
-	}
-
-	resultUUID := uuid.NewString()
-	res := OscalResult{
-		UUID:        resultUUID,
-		Title:       fmt.Sprintf("Continuous Assurance Result for %s", subject.URI()),
-		Description: fmt.Sprintf("Evaluated under composite epoch %s", epochDigest),
-		Start:       startTime,
-		End:         endTime,
-		ReviewedControls: OscalReviewedControls{
-			ControlSelections: []OscalControlSelection{
-				{
-					Description: "Continuous automated control assessment",
-					IncludeAll:  &struct{}{},
-				},
-			},
-		},
-		Observations: make([]OscalObservation, 0, len(evaluations)),
-	}
-
-	resourceUUIDs := make(map[string]string)
-	resourceMap := make(map[string]BackMatterResource)
-
-	for _, eval := range evaluations {
-		obsUUID := uuid.NewString()
-		obs := OscalObservation{
-			UUID:        obsUUID,
-			Title:       fmt.Sprintf("Observation for %s", eval.Control.Canonical()),
-			Description: fmt.Sprintf("Assurance state resolved to %s (Completeness: %s)", eval.State, eval.Completeness.Summary()),
-			Collected:   eval.EvaluatedAt,
-			Methods:     []string{"AUTOMATED_CONTINUOUS_EVALUATION"},
-			Types:       []string{"assurance-claim-evaluation"},
-			Props: []Property{
-				{Name: "assurance-state", Value: eval.State.String(), Ns: "https://assurance.ckodex.io/ns"},
-				{Name: "epoch-composite-digest", Value: eval.Epoch.CompositeDigest(), Ns: "https://assurance.ckodex.io/ns"},
-			},
+	ar.Metadata = metadata(fmt.Sprintf("OSKAL Assessment Results for %s", subject.URI()))
+	ar.ImportAP = ImportAP{Href: p.context.AssessmentPlanHref}
+	start, end := evaluations[0].EvaluatedAt, evaluations[0].EvaluatedAt
+	for _, e := range evaluations {
+		if e.EvaluatedAt.Before(start) {
+			start = e.EvaluatedAt
 		}
-		if eval.EvidenceRoot != "" {
-			obs.Props = append(obs.Props, Property{Name: "evidence-root", Value: eval.EvidenceRoot, Ns: "https://assurance.ckodex.io/ns"})
+		if e.EvaluatedAt.After(end) {
+			end = e.EvaluatedAt
 		}
-
-		for _, ev := range eval.Evidence {
-			resUUID, exists := resourceUUIDs[ev.Digest]
-			if !exists {
-				resUUID = uuid.NewString()
-				resourceUUIDs[ev.Digest] = resUUID
-				resourceMap[ev.Digest] = BackMatterResource{
-					UUID:        resUUID,
-					Title:       fmt.Sprintf("Evidence Artifact %s", ev.Digest),
-					Description: fmt.Sprintf("Stored at %s with media type %s", ev.URI, ev.MediaType),
-					Props: []Property{
-						{Name: "digest", Value: ev.Digest, Ns: "https://assurance.ckodex.io/ns"},
-					},
-					Rlinks: []OscalRlink{
-						{Href: ev.URI, MediaType: ev.MediaType},
-					},
-				}
+	}
+	res := OscalResult{UUID: uuid.NewString(), Title: fmt.Sprintf("Assurance evaluations for %s", subject.URI()), Description: "Projection of supplied claim evaluations; assurance states retain their source meaning.", Start: start, End: end, ReviewedControls: reviewed}
+	resources := make(map[string]BackMatterResource)
+	observations := make(map[string][]OscalRelatedObservation)
+	for _, e := range evaluations {
+		obs := OscalObservation{UUID: uuid.NewString(), Title: fmt.Sprintf("Evaluation of %s", e.Control.Canonical()), Description: fmt.Sprintf("Supplied evaluation state: %s (completeness: %s)", e.State, e.Completeness.Summary()), Collected: e.EvaluatedAt, Methods: []string{"AUTOMATED_CONTINUOUS_EVALUATION"}, Types: []string{"assurance-claim-evaluation"}, Props: properties(e)}
+		if !e.ValidUntil.IsZero() {
+			if e.ValidUntil.Before(e.EvaluatedAt) {
+				return nil, inputError(dt, "evaluations.validUntil", "cannot precede evaluatedAt")
 			}
-
-			obs.RelevantEvidence = append(obs.RelevantEvidence, OscalRelevantEvidence{
-				Href:        fmt.Sprintf("#%s", resUUID),
-				Description: fmt.Sprintf("Evidence artifact %s (%s)", ev.Digest, ev.MediaType),
-			})
+			expiry := e.ValidUntil
+			obs.Expires = &expiry
 		}
-
+		for _, ev := range e.Evidence {
+			if err := requireText(dt, "evaluations.evidence.digest", ev.Digest); err != nil {
+				return nil, err
+			}
+			if err := requireText(dt, "evaluations.evidence.uri", ev.URI); err != nil {
+				return nil, err
+			}
+			key := ev.Digest + "\n" + ev.URI + "\n" + ev.MediaType
+			resource, exists := resources[key]
+			if !exists {
+				resource = BackMatterResource{UUID: uuid.NewString(), Title: "Supplied evidence reference", Props: []Property{{Name: "digest", Value: ev.Digest, Ns: "https://assurance.ckodex.io/ns"}}, Rlinks: []OscalRlink{{Href: ev.URI, MediaType: ev.MediaType}}}
+				resources[key] = resource
+			}
+			obs.RelevantEvidence = append(obs.RelevantEvidence, OscalRelevantEvidence{Href: "#" + resource.UUID, Description: "Evidence reference supplied by the source evaluation; content authenticity is not independently verified by projection."})
+			observations[e.Control.Canonical()+"\n"+ev.Digest] = append(observations[e.Control.Canonical()+"\n"+ev.Digest], OscalRelatedObservation{ObservationUUID: obs.UUID})
+		}
 		res.Observations = append(res.Observations, obs)
 	}
-
-	if len(res.Observations) == 0 {
-		res.Observations = append(res.Observations, OscalObservation{
-			UUID:        uuid.NewString(),
-			Title:       "Observation for AC-6",
-			Description: "Assurance state resolved to UNKNOWN (absence of verified evidence)",
-			Collected:   now,
-			Methods:     []string{"AUTOMATED_CONTINUOUS_EVALUATION"},
-			Types:       []string{"assurance-claim-evaluation"},
-			Props: []Property{
-				{Name: "assurance-state", Value: assurance.AssuranceStateUnknown.String(), Ns: "https://assurance.ckodex.io/ns"},
-			},
-		})
-	}
-
 	for _, f := range findings {
-		findUUID := uuid.NewString()
-		var relObs []OscalRelatedObservation
-		for _, obs := range res.Observations {
-			if strings.Contains(obs.Title, f.Control.Canonical()) || strings.Contains(obs.Title, f.Control.ID) {
-				relObs = append(relObs, OscalRelatedObservation{ObservationUUID: obs.UUID})
+		if f.Subject.URI() != subject.URI() {
+			return nil, inputError(dt, "findings.subject", "finding belongs to a different subject")
+		}
+		target, ok := p.context.FindingTargets[f.Control.Canonical()]
+		if !ok || (target.Type != "objective-id" && target.Type != "statement-id") || target.TargetID == "" {
+			return nil, inputError(dt, "finding_targets", fmt.Sprintf("provide an actual objective-id or statement-id mapping for %s", f.Control.Canonical()))
+		}
+		related := []OscalRelatedObservation{}
+		seen := make(map[string]bool)
+		for _, ev := range f.EvidenceRefs {
+			for _, r := range observations[f.Control.Canonical()+"\n"+ev.Digest] {
+				if !seen[r.ObservationUUID] {
+					related = append(related, r)
+					seen[r.ObservationUUID] = true
+				}
 			}
 		}
-		if len(relObs) == 0 && len(res.Observations) > 0 {
-			relObs = []OscalRelatedObservation{{ObservationUUID: res.Observations[0].UUID}}
+		if len(related) == 0 {
+			return nil, inputError(dt, "findings.evidenceRefs", "finding must reference evidence in an evaluation of the exact same subject and control; no arbitrary observation link is invented")
 		}
-		res.Findings = append(res.Findings, OscalFinding{
-			UUID:        findUUID,
-			Title:       f.Title,
-			Description: f.Description,
-			Target: OscalFindingTarget{
-				Type:     "objective-id",
-				TargetID: f.Control.ID,
-				Status: OscalFindingTargetStatus{
-					State:  "not-satisfied",
-					Reason: "fail",
-				},
-			},
-			RelatedObservations: relObs,
-		})
+		res.Findings = append(res.Findings, OscalFinding{UUID: uuid.NewString(), Title: f.Title, Description: f.Description, Target: OscalFindingTarget{Type: target.Type, TargetID: target.TargetID, Status: OscalFindingTargetStatus{State: "not-satisfied", Reason: "fail"}}, RelatedObservations: related, Props: []Property{{Name: "source-finding-id", Value: f.ID, Ns: "https://assurance.ckodex.io/ns"}, {Name: "control-ref", Value: f.Control.Canonical(), Ns: "https://assurance.ckodex.io/ns"}}})
 	}
-
-	ar.Results = append(ar.Results, res)
-
-	if len(resourceMap) > 0 {
-		bm := &BackMatter{}
-		for _, r := range resourceMap {
-			bm.Resources = append(bm.Resources, r)
+	ar.Results = []OscalResult{res}
+	if len(resources) > 0 {
+		ar.BackMatter = &BackMatter{}
+		keys := make([]string, 0, len(resources))
+		for key := range resources {
+			keys = append(keys, key)
 		}
-		ar.BackMatter = bm
+		sort.Strings(keys)
+		for _, key := range keys {
+			ar.BackMatter.Resources = append(ar.BackMatter.Resources, resources[key])
+		}
 	}
-
-	return json.MarshalIndent(wrapper, "", "  ")
+	return marshalProjection(ctx, dt, wrapper)
 }
 
-// ProjectComponentDefinition builds an OSCAL v1.2.3 Component Definition.
-func (p *Projector) ProjectComponentDefinition(
-	ctx context.Context,
-	componentName string,
-	evaluations []assurance.ClaimEvaluation,
-) ([]byte, error) {
-	now := time.Now().UTC()
-
+// ProjectComponentDefinition uses actual component facts and explicit implementation narratives.
+func (p *Projector) ProjectComponentDefinition(ctx context.Context, componentName string, evaluations []assurance.ClaimEvaluation) ([]byte, error) {
+	dt := DocTypeComponentDefinition
+	if err := requireText(dt, "componentName", componentName); err != nil {
+		return nil, err
+	}
+	c := p.context.Component
+	if c == nil {
+		return nil, inputError(dt, "component", "provide actual component type and description")
+	}
+	if err := requireText(dt, "component.type", c.Type); err != nil {
+		return nil, err
+	}
+	if err := requireText(dt, "component.description", c.Description); err != nil {
+		return nil, err
+	}
 	wrapper := ComponentDefinitionWrapper{}
 	cd := &wrapper.ComponentDefinition
 	cd.UUID = uuid.NewString()
-	cd.Metadata = OscalMetadata{
-		Title:        fmt.Sprintf("OSKAL Component Definition: %s", componentName),
-		Published:    now,
-		LastModified: now,
-		Version:      "1.0.0",
-		OscalVersion: "1.2.3",
-	}
-
-	comp := OscalDefinedComponent{
-		UUID:        uuid.NewString(),
-		Type:        "software",
-		Title:       componentName,
-		Description: "Kubernetes workload governed under CKODEX continuous assurance",
-		Purpose:     "Assurance Runtime Realization",
-	}
-
-	controlImpl := OscalControlImplementation{
-		UUID:                    uuid.NewString(),
-		Source:                  "https://assurance.ckodex.io/catalogs/canonical-v1",
-		Description:             "Realized continuous security controls",
-		ImplementedRequirements: make([]OscalImplementedRequirement, 0, len(evaluations)),
-	}
-
-	for _, eval := range evaluations {
-		ctrlID := eval.Control.ID
-		if ctrlID == "" {
-			ctrlID = strings.ReplaceAll(eval.Control.Canonical(), ":", "_")
+	cd.Metadata = metadata("OSKAL Component Definition: " + componentName)
+	comp := OscalDefinedComponent{UUID: uuid.NewString(), Type: c.Type, Title: componentName, Description: c.Description, Purpose: c.Purpose}
+	if len(evaluations) > 0 {
+		if err := requireUniqueControls(dt, evaluations); err != nil {
+			return nil, err
 		}
-		req := OscalImplementedRequirement{
-			UUID:        uuid.NewString(),
-			ControlID:   ctrlID,
-			Description: fmt.Sprintf("Evaluated state: %s with evidence root %s", eval.State, eval.EvidenceRoot),
-			Props: []Property{
-				{Name: "assurance-state", Value: eval.State.String(), Ns: "https://assurance.ckodex.io/ns"},
-				{Name: "epoch-composite", Value: eval.Epoch.CompositeDigest(), Ns: "https://assurance.ckodex.io/ns"},
-			},
+		if _, err := p.evaluations(dt, nil, evaluations); err != nil {
+			return nil, err
 		}
-		controlImpl.ImplementedRequirements = append(controlImpl.ImplementedRequirements, req)
+		if err := requireHref(dt, "control_source", p.context.ControlSource); err != nil {
+			return nil, err
+		}
+		impl := OscalControlImplementation{UUID: uuid.NewString(), Source: p.context.ControlSource, Description: "Caller-supplied implementation narratives with source evaluation states."}
+		for _, e := range evaluations {
+			description := c.Implementations[e.Control.Canonical()]
+			if err := requireText(dt, "component.implementations["+e.Control.Canonical()+"]", description); err != nil {
+				return nil, err
+			}
+			impl.ImplementedRequirements = append(impl.ImplementedRequirements, OscalImplementedRequirement{UUID: uuid.NewString(), ControlID: e.Control.ID, Description: description, Props: properties(e)})
+		}
+		comp.ControlImplementations = []OscalControlImplementation{impl}
 	}
-
-	if len(controlImpl.ImplementedRequirements) == 0 {
-		controlImpl.ImplementedRequirements = append(controlImpl.ImplementedRequirements, OscalImplementedRequirement{
-			UUID:        uuid.NewString(),
-			ControlID:   "AC-6",
-			Description: "Evaluated state: UNKNOWN with evidence root none",
-			Props: []Property{
-				{Name: "assurance-state", Value: assurance.AssuranceStateUnknown.String(), Ns: "https://assurance.ckodex.io/ns"},
-			},
-		})
-	}
-
-	comp.ControlImplementations = append(comp.ControlImplementations, controlImpl)
-	cd.DefinedComponents = append(cd.DefinedComponents, comp)
-
-	return json.MarshalIndent(wrapper, "", "  ")
+	cd.DefinedComponents = []OscalDefinedComponent{comp}
+	return marshalProjection(ctx, dt, wrapper)
 }
 
-// ProjectSSP builds an OSCAL v1.2.3 System Security Plan projection.
-func (p *Projector) ProjectSSP(
-	ctx context.Context,
-	systemName string,
-	evaluations []assurance.ClaimEvaluation,
-) ([]byte, error) {
-	now := time.Now().UTC()
-
+// ProjectSSP requires caller-supplied system facts; evaluation state is not operational status.
+func (p *Projector) ProjectSSP(ctx context.Context, systemName string, evaluations []assurance.ClaimEvaluation) ([]byte, error) {
+	dt := DocTypeSSP
+	s := p.context.System
+	if s == nil {
+		return nil, inputError(dt, "system", "provide actual profile reference, system characteristics, components, and implementation narratives")
+	}
+	if err := requireHref(dt, "system.profile_href", s.ProfileHref); err != nil {
+		return nil, err
+	}
+	if s.Characteristics.SystemName != systemName {
+		return nil, inputError(dt, "system.characteristics.system-name", "must match the requested system name")
+	}
+	if err := requireText(dt, "system.characteristics.description", s.Characteristics.Description); err != nil {
+		return nil, err
+	}
+	if err := requireText(dt, "system.characteristics.authorization-boundary.description", s.Characteristics.AuthorizationBoundary.Description); err != nil {
+		return nil, err
+	}
+	if err := validateStatus(dt, s.Characteristics.Status, true); err != nil {
+		return nil, err
+	}
+	for _, c := range s.Implementation.Components {
+		if err := validateStatus(dt, c.Status, false); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := p.evaluations(dt, nil, evaluations); err != nil {
+		return nil, err
+	}
+	if err := requireUniqueControls(dt, evaluations); err != nil {
+		return nil, err
+	}
+	if err := requireText(dt, "system.control_implementation_description", s.ControlImplementationDescription); err != nil {
+		return nil, err
+	}
 	wrapper := SSPWrapper{}
 	ssp := &wrapper.SystemSecurityPlan
 	ssp.UUID = uuid.NewString()
-	ssp.Metadata = OscalMetadata{
-		Title:        fmt.Sprintf("System Security Plan for %s", systemName),
-		Published:    now,
-		LastModified: now,
-		Version:      "1.0.0",
-		OscalVersion: "1.2.3",
-	}
-
-	ssp.ImportProfile = ImportProfile{
-		Href: "profiles/nist-sp-800-53-rev5.json",
-	}
-
-	ssp.SystemCharacteristics = OscalSystemCharacteristics{
-		SystemIDs:   []OscalSystemID{{ID: systemName}},
-		SystemName:  systemName,
-		Description: fmt.Sprintf("System Security Plan for %s governed under CKODEX continuous assurance", systemName),
-		SystemInformation: OscalSystemInformation{
-			InformationTypes: []OscalInformationType{
-				{
-					Title:       "Operational Telemetry and State",
-					Description: "Continuous security control and admission telemetry",
-				},
-			},
-		},
-		Status: OscalStatus{State: "operational"},
-		AuthorizationBoundary: OscalAuthorizationBoundary{
-			Description: "Cloud-native workload boundaries enforced via Kubernetes namespace and network security policies",
-		},
-	}
-
-	ssp.SystemImplementation = OscalSystemImplementation{
-		Components: []OscalSSPComponent{
-			{
-				UUID:        uuid.NewString(),
-				Type:        "this-system",
-				Title:       systemName,
-				Description: fmt.Sprintf("Primary implementation component for %s", systemName),
-				Status:      OscalStatus{State: "operational"},
-			},
-		},
-	}
-
-	ssp.ControlImplementation.Description = "Continuously assured via OSKAL runtime"
-	ssp.ControlImplementation.ImplementedRequirements = make([]OscalSSPImplementedRequirement, 0, len(evaluations))
-	for _, eval := range evaluations {
-		props := []Property{
-			{Name: "state", Value: eval.State.String(), Ns: "https://assurance.ckodex.io/ns"},
+	ssp.Metadata = metadata("System Security Plan for " + systemName)
+	ssp.ImportProfile = ImportProfile{Href: s.ProfileHref}
+	ssp.SystemCharacteristics = s.Characteristics
+	ssp.SystemImplementation = s.Implementation
+	ssp.ControlImplementation.Description = s.ControlImplementationDescription
+	for _, e := range evaluations {
+		description := s.Implementations[e.Control.Canonical()]
+		if err := requireText(dt, "system.implementations["+e.Control.Canonical()+"]", description); err != nil {
+			return nil, err
 		}
-		if eval.EvidenceRoot != "" {
-			props = append(props, Property{Name: "evidence-root", Value: eval.EvidenceRoot, Ns: "https://assurance.ckodex.io/ns"})
-		}
-		ssp.ControlImplementation.ImplementedRequirements = append(
-			ssp.ControlImplementation.ImplementedRequirements,
-			OscalSSPImplementedRequirement{
-				UUID:      uuid.NewString(),
-				ControlID: eval.Control.ID,
-				Remarks:   fmt.Sprintf("Continuous State: %s", eval.State),
-				Props:     props,
-			},
-		)
+		ssp.ControlImplementation.ImplementedRequirements = append(ssp.ControlImplementation.ImplementedRequirements, OscalSSPImplementedRequirement{UUID: uuid.NewString(), ControlID: e.Control.ID, Remarks: description, Props: properties(e)})
 	}
-	if len(ssp.ControlImplementation.ImplementedRequirements) == 0 {
-		ssp.ControlImplementation.ImplementedRequirements = append(
-			ssp.ControlImplementation.ImplementedRequirements,
-			OscalSSPImplementedRequirement{
-				UUID:      uuid.NewString(),
-				ControlID: "AC-6",
-				Remarks:   "Continuous State: UNKNOWN",
-				Props: []Property{
-					{Name: "state", Value: assurance.AssuranceStateUnknown.String(), Ns: "https://assurance.ckodex.io/ns"},
-				},
-			},
-		)
-	}
-
-	return json.MarshalIndent(wrapper, "", "  ")
+	return marshalProjection(ctx, dt, wrapper)
 }
 
-// ProjectAssessmentPlan builds an OSCAL v1.2.3 Assessment Plan projection (Section 45).
-func (p *Projector) ProjectAssessmentPlan(
-	ctx context.Context,
-	subject assurance.SubjectRef,
-	contract assurance.EvidenceContract,
-	controls []assurance.ControlRef,
-) ([]byte, error) {
-	now := time.Now().UTC()
+func validateStatus(dt DocumentType, s OscalStatus, system bool) error {
+	switch s.State {
+	case "operational", "under-development", "disposition":
+		return nil
+	case "under-major-modification":
+		if system {
+			return nil
+		}
+	case "other":
+		return requireText(dt, "status.remarks", s.Remarks)
+	}
+	return inputError(dt, "status.state", "provide an OSCAL operational status; unknown status must use other with explanatory remarks")
+}
 
+// ProjectAssessmentPlan selects only supplied controls and tasks from the supplied contract.
+func (p *Projector) ProjectAssessmentPlan(ctx context.Context, subject assurance.SubjectRef, contract assurance.EvidenceContract, controls []assurance.ControlRef) ([]byte, error) {
+	dt := DocTypeAssessmentPlan
+	if err := subject.Validate(); err != nil {
+		return nil, inputError(dt, "subject", err.Error())
+	}
+	if err := requireHref(dt, "system_security_plan_href", p.context.SystemSecurityPlanHref); err != nil {
+		return nil, err
+	}
+	reviewed, err := p.controls(dt, controls)
+	if err != nil {
+		return nil, err
+	}
 	wrapper := AssessmentPlanWrapper{}
 	ap := &wrapper.AssessmentPlan
 	ap.UUID = uuid.NewString()
-	ap.Metadata = OscalMetadata{
-		Title:        fmt.Sprintf("Continuous Assessment Plan for %s", subject.URI()),
-		Published:    now,
-		LastModified: now,
-		Version:      "1.0.0",
-		OscalVersion: "1.2.3",
+	ap.Metadata = metadata("Assessment Plan for " + subject.URI())
+	ap.Metadata.Props = []Property{{Name: "subject-uri", Value: subject.URI(), Ns: "https://assurance.ckodex.io/ns"}}
+	if contract.ID != "" {
+		ap.Metadata.Props = append(ap.Metadata.Props, Property{Name: "evidence-contract-id", Value: contract.ID, Ns: "https://assurance.ckodex.io/ns"})
 	}
-
-	ap.ImportSSP = ImportSSP{
-		Href: "system-security-plan.json",
-	}
-
-	ap.ReviewedControls = OscalReviewedControls{
-		ControlSelections: []OscalControlSelection{
-			{
-				Description: "Continuous assessment controls",
-				IncludeAll:  &struct{}{},
-			},
-		},
-	}
-
-	ap.AssessmentSubjects = append(ap.AssessmentSubjects, OscalAssessmentSubject{
-		Type:        "component",
-		Description: fmt.Sprintf("Kubernetes workload %s", subject.URI()),
-		IncludeAll:  &struct{}{},
-	})
-
-	ap.Tasks = make([]OscalAssessmentActivity, 0, len(contract.Requirements))
+	ap.ImportSSP = ImportSSP{Href: p.context.SystemSecurityPlanHref}
+	ap.ReviewedControls = reviewed
 	for _, req := range contract.Requirements {
-		ap.Tasks = append(ap.Tasks, OscalAssessmentActivity{
-			UUID:        uuid.NewString(),
-			Type:        "action",
-			Title:       fmt.Sprintf("Evidence Verification: %s", req.EvidenceType),
-			Description: fmt.Sprintf("Evaluated against accepted producers with max age %s", req.MaxAge),
-		})
+		if err := requireText(dt, "contract.requirements.evidenceType", req.EvidenceType); err != nil {
+			return nil, err
+		}
+		ap.Tasks = append(ap.Tasks, OscalAssessmentActivity{UUID: uuid.NewString(), Type: "action", Title: "Evidence evaluation: " + req.EvidenceType, Description: fmt.Sprintf("Contract requirement %s: evidence type %s; required=%t; max age=%s; accepted producers=%v. This is a planned task, not evidence of execution.", req.ID, req.EvidenceType, req.Required, req.MaxAge, req.AcceptedProducers)})
 	}
-	if len(ap.Tasks) == 0 {
-		ap.Tasks = append(ap.Tasks, OscalAssessmentActivity{
-			UUID:        uuid.NewString(),
-			Type:        "action",
-			Title:       "Evidence Verification: admission",
-			Description: "Continuous automated verification of workload admission and runtime evidence",
-		})
-	}
-
-	return json.MarshalIndent(wrapper, "", "  ")
+	return marshalProjection(ctx, dt, wrapper)
 }
 
-// ProjectPOAM builds an OSCAL v1.2.3 Plan of Action and Milestones projection (Section 47).
-func (p *Projector) ProjectPOAM(
-	ctx context.Context,
-	subject assurance.SubjectRef,
-	findings []assurance.Finding,
-) ([]byte, error) {
-	now := time.Now().UTC()
-
+// ProjectPOAM projects supplied remediation findings. An empty finding set cannot prove conformance.
+func (p *Projector) ProjectPOAM(ctx context.Context, subject assurance.SubjectRef, findings []assurance.Finding) ([]byte, error) {
+	dt := DocTypePOAM
+	if err := subject.Validate(); err != nil {
+		return nil, inputError(dt, "subject", err.Error())
+	}
+	if len(findings) == 0 {
+		return nil, inputError(dt, "findings", "OSCAL 1.2.3 requires at least one POA&M item; no supplied remediation findings does not establish control satisfaction")
+	}
 	wrapper := POAMWrapper{}
 	poam := &wrapper.PlanOfActionAndMilestones
 	poam.UUID = uuid.NewString()
-	poam.Metadata = OscalMetadata{
-		Title:        fmt.Sprintf("Plan of Action and Milestones for %s", subject.URI()),
-		Published:    now,
-		LastModified: now,
-		Version:      "1.0.0",
-		OscalVersion: "1.2.3",
-	}
-
-	poam.SystemID = &POAMSystemID{
-		ID: subject.URI(),
-	}
-
+	poam.Metadata = metadata("Plan of Action and Milestones for " + subject.URI())
+	poam.SystemID = &POAMSystemID{ID: subject.URI()}
 	for _, f := range findings {
-		item := OscalPOAMItem{
-			UUID:        uuid.NewString(),
-			Title:       f.Title,
-			Description: f.Description,
-			Props: []Property{
-				{Name: "control-id", Value: f.Control.Canonical(), Ns: "https://assurance.ckodex.io/ns"},
-				{Name: "severity", Value: f.Severity, Ns: "https://assurance.ckodex.io/ns"},
-				{Name: "discovered-at", Value: f.DiscoveredAt.Format(time.RFC3339), Ns: "https://assurance.ckodex.io/ns"},
-			},
+		if f.Subject.URI() != subject.URI() {
+			return nil, inputError(dt, "findings.subject", "finding belongs to a different subject")
 		}
-		poam.POAMItems = append(poam.POAMItems, item)
-	}
-
-	if len(poam.POAMItems) == 0 {
-		poam.POAMItems = []OscalPOAMItem{
-			{
-				UUID:        uuid.NewString(),
-				Title:       fmt.Sprintf("Continuous Assurance Conformance for %s", subject.URI()),
-				Description: "All monitored controls are currently satisfied. Zero open findings or remediation actions required.",
-				Props: []Property{
-					{Name: "status", Value: "satisfied", Ns: "https://assurance.ckodex.io/ns"},
-				},
-			},
+		if err := f.Control.Validate(); err != nil {
+			return nil, inputError(dt, "findings.control", err.Error())
 		}
+		props := []Property{{Name: "source-finding-id", Value: f.ID, Ns: "https://assurance.ckodex.io/ns"}, {Name: "control-ref", Value: f.Control.Canonical(), Ns: "https://assurance.ckodex.io/ns"}}
+		if f.Severity != "" {
+			props = append(props, Property{Name: "severity", Value: f.Severity, Ns: "https://assurance.ckodex.io/ns"})
+		}
+		if !f.DiscoveredAt.IsZero() {
+			props = append(props, Property{Name: "discovered-at", Value: f.DiscoveredAt.Format(time.RFC3339Nano), Ns: "https://assurance.ckodex.io/ns"})
+		}
+		poam.POAMItems = append(poam.POAMItems, OscalPOAMItem{UUID: uuid.NewString(), Title: f.Title, Description: f.Description, Props: props})
 	}
-
-	return json.MarshalIndent(wrapper, "", "  ")
+	return marshalProjection(ctx, dt, wrapper)
 }

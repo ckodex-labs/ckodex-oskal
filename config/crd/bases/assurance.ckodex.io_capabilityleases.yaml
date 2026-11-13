@@ -39,17 +39,30 @@ spec:
             type: object
           spec:
             description: CapabilityLeaseSpec defines the desired execution bounds and privileges for an AI workcell.
+            x-kubernetes-validations:
+            - rule: self == oldSelf
+              message: Lease grants are immutable; create a new lease for changed authority.
             properties:
               allowedCapabilities:
                 items:
                   type: string
+                  minLength: 1
+                  maxLength: 128
                 type: array
+                minItems: 1
+                maxItems: 128
               maxTurns:
                 type: integer
+                minimum: 1
+                maximum: 128
               principal:
                 type: string
+                minLength: 1
+                maxLength: 512
               scope:
                 type: string
+                minLength: 1
+                maxLength: 2048
               ttl:
                 type: string
             required:
@@ -92,6 +105,91 @@ spec:
               issuedAt:
                 type: string
                 format: date-time
+              lastAdmissionHash:
+                type: string
+              lastExecutionHash:
+                type: string
+              pendingExecution:
+                type: object
+                properties:
+                  leaseNamespace:
+                    type: string
+                  leaseName:
+                    type: string
+                  leaseUID:
+                    type: string
+                  leaseGeneration:
+                    type: integer
+                  principal:
+                    type: string
+                  resource:
+                    type: string
+                  capability:
+                    type: string
+                  requestId:
+                    type: string
+                  payloadDigest:
+                    type: string
+                  turn:
+                    type: integer
+                  previousHash:
+                    type: string
+                  hash:
+                    type: string
+                  admittedAt:
+                    type: string
+                    format: date-time
+                  expiresAt:
+                    type: string
+                    format: date-time
+              executionHistory:
+                type: array
+                maxItems: 128
+                items:
+                  type: object
+                  properties:
+                    admission:
+                      type: object
+                      properties:
+                        leaseNamespace:
+                          type: string
+                        leaseName:
+                          type: string
+                        leaseUID:
+                          type: string
+                        leaseGeneration:
+                          type: integer
+                        principal:
+                          type: string
+                        resource:
+                          type: string
+                        capability:
+                          type: string
+                        requestId:
+                          type: string
+                        payloadDigest:
+                          type: string
+                        turn:
+                          type: integer
+                        previousHash:
+                          type: string
+                        hash:
+                          type: string
+                        admittedAt:
+                          type: string
+                          format: date-time
+                        expiresAt:
+                          type: string
+                          format: date-time
+                    resultDigest:
+                      type: string
+                    completedAt:
+                      type: string
+                      format: date-time
+                    previousHash:
+                      type: string
+                    hash:
+                      type: string
               lastReceiptHash:
                 type: string
               observedGeneration:
