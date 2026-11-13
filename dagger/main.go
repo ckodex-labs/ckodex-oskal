@@ -100,14 +100,15 @@ func (m *Oskal) Build(ctx context.Context, source *dagger.Directory) (*dagger.Di
 		WithMountedCache("/root/.cache/go-build", goCache).
 		WithMountedCache("/go/pkg/mod", modCache).
 		WithEnvVariable("CGO_ENABLED", "0").
-		WithExec([]string{"go", "build", "-trimpath", "-ldflags=-s -w -X main.version=v1.0.0", "-o", "/out/bin/oskal", "./cmd/oskal"}).
-		WithExec([]string{"go", "build", "-trimpath", "-ldflags=-s -w -X main.version=v1.0.0", "-o", "/out/bin/oskal-controller", "./cmd/oskal-controller"}).
+		WithExec([]string{"go", "build", "-trimpath", "-ldflags=-s -w -X main.version=v1.0.1", "-o", "/out/bin/oskal", "./cmd/oskal"}).
+		WithExec([]string{"go", "build", "-trimpath", "-ldflags=-s -w -X main.version=v1.0.1", "-o", "/out/bin/oskal-controller", "./cmd/oskal-controller"}).
 		WithExec([]string{"sh", "-c", "cd /out/bin && sha256sum * > SHA256SUMS"})
 
 	return builder.Directory("/out/bin"), nil
 }
 
-// Attest generates SLSA provenance, in-toto statement, and Cosign signatures for compiled artifacts.
+// Attest signs local build records with an ephemeral key. The included key is
+// not an external identity anchor; release.yml supplies release provenance.
 func (m *Oskal) Attest(ctx context.Context, source *dagger.Directory) (*dagger.Directory, error) {
 	binDir, err := m.Build(ctx, source)
 	if err != nil {
@@ -178,7 +179,8 @@ func (m *Oskal) Evidence(ctx context.Context, source *dagger.Directory) (*dagger
 	evidenceDir := dag.Directory().
 		WithDirectory("bin", binDir).
 		WithFile("sbom.cdx.json", sbomFile).
-		WithDirectory("attestations", attestDir)
+		WithDirectory("attestations", attestDir).
+		WithNewFile("VERIFICATION-SCOPE.txt", "This bundle records a local Dagger build.\nThe included public key was created during this build and is not an external identity anchor. Its signatures establish internal byte consistency only.\nThe bundle does not authenticate a source revision or builder identity and does not establish a SLSA level.\nUse the GitHub OIDC signatures and provenance from release.yml for release verification.\n")
 
 	return evidenceDir, nil
 }
