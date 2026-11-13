@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
-	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/spf13/cobra"
 	"sigs.k8s.io/yaml"
 )
@@ -64,7 +63,7 @@ func newRecordCommand() *cobra.Command {
 		hash := assurance.ComputeDigest(raw)
 		subject := assurance.SubjectRef{Scheme: "k8s", ID: declaredNamespace + "/" + object.Kind + "/" + object.Metadata.Name, Attributes: map[string]string{"identity-source": "untrusted-manifest-declaration", "source-file": absolute}}
 		material := assurance.EvidenceEnvelope{Schema: "assurance.ckodex.io/material/v1", ID: "manifest-" + strings.TrimPrefix(hash, "sha256:"), Subject: subject, ObservationType: "manifest.observed", CapturedAt: time.Now().UTC(), Artifact: assurance.EvidenceRef{URI: "cas://sha256/" + strings.TrimPrefix(hash, "sha256:"), Digest: hash, MediaType: "application/yaml"}, IntegrityDigest: hash}
-		repository, err := storage.NewFilesystemEvidenceRepository(evidenceDir)
+		repository, err := newCLIArchive(evidenceDir)
 		if err != nil {
 			return err
 		}

@@ -21,7 +21,6 @@ import (
 
 	assurancev1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
-	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/binding"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/evaluation"
 	"github.com/ckodex-labs/ckodex-oskal/internal/verifier"
@@ -119,7 +118,7 @@ func evaluateBinding(ctx context.Context, o bindingEvaluationOptions) (binding.C
 	if err != nil {
 		return current, nil, err
 	}
-	archive, err := storage.OpenFilesystemEvidenceRepository(evidenceDir)
+	archive, err := openCLIArchive(evidenceDir)
 	if err != nil {
 		return current, nil, err
 	}

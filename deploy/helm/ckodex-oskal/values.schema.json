@@ -14,6 +14,13 @@
         "publicCAConfigMaps": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"}}
       }
     },
+    "archiveLimits": {
+      "type": "object", "additionalProperties": false, "required": ["maxBytes", "maxEntries"],
+      "properties": {
+        "maxBytes": {"type": "integer", "minimum": 1, "maximum": 1099511627776},
+        "maxEntries": {"type": "integer", "minimum": 1, "maximum": 1000000}
+      }
+    },
     "webhook": {"type": "object", "properties": {"enabled": {"type": "boolean"}}},
     "policyCapture": {
       "type": "object",

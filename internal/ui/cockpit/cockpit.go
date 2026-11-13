@@ -36,8 +36,10 @@ type CockpitConfig struct {
 	RefreshInterval time.Duration
 	Once            bool
 	EvidenceDir     string
-	SubjectFilter   string
-	Writer          io.Writer
+	// A zero ArchiveLimits value selects conservative storage defaults.
+	ArchiveLimits storage.ArchiveLimits
+	SubjectFilter string
+	Writer        io.Writer
 }
 
 // Cockpit renders an interactive live ASCII terminal dashboard.
@@ -47,6 +49,9 @@ type Cockpit struct {
 
 // NewCockpit creates a new Cockpit instance.
 func NewCockpit(cfg CockpitConfig) *Cockpit {
+	if cfg.ArchiveLimits == (storage.ArchiveLimits{}) {
+		cfg.ArchiveLimits = storage.DefaultArchiveLimits()
+	}
 	if cfg.RefreshInterval <= 0 {
 		cfg.RefreshInterval = 2 * time.Second
 	}
@@ -58,6 +63,9 @@ func NewCockpit(cfg CockpitConfig) *Cockpit {
 
 // Run executes the cockpit rendering loop.
 func (c *Cockpit) Run(ctx context.Context) error {
+	if err := c.cfg.ArchiveLimits.Validate(); err != nil {
+		return err
+	}
 	if c.cfg.Once {
 		return c.renderSnapshot(ctx)
 	}
@@ -173,7 +181,7 @@ func (c *Cockpit) gatherWorkloads(ctx context.Context) ([]WorkloadStatusSummary,
 		bySubject[selected.URI()] = 0
 	}
 	if dir != "" {
-		repo, err := storage.OpenFilesystemEvidenceRepository(dir)
+		repo, err := storage.OpenFilesystemEvidenceRepositoryWithLimits(dir, c.cfg.ArchiveLimits)
 		if err != nil {
 			return nil, fmt.Errorf("open cockpit archive: %w", err)
 		}

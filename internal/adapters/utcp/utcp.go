@@ -506,7 +506,7 @@ func BuildOSKALManual(opts ManualOptions) UTCPManual {
 		ManualVersion: ManualVersion,
 		Info: Info{
 			Title:       "CKODEX OSKAL Continuous Assurance UTCP Manual",
-			Version:     "v1.0.0",
+			Version:     "v1.0.1",
 			Description: "Universal Tool Calling Protocol (UTCP) manual for CKODEX OSKAL Continuous Kubernetes Assurance & NIST OSCAL v1.2.3 Runtime.",
 			Homepage:    "https://github.com/ckodex-labs/ckodex-oskal",
 		},
@@ -614,30 +614,40 @@ type ToolCallResult struct {
 
 // Registry manages registered UTCP manuals, providers, tool discovery, and governed tool execution.
 type Registry struct {
-	mu          sync.RWMutex
-	manuals     map[string]UTCPManual
-	providers   map[string]ProviderConfig
-	tools       map[string]Tool
-	owners      map[string]string
-	evidenceDir string
-	broker      ports.ExecutionBroker
-	validator   *proj.Validator
+	mu            sync.RWMutex
+	manuals       map[string]UTCPManual
+	providers     map[string]ProviderConfig
+	tools         map[string]Tool
+	owners        map[string]string
+	evidenceDir   string
+	archiveLimits storage.ArchiveLimits
+	broker        ports.ExecutionBroker
+	validator     *proj.Validator
 }
 
 // NewRegistry creates a UTCP Registry pre-populated with the built-in OSKAL UTCP manual.
 func NewRegistry(evidenceDir string, broker ports.ExecutionBroker) (*Registry, error) {
+	return NewRegistryWithLimits(evidenceDir, broker, storage.DefaultArchiveLimits())
+}
+
+// NewRegistryWithLimits applies one explicit budget to all local archive access.
+func NewRegistryWithLimits(evidenceDir string, broker ports.ExecutionBroker, limits storage.ArchiveLimits) (*Registry, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
 	val, err := proj.DefaultValidator()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize OSCAL validator for UTCP registry: %w", err)
 	}
 	r := &Registry{
-		manuals:     make(map[string]UTCPManual),
-		providers:   make(map[string]ProviderConfig),
-		tools:       make(map[string]Tool),
-		owners:      make(map[string]string),
-		evidenceDir: evidenceDir,
-		broker:      broker,
-		validator:   val,
+		manuals:       make(map[string]UTCPManual),
+		providers:     make(map[string]ProviderConfig),
+		tools:         make(map[string]Tool),
+		owners:        make(map[string]string),
+		evidenceDir:   evidenceDir,
+		archiveLimits: limits,
+		broker:        broker,
+		validator:     val,
 	}
 	defaultManual := BuildOSKALManual(DefaultManualOptions())
 	_ = r.registerManualInternal("oskal", defaultManual)
@@ -1353,7 +1363,7 @@ func (r *Registry) loadSubjectEnvelopes(ctx context.Context, sub assurance.Subje
 	if r.evidenceDir == "" {
 		return nil, nil
 	}
-	repo, err := storage.OpenFilesystemEvidenceRepository(r.evidenceDir)
+	repo, err := storage.OpenFilesystemEvidenceRepositoryWithLimits(r.evidenceDir, r.archiveLimits)
 	if err != nil {
 		return nil, err
 	}
@@ -1528,7 +1538,7 @@ func (r *Registry) executeNativeTool(ctx context.Context, tool Tool, args map[st
 		}
 		return json.RawMessage(projected), nil
 	case "run_doctor":
-		return diagnostics.RunDoctor(ctx, r.evidenceDir), nil
+		return diagnostics.RunDoctorWithLimits(ctx, r.evidenceDir, r.archiveLimits), nil
 
 	case "inspect_subject":
 		subRaw, _ := args["subject"].(string)

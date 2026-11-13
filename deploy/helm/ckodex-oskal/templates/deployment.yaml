@@ -61,6 +61,8 @@ spec:
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             - --health-probe-bind-address=:{{ .Values.probes.port }}
             - --evidence-dir={{ .Values.evidenceStorage.mountPath | default "/var/lib/oskal/evidence" }}
+            - --archive-max-bytes={{ .Values.archiveLimits.maxBytes | int64 }}
+            - --archive-max-entries={{ .Values.archiveLimits.maxEntries | int }}
             - --enable-webhook={{ .Values.webhook.enabled }}
             {{- if .Values.reconcileNamespace }}
             - --namespace={{ .Values.reconcileNamespace }}

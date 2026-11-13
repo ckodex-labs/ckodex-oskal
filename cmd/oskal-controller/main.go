@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -60,6 +61,7 @@ func main() {
 	var showVersion bool
 	var sourcesPath, workloadAPI, expectedSPIFFEID, managedNamespace string
 	var evaluationInterval, sourceWindow, clockAhead time.Duration
+	archiveLimits := storage.DefaultArchiveLimits()
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -73,6 +75,8 @@ func main() {
 	flag.StringVar(&webhookTLSCertFile, "webhook-tls-cert-file", "", "Path to TLS certificate file for the admission webhook.")
 	flag.StringVar(&webhookTLSKeyFile, "webhook-tls-key-file", "", "Path to TLS private key file for the admission webhook.")
 	flag.StringVar(&evidenceDir, "evidence-dir", "/tmp/oskal/evidence", "Path to local directory for content-addressed evidence storage.")
+	flag.Int64Var(&archiveLimits.MaxBytes, "archive-max-bytes", storage.DefaultArchiveBytes, "Maximum accounted archive bytes (1..1099511627776)")
+	flag.IntVar(&archiveLimits.MaxEntries, "archive-max-entries", storage.DefaultArchiveEntries, "Maximum accounted archive objects (1..1000000)")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
 
 	flag.StringVar(&sourcesPath, "sources", "", "Authenticated evidence source JSON configuration")
@@ -95,6 +99,10 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if err := archiveLimits.Validate(); err != nil {
+		setupLog.Error(err, "correct archive budgets before files or external effects")
+		os.Exit(1)
+	}
 
 	ctx := ctrl.SetupSignalHandler()
 	if evaluationInterval < 500*time.Millisecond || evaluationInterval > 5*time.Minute {
@@ -175,12 +183,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	evidenceRepo, err := openEvidenceRepository(evidenceDir)
+	evidenceRepo, err := openEvidenceRepositoryWithLimits(evidenceDir, archiveLimits)
 	if err != nil {
 		setupLog.Error(err, "cannot initialize durable evidence storage; inspect the path and permissions before restarting", "path", evidenceDir)
 		os.Exit(1)
 	}
-	setupLog.Info("Initialized durable content-addressed evidence repository", "path", evidenceDir)
+	setupLog.Info("Initialized durable content-addressed evidence repository", "path", evidenceDir, "archiveMaxBytes", archiveLimits.MaxBytes, "archiveMaxEntries", archiveLimits.MaxEntries)
 
 	receiptMgr, err := receipts.LoadOrCreateReceiptManager(producer, evidenceDir)
 	if err != nil {
@@ -279,20 +287,19 @@ func main() {
 
 	if enableWebhook {
 		whCfg := webhook.ServerConfig{
-			ListenAddr: fmt.Sprintf(":%d", webhookPort),
-			Mode:       webhook.WebhookMode(webhookMode),
-			ObserverAuth: assurance.AuthorityRef{
-				Scheme:  "k8s:admission-controller",
-				Subject: fmt.Sprintf("%s/%s", webhookNamespace, webhookServiceName),
-			},
-			EvidenceSink: func(env assurance.EvidenceEnvelope) {
-				sinkCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if _, putErr := evidenceRepo.Put(sinkCtx, env, nil); putErr != nil {
-					setupLog.Error(putErr, "failed to persist in-flight evidence envelope", "envelopeID", env.ID)
-				} else {
-					setupLog.Info("Persisted in-flight admission evidence envelope", "envelopeID", env.ID, "subject", env.Subject.URI())
+			ListenAddr:   fmt.Sprintf(":%d", webhookPort),
+			Mode:         webhook.WebhookMode(webhookMode),
+			ObserverAuth: producer,
+			EvidenceSink: func(ctx context.Context, envelope assurance.EvidenceEnvelope, payload []byte) error {
+				signed, err := signer.SignEvidence(ctx, envelope)
+				if err != nil {
+					return fmt.Errorf("sign admission capture: %w", err)
 				}
+				if _, err := evidenceRepo.Put(ctx, signed, bytes.NewReader(payload)); err != nil {
+					return fmt.Errorf("persist admission capture: %w", err)
+				}
+				setupLog.Info("Persisted admission request capture", "envelopeID", signed.ID, "subject", signed.Subject.URI())
+				return nil
 			},
 		}
 
@@ -338,10 +345,16 @@ func main() {
 }
 
 func openEvidenceRepository(path string) (ports.EvidenceRepository, error) {
+	return openEvidenceRepositoryWithLimits(path, storage.DefaultArchiveLimits())
+}
+func openEvidenceRepositoryWithLimits(path string, limits storage.ArchiveLimits) (ports.EvidenceRepository, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("--evidence-dir must name a durable writable directory")
 	}
-	repo, err := storage.NewFilesystemEvidenceRepository(path)
+	repo, err := storage.NewFilesystemEvidenceRepositoryWithLimits(path, limits)
 	if err != nil {
 		return nil, fmt.Errorf("open durable evidence store: %w", err)
 	}

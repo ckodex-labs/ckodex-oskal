@@ -83,7 +83,7 @@ func TestCLI_WebhookHelp(t *testing.T) {
 		t.Fatalf("unexpected error executing webhook --help: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "Start the Kubernetes Validating Admission Webhook") {
+	if !strings.Contains(out, "declared Pod settings") || strings.Contains(out, "attestation") {
 		t.Fatalf("unexpected webhook help output: %s", out)
 	}
 }
