@@ -88,8 +88,16 @@ func TestInspectSubjectFourTruthChannels(t *testing.T) {
 	}
 
 	// 2. Verify Channel 2: Execution
-	if len(report.Execution.Steps) < 5 {
-		t.Fatalf("expected at least 5 execution stages, got %d", len(report.Execution.Steps))
+	for _, step := range report.Execution.Steps {
+		if step.Stage == "HistoricalExecution" && step.Outcome != "UNKNOWN" {
+			t.Fatalf("invented historical execution: %+v", step)
+		}
+		if step.Stage == "ReceiptVerification" && step.Outcome != "UNKNOWN" {
+			t.Fatalf("invented receipt proof: %+v", step)
+		}
+	}
+	if report.Evidence.ReceiptVerification != StatusUnknown || report.Evidence.LineageVerification != StatusUnknown || report.Evidence.ProducerIdentityVerification != StatusUnknown || report.Evidence.MerkleValid || report.Evidence.LineageVerified {
+		t.Fatalf("invented cryptographic proof: %+v", report.Evidence)
 	}
 
 	// 3. Verify Channel 3: Decision

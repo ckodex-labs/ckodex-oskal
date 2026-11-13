@@ -19,9 +19,10 @@ import (
 type CheckStatus string
 
 const (
-	StatusPass CheckStatus = "PASS"
-	StatusWarn CheckStatus = "WARN"
-	StatusFail CheckStatus = "FAIL"
+	StatusPass    CheckStatus = "PASS"
+	StatusWarn    CheckStatus = "WARN"
+	StatusFail    CheckStatus = "FAIL"
+	StatusUnknown CheckStatus = "UNKNOWN"
 )
 
 // DiagnosticCheck represents a single preflight verification step.
@@ -71,12 +72,15 @@ func RunDoctor(ctx context.Context, evidenceDir string) *DoctorReport {
 	// Calculate overall disposition
 	hasFail := false
 	hasWarn := false
+	hasUnknown := false
 	for _, c := range report.Checks {
 		switch c.Status {
 		case StatusFail:
 			hasFail = true
 		case StatusWarn:
 			hasWarn = true
+		case StatusUnknown:
+			hasUnknown = true
 		}
 	}
 
@@ -84,6 +88,8 @@ func RunDoctor(ctx context.Context, evidenceDir string) *DoctorReport {
 		report.OverallState = StatusFail
 	} else if hasWarn {
 		report.OverallState = StatusWarn
+	} else if hasUnknown {
+		report.OverallState = StatusUnknown
 	} else {
 		report.OverallState = StatusPass
 	}
@@ -129,26 +135,7 @@ func checkOscalSchemas() DiagnosticCheck {
 	projector := oscal.NewProjector()
 	sub := assurance.SubjectRef{Scheme: "k8s", ID: "system/doctor-probe"}
 	now := time.Now().UTC()
-	eval := assurance.ClaimEvaluation{
-		ID:      "eval-probe",
-		Control: assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-		Subject: sub,
-		State:   assurance.AssuranceStateAssured,
-		Epoch: assurance.AssuranceEpoch{
-			SubjectDigest: assurance.ComputeStringDigest(sub.URI()),
-		},
-		Evidence: []assurance.EvidenceRef{
-			{
-				URI:       "file:///tmp/probe.json",
-				Digest:    assurance.ComputeStringDigest("probe"),
-				MediaType: "application/json",
-			},
-		},
-		Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 1},
-		EvidenceRoot: assurance.ComputeStringDigest("probe-root"),
-		EvaluatedAt:  now,
-		ValidUntil:   now.Add(5 * time.Minute),
-	}
+	eval := assurance.ClaimEvaluation{ID: "schema-probe", Subject: sub, Control: assurance.ControlRef{Namespace: "diagnostics", ID: "schema-validation"}, State: assurance.AssuranceStateUnknown, EvaluatedAt: now, ValidUntil: now.Add(time.Minute)}
 	testDoc, err := projector.ProjectAssessmentResults(context.Background(), sub, []assurance.ClaimEvaluation{eval}, nil)
 	if err != nil {
 		return DiagnosticCheck{
@@ -178,7 +165,7 @@ func checkOscalSchemas() DiagnosticCheck {
 		Target:   "Embedded JSON Schemas (AR, CD, SSP, AP, POAM)",
 		Status:   StatusPass,
 		Duration: formatDurationASCII(time.Since(start)),
-		Message:  "All 5 NIST OSCAL v1.2.3 JSON schemas compiled and verified (sub-millisecond ready)",
+		Message:  "All 5 embedded schemas compiled; an UNKNOWN assessment-results projection passed schema validation",
 	}
 }
 
@@ -265,7 +252,7 @@ func checkEvidenceStorage(ctx context.Context, dir string) DiagnosticCheck {
 	}
 }
 
-func checkSPIFFEWorkloadAPI(_ context.Context) DiagnosticCheck {
+func checkSPIFFEWorkloadAPI(ctx context.Context) DiagnosticCheck {
 	start := time.Now()
 	socketPath := os.Getenv("SPIFFE_ENDPOINT_SOCKET")
 	if socketPath == "" {
@@ -283,7 +270,8 @@ func checkSPIFFEWorkloadAPI(_ context.Context) DiagnosticCheck {
 		}
 	}
 
-	conn, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond)
+	dialer := net.Dialer{Timeout: 500 * time.Millisecond}
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		return DiagnosticCheck{
 			Name:        "SPIFFE / SPIRE Workload API",
@@ -299,9 +287,9 @@ func checkSPIFFEWorkloadAPI(_ context.Context) DiagnosticCheck {
 	return DiagnosticCheck{
 		Name:     "SPIFFE / SPIRE Workload API",
 		Target:   socketPath,
-		Status:   StatusPass,
+		Status:   StatusUnknown,
 		Duration: formatDurationASCII(time.Since(start)),
-		Message:  "Connected to SPIFFE Workload API socket",
+		Message:  "Unix socket accepted a connection; Workload API identity and trust bundle were not verified",
 	}
 }
 
@@ -312,9 +300,9 @@ func checkSigstoreInfrastructure(_ context.Context) DiagnosticCheck {
 		return DiagnosticCheck{
 			Name:     "Sigstore / Supply-Chain Attestation",
 			Target:   "TUF Root / Rekor / Fulcio",
-			Status:   StatusPass,
+			Status:   StatusUnknown,
 			Duration: formatDurationASCII(time.Since(start)),
-			Message:  "Public Sigstore trust root active (standard transparency logging)",
+			Message:  "No explicit Sigstore trust root configured; trust, Fulcio and transparency verification are UNKNOWN",
 		}
 	}
 
@@ -332,9 +320,9 @@ func checkSigstoreInfrastructure(_ context.Context) DiagnosticCheck {
 	return DiagnosticCheck{
 		Name:     "Sigstore / Supply-Chain Attestation",
 		Target:   fmt.Sprintf("Private TUF Root: %s", tufRoot),
-		Status:   StatusPass,
+		Status:   StatusUnknown,
 		Duration: formatDurationASCII(time.Since(start)),
-		Message:  "Private air-gapped TUF root configured and verified on disk",
+		Message:  "Configured TUF_ROOT path exists; root contents, signatures, expiry and trust were not verified",
 	}
 }
 
@@ -351,9 +339,9 @@ func checkKubernetesConnectivity(_ context.Context) DiagnosticCheck {
 		return DiagnosticCheck{
 			Name:     "Kubernetes Control Plane",
 			Target:   "In-Cluster ServiceAccount",
-			Status:   StatusPass,
+			Status:   StatusUnknown,
 			Duration: formatDurationASCII(time.Since(start)),
-			Message:  "Authenticated via in-cluster ServiceAccount token",
+			Message:  "In-cluster token file exists; API authentication and authorization were not tested",
 		}
 	}
 
@@ -384,8 +372,8 @@ func checkKubernetesConnectivity(_ context.Context) DiagnosticCheck {
 	return DiagnosticCheck{
 		Name:     "Kubernetes Control Plane",
 		Target:   kubeconfig,
-		Status:   StatusPass,
+		Status:   StatusUnknown,
 		Duration: formatDurationASCII(time.Since(start)),
-		Message:  fmt.Sprintf("Found valid kubeconfig at %s", kubeconfig),
+		Message:  fmt.Sprintf("Kubeconfig text found at %s; API connectivity, authentication and authorization were not tested", kubeconfig),
 	}
 }
