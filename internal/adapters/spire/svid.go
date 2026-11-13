@@ -9,8 +9,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"net/url"
+	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
@@ -18,47 +21,89 @@ import (
 
 // TrustBundle stores trusted X.509 root CA pools keyed by SPIFFE trust domain.
 type TrustBundle struct {
-	pools map[string]*x509.CertPool
+	mu    sync.RWMutex
+	roots map[spiffeid.TrustDomain]*x509bundle.Bundle
 }
 
 // NewTrustBundle creates an empty SPIFFE trust bundle.
 func NewTrustBundle() *TrustBundle {
 	return &TrustBundle{
-		pools: make(map[string]*x509.CertPool),
+		roots: make(map[spiffeid.TrustDomain]*x509bundle.Bundle),
 	}
 }
 
 // AddRootCA adds a PEM-encoded X.509 root certificate for a given trust domain.
 func (b *TrustBundle) AddRootCA(trustDomain string, certPEM []byte) error {
-	pool, exists := b.pools[trustDomain]
-	if !exists {
-		pool = x509.NewCertPool()
-		b.pools[trustDomain] = pool
-	}
-
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		// Try raw DER if not PEM
-		cert, err := x509.ParseCertificate(certPEM)
-		if err != nil {
-			return fmt.Errorf("failed to parse root CA for trust domain %s: %w", trustDomain, err)
-		}
-		pool.AddCert(cert)
-		return nil
-	}
-
-	cert, err := x509.ParseCertificate(block.Bytes)
+	domain, err := spiffeid.TrustDomainFromString(trustDomain)
 	if err != nil {
-		return fmt.Errorf("failed to parse PEM root certificate: %w", err)
+		return fmt.Errorf("invalid trust domain: %w", err)
 	}
-	pool.AddCert(cert)
+	var roots []*x509.Certificate
+	if block, _ := pem.Decode(certPEM); block == nil {
+		roots, err = x509.ParseCertificates(certPEM)
+	} else {
+		for len(certPEM) > 0 {
+			block, rest := pem.Decode(certPEM)
+			if block == nil || block.Type != "CERTIFICATE" {
+				return fmt.Errorf("invalid root certificate PEM")
+			}
+			cert, parseErr := x509.ParseCertificate(block.Bytes)
+			if parseErr != nil {
+				return fmt.Errorf("parse root certificate: %w", parseErr)
+			}
+			roots = append(roots, cert)
+			certPEM = rest
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("parse root certificates: %w", err)
+	}
+	if len(roots) == 0 {
+		return fmt.Errorf("root certificates are required")
+	}
+	for _, cert := range roots {
+		if !cert.IsCA || cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+			return fmt.Errorf("trust anchor must be a certificate authority")
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	existing := b.roots[domain]
+	if existing == nil {
+		existing = x509bundle.New(domain)
+		b.roots[domain] = existing
+	}
+	for _, cert := range roots {
+		existing.AddX509Authority(cert)
+	}
 	return nil
 }
 
-// GetCertPool returns the X.509 cert pool for a trust domain.
+// GetCertPool returns a snapshot of the configured domain roots.
 func (b *TrustBundle) GetCertPool(trustDomain string) (*x509.CertPool, bool) {
-	pool, ok := b.pools[trustDomain]
-	return pool, ok
+	domain, err := spiffeid.TrustDomainFromString(trustDomain)
+	if err != nil {
+		return nil, false
+	}
+	bundle, err := b.GetX509BundleForTrustDomain(domain)
+	if err != nil {
+		return nil, false
+	}
+	pool := x509.NewCertPool()
+	for _, cert := range bundle.X509Authorities() {
+		pool.AddCert(cert)
+	}
+	return pool, true
+}
+
+func (b *TrustBundle) GetX509BundleForTrustDomain(domain spiffeid.TrustDomain) (*x509bundle.Bundle, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	bundle := b.roots[domain]
+	if bundle == nil {
+		return nil, fmt.Errorf("no trusted roots for %s", domain)
+	}
+	return x509bundle.FromX509Authorities(domain, bundle.X509Authorities()), nil
 }
 
 // SVIDInfo contains extracted identity and cryptographic metadata from an X.509 SVID.
@@ -96,7 +141,7 @@ func NewSVIDValidator(bundle *TrustBundle, verifierAuth assurance.AuthorityRef) 
 	return &SVIDValidator{
 		bundle:             bundle,
 		verifierAuth:       verifierAuth,
-		clockSkewTolerance: 30 * time.Second,
+		clockSkewTolerance: 0,
 	}
 }
 
@@ -141,52 +186,25 @@ func (v *SVIDValidator) ValidateSVID(cert *x509.Certificate) (*SVIDInfo, error) 
 		return nil, fmt.Errorf("SVID is expired (notAfter: %s)", cert.NotAfter.UTC().Format(time.RFC3339))
 	}
 
-	// Extract SPIFFE ID from URI SANs
-	var spiffeURI *url.URL
-	for _, u := range cert.URIs {
-		if u.Scheme == "spiffe" {
-			spiffeURI = u
-			break
-		}
+	id, err := x509svid.IDFromCert(cert)
+	if err != nil {
+		return nil, fmt.Errorf("invalid X509-SVID identity: %w", err)
 	}
-
-	if spiffeURI == nil {
-		return nil, errors.New("certificate does not contain a SPIFFE ID in URI SAN")
+	if id.Path() == "" {
+		return nil, fmt.Errorf("workload SPIFFE ID must have a path")
 	}
-
-	spiffeID := spiffeURI.String()
-	trustDomain := spiffeURI.Host
-	if trustDomain == "" {
-		return nil, fmt.Errorf("invalid SPIFFE URI (missing trust domain): %s", spiffeID)
-	}
-
-	// Verify certificate chain against the trust domain's root CA pool
-	pool, ok := v.bundle.GetCertPool(trustDomain)
-	if !ok || pool == nil {
-		return nil, fmt.Errorf("untrusted SPIFFE trust domain (no root CA registered): %s", trustDomain)
-	}
-
 	verifyTime := currentTime
 	if verifyTime.Before(cert.NotBefore) {
-		verifyTime = cert.NotBefore.Add(time.Second)
+		verifyTime = cert.NotBefore
 	}
 	if verifyTime.After(cert.NotAfter) {
-		verifyTime = cert.NotAfter.Add(-time.Second)
+		verifyTime = cert.NotAfter
 	}
-
-	verifyOpts := x509.VerifyOptions{
-		Roots:       pool,
-		CurrentTime: verifyTime,
-		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+	if _, _, err := x509svid.Verify([]*x509.Certificate{cert}, v.bundle, x509svid.WithTime(verifyTime)); err != nil {
+		return nil, fmt.Errorf("X509-SVID chain verification: %w", err)
 	}
-
-	if _, err := cert.Verify(verifyOpts); err != nil {
-		// Also allow ExtKeyUsageAny if specified
-		verifyOpts.KeyUsages = nil
-		if _, errRetry := cert.Verify(verifyOpts); errRetry != nil {
-			return nil, fmt.Errorf("X.509 SVID chain verification failed: %w", errRetry)
-		}
-	}
+	spiffeID := id.String()
+	trustDomain := id.TrustDomain().String()
 
 	// Extract fingerprint and serial
 	fp := sha256.Sum256(cert.Raw)
@@ -204,7 +222,7 @@ func (v *SVIDValidator) ValidateSVID(cert *x509.Certificate) (*SVIDInfo, error) 
 	}
 
 	// Parse Kubernetes path segments if formatted as /ns/<namespace>/sa/<serviceaccount>
-	pathSegments := strings.Split(strings.Trim(spiffeURI.Path, "/"), "/")
+	pathSegments := strings.Split(strings.Trim(id.Path(), "/"), "/")
 	for i := 0; i < len(pathSegments)-1; i += 2 {
 		key := pathSegments[i]
 		val := pathSegments[i+1]

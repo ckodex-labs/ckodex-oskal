@@ -300,3 +300,28 @@ func TestSVIDValidator_ClockSkewTolerance(t *testing.T) {
 		t.Errorf("expected SVID to fail when exceeding clock skew tolerance, got nil")
 	}
 }
+
+func TestSVIDValidatorRejectsAmbiguousIdentity(t *testing.T) {
+	ca, key, pem := generateTestCA(t, "identity bounds")
+	bundle := NewTrustBundle()
+	if err := bundle.AddRootCA("prod", pem); err != nil {
+		t.Fatal(err)
+	}
+	v := NewSVIDValidator(bundle, assurance.AuthorityRef{})
+	cert := generateTestSVID(t, ca, key, "spiffe://prod/workload", time.Now().Add(-time.Minute), time.Now().Add(time.Minute))
+	extra, err := url.Parse("spiffe://prod/other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert.URIs = append(cert.URIs, extra)
+	if _, err := v.ValidateSVID(cert); err == nil {
+		t.Fatal("multiple URI identities accepted")
+	}
+}
+
+func TestAuthorityRejectsContradictoryTrustDomain(t *testing.T) {
+	resolver := NewSpireAuthorityResolver(nil)
+	if err := resolver.ValidateIdentity(assurance.AuthorityRef{Scheme: "spiffe", Subject: "prod/workload", TrustDomain: "foreign"}); err == nil {
+		t.Fatal("contradictory trust domain accepted")
+	}
+}

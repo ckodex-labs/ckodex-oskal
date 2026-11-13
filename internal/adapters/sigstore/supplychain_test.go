@@ -1,134 +1,150 @@
 package sigstore
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
+	"context"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"os"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
-func TestSigstoreSupplyChainVerificationAndContinuity(t *testing.T) {
-	verifier := NewSigstoreVerifier(nil)
-	now := time.Now()
+const releaseIssuer = "https://token.actions.githubusercontent.com"
+const releaseSigner = "https://github.com/ckodex-labs/ckodex-oskal/.github/workflows/release.yml@refs/heads/p1/release"
 
-	sub := assurance.SubjectRef{
-		Scheme: "k8s",
-		ID:     "payments/payments-api/Deployment/payments-api",
-		Attributes: map[string]string{
-			"namespace": "payments",
-			"name":      "payments-api",
-		},
-	}
-
-	artifact := ArtifactMetadata{
-		ImageURI:     "registry.example/payments/payments-api",
-		Digest:       "sha256:d8a57e3f2b4c10a112233445566778899aabbccddeeff0011223344556677889",
-		SignatureRef: "oci://registry.example/payments/payments-api:sha256-d8a57e.sig",
-		Signer:       "spiffe://prod/ns/ci/sa/dagger-builder",
-		SBOMDigest:   assurance.ComputeStringDigest("sbom-v1"),
-		SLSACommit:   "git-commit-abc1234",
-	}
-
-	epoch := assurance.AssuranceEpoch{
-		SubjectDigest: assurance.ComputeStringDigest("subject-01"),
-	}
-
-	// 1. Generate evidence envelopes
-	evidences, err := verifier.GenerateSupplyChainEvidence(sub, artifact, epoch, now)
+func fixture(t *testing.T, name string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/" + name)
 	if err != nil {
-		t.Fatalf("failed to generate supply chain evidence: %v", err)
+		t.Fatal(err)
 	}
-
-	if len(evidences) != 2 {
-		t.Fatalf("expected 2 evidence envelopes (signature + provenance), got %d", len(evidences))
-	}
-
-	// 2. Validate against EvidenceContract
-	contract := assurance.EvidenceContract{
-		ID:   "supply-chain-contract",
-		Name: "Sigstore Provenance Contract",
-		Requirements: []assurance.EvidenceRequirement{
-			{
-				ID:                "artifact-signature",
-				EvidenceType:      "supply-chain.signature",
-				Required:          true,
-				MaxAge:            24 * time.Hour,
-				AcceptedProducers: []string{"spiffe://prod/ns/ckodex-evidence/sa/sigstore-verifier"},
-			},
-			{
-				ID:                "artifact-provenance",
-				EvidenceType:      "supply-chain.provenance",
-				Required:          true,
-				MaxAge:            24 * time.Hour,
-				AcceptedProducers: []string{"spiffe://prod/ns/ckodex-evidence/sa/sigstore-verifier"},
-			},
-		},
-		OnMissingRequiredState: assurance.AssuranceStateUnknown,
-	}
-
-	res := contract.Evaluate(evidences, epoch, now)
-	if res.State != assurance.AssuranceStateVerified {
-		t.Fatalf("expected contract state VERIFIED, got %s (%s)", res.State, res.Completeness.Summary())
-	}
-
-	// 3. Milestone 7 Exit Criteria:
-	// Running Deployment traces to admitted signed artifact.
-	runningImageDigest := artifact.Digest
-	admittedImageDigest := artifact.Digest
-	signedImageDigest := artifact.Digest
-
-	ok, lineageDigest := VerifyArtifactContinuity(runningImageDigest, admittedImageDigest, signedImageDigest)
-	if !ok || lineageDigest == "" {
-		t.Fatalf("M7 Exit Failure: Running deployment failed to trace to admitted signed artifact")
-	}
-
-	// Check divergence detection (anti-substitution)
-	divergedRunning := assurance.ComputeStringDigest("tampered-digest")
-	okDiverged, msg := VerifyArtifactContinuity(divergedRunning, admittedImageDigest, signedImageDigest)
-	if okDiverged {
-		t.Fatalf("M7 Failure: Divergent running digest was accepted as continuous!")
-	}
-	t.Logf("Continuity check successfully blocked divergence: %s", msg)
+	return raw
 }
 
-func TestUntrustedSignerRejection(t *testing.T) {
-	verifier := NewSigstoreVerifier(nil)
-	untrustedArtifact := ArtifactMetadata{
-		ImageURI: "registry.example/evil",
-		Digest:   assurance.ComputeStringDigest("untrusted-image"),
-		Signer:   "attacker@evil.com",
-	}
-
-	_, err := verifier.GenerateSupplyChainEvidence(assurance.SubjectRef{}, untrustedArtifact, assurance.AssuranceEpoch{}, time.Now())
-	if err == nil {
-		t.Fatalf("expected error verifying artifact with untrusted signer")
-	}
-
-	// Test cryptographic Ed25519 signature verification when public key is pinned
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+func TestPublishedSigstoreBundles(t *testing.T) {
+	v, err := NewBundleVerifier(fixture(t, "trusted_root.json"), releaseIssuer, releaseSigner)
 	if err != nil {
-		t.Fatalf("failed to generate key: %v", err)
+		t.Fatal(err)
 	}
-	signer := "spiffe://prod/ns/ci/sa/dagger-builder"
-	verifier.RegisterTrustedPublicKey(signer, pub)
+	digest := sha256.Sum256(fixture(t, "checksums.txt"))
+	for _, tc := range []struct{ name, digest, predicate string }{
+		{"checksums", "sha256:" + hex.EncodeToString(digest[:]), ""},
+		{"provenance", "sha256:c2b0360be777cb99754b02f4c18a53686e7da98e387875d6f72735b85ae714a1", "https://slsa.dev/provenance/v1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := v.VerifyBundle(t.Context(), fixture(t, tc.name+".sigstore.json"), tc.digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.ArtifactDigest() != tc.digest || result.Signer() != releaseSigner || result.Issuer() != releaseIssuer || result.PredicateType() != tc.predicate {
+				t.Fatalf("incorrect verified facts: %+v", result)
+			}
+			envelope, err := result.Evidence(assurance.SubjectRef{Scheme: "artifact", ID: tc.digest}, assurance.AuthorityRef{Scheme: "spiffe", Subject: "prod/verifier"}, "file:///bundles/"+tc.name+".sigstore.json", assurance.AssuranceEpoch{})
+			if err != nil || envelope.IntegrityDigest == "" {
+				t.Fatalf("receipt: %v", err)
+			}
+			if tc.predicate == "" && envelope.ObservationType != "supply-chain.signature" {
+				t.Fatal("signature promoted to provenance")
+			}
+		})
+	}
+}
 
-	signedArt := ArtifactMetadata{
-		ImageURI: "registry.example/payments/payments-api",
-		Digest:   assurance.ComputeStringDigest("image-v1"),
-		Signer:   signer,
+func TestPublishedBundleRejectsInvalidTrustAndArtifact(t *testing.T) {
+	root := fixture(t, "trusted_root.json")
+	raw := fixture(t, "checksums.sigstore.json")
+	hash := sha256.Sum256(fixture(t, "checksums.txt"))
+	digest := "sha256:" + hex.EncodeToString(hash[:])
+	for _, tc := range []struct{ name, issuer, signer, digest string }{
+		{"wrong issuer", "https://attacker.invalid", releaseSigner, digest},
+		{"wrong identity", releaseIssuer, releaseSigner + "-wrong", digest},
+		{"wrong digest", releaseIssuer, releaseSigner, "sha256:" + strings.Repeat("0", 64)},
+		{"short digest", releaseIssuer, releaseSigner, "sha256:ab"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := NewBundleVerifier(root, tc.issuer, tc.signer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result, err := v.VerifyBundle(t.Context(), raw, tc.digest); err == nil || result != nil {
+				t.Fatal("invalid verification accepted")
+			}
+		})
 	}
-	// Without SignatureHex -> must fail when key is pinned
-	if ok, err := verifier.VerifyArtifact(signedArt); err == nil || ok {
-		t.Fatalf("expected missing signature error when public key is pinned")
+	v, err := NewBundleVerifier(root, releaseIssuer, releaseSigner)
+	if err != nil {
+		t.Fatal(err)
 	}
+	for _, change := range []string{"signature", "transparency", "certificate", "inclusion"} {
+		t.Run(change, func(t *testing.T) {
+			var doc map[string]any
+			if err := json.Unmarshal(raw, &doc); err != nil {
+				t.Fatal(err)
+			}
+			material := doc["verificationMaterial"].(map[string]any)
+			switch change {
+			case "signature":
+				doc["messageSignature"].(map[string]any)["signature"] = "AAAA"
+			case "transparency":
+				delete(material, "tlogEntries")
+			case "certificate":
+				delete(material, "certificate")
+				delete(material, "x509CertificateChain")
+			case "inclusion":
+				for _, entry := range material["tlogEntries"].([]any) {
+					delete(entry.(map[string]any), "inclusionProof")
+					delete(entry.(map[string]any), "inclusionPromise")
+				}
+			}
+			modified, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result, err := v.VerifyBundle(t.Context(), modified, digest); err == nil || result != nil {
+				t.Fatal("tampered bundle accepted")
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := v.VerifyBundle(ctx, raw, digest); err == nil {
+		t.Fatal("canceled request accepted")
+	}
+}
 
-	// With valid SignatureHex -> must succeed
-	sig := ed25519.Sign(priv, CanonicalSigningPayload(signedArt))
-	signedArt.SignatureHex = hex.EncodeToString(sig)
-	if ok, err := verifier.VerifyArtifact(signedArt); err != nil || !ok {
-		t.Fatalf("expected valid cryptographic signature to pass, got ok=%v, err=%v", ok, err)
+func TestMissingTrustConfigurationFails(t *testing.T) {
+	for _, pair := range [][2]string{{"", releaseSigner}, {releaseIssuer, ""}, {"*", releaseSigner}, {releaseIssuer, "*"}} {
+		if _, err := NewBundleVerifier(fixture(t, "trusted_root.json"), pair[0], pair[1]); err == nil {
+			t.Fatal("missing identity accepted")
+		}
+	}
+	if _, err := NewBundleVerifier(nil, releaseIssuer, releaseSigner); err == nil {
+		t.Fatal("missing root accepted")
+	}
+	var empty VerifiedBundle
+	if _, err := empty.Evidence(assurance.SubjectRef{}, assurance.AuthorityRef{}, "", assurance.AssuranceEpoch{}); err == nil {
+		t.Fatal("zero-value verification accepted")
+	}
+}
+
+func TestArtifactContinuity(t *testing.T) {
+	digest := assurance.ComputeStringDigest("artifact")
+	if ok, _ := VerifyArtifactContinuity(digest, digest, digest); !ok {
+		t.Fatal("matching digests rejected")
+	}
+	if ok, _ := VerifyArtifactContinuity(assurance.ComputeStringDigest("tampered"), digest, digest); ok {
+		t.Fatal("divergent digest accepted")
+	}
+	if ok, _ := VerifyArtifactContinuity("", digest, digest); ok {
+		t.Fatal("missing digest accepted")
+	}
+}
+
+func TestInvalidContinuityDigests(t *testing.T) {
+	if ok, _ := VerifyArtifactContinuity("sha256:aa", "sha256:aa", "sha256:aa"); ok {
+		t.Fatal("malformed matching digests accepted")
 	}
 }
