@@ -1,6 +1,9 @@
 # Default values for ckodex-oskal.
 
 replicaCount: 1
+# Empty preserves cluster-wide reconciliation. Set an explicit namespace to
+# bound OSKAL resource reconciliation independently of source observation scope.
+reconcileNamespace: ""
 
 image:
   repository: ghcr.io/ckodex-labs/oskal-controller
@@ -21,6 +24,7 @@ podLabels: {}
 
 podSecurityContext:
   runAsNonRoot: true
+  fsGroup: 65532
   seccompProfile:
     type: RuntimeDefault
 
@@ -84,6 +88,14 @@ evidenceStorage:
   mountPath: "/var/lib/oskal/evidence"
   sizeLimit: "1Gi"
 
+# Pre-created configuration and credentials, mounted read-only. The JSON file
+# names exact source endpoints, publisher identities, and mounted TLS paths.
+sources:
+  configMapName: ""
+  configMapKey: "sources.json"
+  tlsSecrets: []
+  publicCAConfigMaps: []
+
 persistence:
   enabled: false
   existingClaim: ""
@@ -95,6 +107,8 @@ persistence:
 
 # Grants for explicitly configured capture sources only. Empty lists grant none.
 policyCapture:
+  # Explicit ports matching opa.listen in the sources JSON; no default exposure.
+  opaListeners: []
   reportSources: []
   # - group: openreports.io
   #   resource: reports

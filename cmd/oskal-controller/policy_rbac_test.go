@@ -20,7 +20,7 @@ func TestPolicyRBACRendersOnlyExplicitResourceGrants(t *testing.T) {
 	}
 	render := func(args ...string) []byte {
 		t.Helper()
-		command := exec.CommandContext(t.Context(), helm, append([]string{"template", "policy-check", "../../deploy/helm/ckodex-oskal", "--namespace", "controller"}, args...)...)
+		command := exec.CommandContext(t.Context(), helm, append([]string{"template", "policy-check", "../../deploy/helm/ckodex-oskal", "--namespace", "controller", "--set", "webhook.enabled=false"}, args...)...)
 		output, err := command.CombinedOutput()
 		if err != nil {
 			t.Fatalf("actual helm rendering: %v %s", err, output)
@@ -84,7 +84,7 @@ func TestPolicyRBACRendersOnlyExplicitResourceGrants(t *testing.T) {
 	if len(seen) != 3 {
 		t.Fatalf("selected policy resources did not render all three grants: %+v", seen)
 	}
-	rejected := exec.CommandContext(t.Context(), helm, "template", "policy-check", "../../deploy/helm/ckodex-oskal", "--set", "policyCapture.gatekeeperResources[0]=*")
+	rejected := exec.CommandContext(t.Context(), helm, "template", "policy-check", "../../deploy/helm/ckodex-oskal", "--set", "webhook.enabled=false", "--set", "policyCapture.gatekeeperResources[0]=*")
 	if output, err := rejected.CombinedOutput(); err == nil || !bytes.Contains(output, []byte("Gatekeeper resources must be exact")) {
 		t.Fatalf("wildcard resource did not fail: %v %s", err, output)
 	}
