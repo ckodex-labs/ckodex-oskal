@@ -84,12 +84,13 @@ type mcpCallToolResult struct {
 
 // Server provides the Model Context Protocol stdio interface for OSKAL and the utcp-mcp bridge.
 type Server struct {
-	mu           sync.Mutex
-	in           io.Reader
-	out          io.Writer
-	evidenceDir  string
-	validator    *proj.Validator
-	utcpRegistry *utcp.Registry
+	mu            sync.Mutex
+	in            io.Reader
+	out           io.Writer
+	evidenceDir   string
+	archiveLimits storage.ArchiveLimits
+	validator     *proj.Validator
+	utcpRegistry  *utcp.Registry
 }
 
 // NewServer initializes an MCP Server instance with native UTCP bridge capabilities.
@@ -99,21 +100,30 @@ func NewServer(in io.Reader, out io.Writer, evidenceDir string) (*Server, error)
 
 // NewServerWithBroker initializes an MCP Server whose UTCP registry operations are governed by a durable execution broker.
 func NewServerWithBroker(in io.Reader, out io.Writer, evidenceDir string, broker ports.ExecutionBroker) (*Server, error) {
+	return NewServerWithLimits(in, out, evidenceDir, broker, storage.DefaultArchiveLimits())
+}
+
+// NewServerWithLimits shares an explicit archive budget with its native tools and UTCP bridge.
+func NewServerWithLimits(in io.Reader, out io.Writer, evidenceDir string, broker ports.ExecutionBroker, limits storage.ArchiveLimits) (*Server, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
 	val, err := proj.DefaultValidator()
 	if err != nil {
 		return nil, fmt.Errorf("failed to init validator for MCP: %w", err)
 	}
-	utcpReg, err := utcp.NewRegistry(evidenceDir, broker)
+	utcpReg, err := utcp.NewRegistryWithLimits(evidenceDir, broker, limits)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init UTCP registry for MCP: %w", err)
 	}
 
 	return &Server{
-		in:           in,
-		out:          out,
-		evidenceDir:  evidenceDir,
-		validator:    val,
-		utcpRegistry: utcpReg,
+		in:            in,
+		out:           out,
+		evidenceDir:   evidenceDir,
+		archiveLimits: limits,
+		validator:     val,
+		utcpRegistry:  utcpReg,
 	}, nil
 }
 
@@ -175,7 +185,7 @@ func (s *Server) handleRequest(ctx context.Context, req jsonRPCRequest) {
 			},
 			ServerInfo: mcpImplementation{
 				Name:    "oskal-mcp",
-				Version: "v1.0.0",
+				Version: "v1.0.1",
 			},
 		}
 		s.sendResult(req.ID, res)
@@ -579,7 +589,7 @@ func (s *Server) loadSubjectEnvelopes(ctx context.Context, sub assurance.Subject
 	if s.evidenceDir == "" {
 		return nil, nil
 	}
-	repo, err := storage.OpenFilesystemEvidenceRepository(s.evidenceDir)
+	repo, err := storage.OpenFilesystemEvidenceRepositoryWithLimits(s.evidenceDir, s.archiveLimits)
 	if err != nil {
 		return nil, err
 	}

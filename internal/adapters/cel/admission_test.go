@@ -1,92 +1,50 @@
 package cel
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 )
 
-func TestNativeCELAdmissionEvidenceSatisfiesContract(t *testing.T) {
-	observerID := assurance.AuthorityRef{
-		Scheme:      "spiffe",
-		Subject:     "prod/ns/ckodex-assurance/sa/cel-admission-observer",
-		TrustDomain: "prod",
+func TestSuppliedPolicyDigestBindsFullSpecAndIdentity(t *testing.T) {
+	raw := []byte(`{"metadata":{"name":"authored-definition","uid":"declared-uid","generation":1},"spec":{"failurePolicy":"Fail","validations":[{"expression":"true","message":"authored example only"}]}}`)
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
 	}
-
-	observer := NewAdmissionObserver(observerID)
-	policy := SampleRestrictedContainerPolicy()
-
-	sub := assurance.SubjectRef{
-		Scheme: "k8s",
-		ID:     "payments/payments-api/Deployment/payments-api",
-		Attributes: map[string]string{
-			"namespace": "payments",
-			"name":      "payments-api",
-		},
-	}
-
-	policyDigest := ComputePolicyDigest(policy)
-	if policyDigest == "" {
-		t.Fatalf("expected non-empty policy digest")
-	}
-
-	epoch := assurance.AssuranceEpoch{
-		SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:validating-admission-policy"),
-		PolicyDigest:         policyDigest,
-		AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/cel-admission"),
-		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
-	}
-
-	now := time.Now()
-
-	// Generate verified admission evidence envelope
-	envelope, err := observer.GenerateAdmissionEvidence(sub, policy, true, epoch, now)
+	actual, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("failed to generate admission evidence: %v", err)
+		t.Fatal(err)
 	}
-
-	if envelope.ObservationType != "kubernetes.admission" {
-		t.Fatalf("expected observation type kubernetes.admission, got %s", envelope.ObservationType)
+	var policy admissionregistrationv1.ValidatingAdmissionPolicy
+	if err := json.Unmarshal(actual, &policy); err != nil {
+		t.Fatal(err)
 	}
-
-	// Milestone 5 Exit Criteria:
-	// Native Kubernetes admission evidence can satisfy an EvidenceContract.
-	contract := assurance.EvidenceContract{
-		ID:   "admission-contract",
-		Name: "CEL Admission Verification",
-		Requirements: []assurance.EvidenceRequirement{
-			{
-				ID:                "admission-check",
-				EvidenceType:      "kubernetes.admission",
-				Required:          true,
-				MaxAge:            5 * time.Minute,
-				AcceptedProducers: []string{"spiffe://prod/ns/ckodex-assurance/sa/cel-admission-observer"},
-			},
-		},
-		OnMissingRequiredState: assurance.AssuranceStateUnknown,
+	first, err := ComputePolicyDigest(&policy)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	result := contract.Evaluate([]assurance.EvidenceEnvelope{envelope}, epoch, now)
-	if result.State != assurance.AssuranceStateVerified {
-		t.Fatalf("M5 Exit Failure: Expected admission evidence to satisfy contract with state VERIFIED, got %s (completeness: %s)",
-			result.State, result.Completeness.Summary())
+	repeated, err := ComputePolicyDigest(policy.DeepCopy())
+	if err != nil || repeated != first {
+		t.Fatal("same supplied definition changed digest")
 	}
-
-	if !result.Completeness.IsComplete() {
-		t.Fatalf("expected completeness to be complete: %s", result.Completeness.Summary())
+	altered := policy.DeepCopy()
+	ignore := admissionregistrationv1.Ignore
+	altered.Spec.FailurePolicy = &ignore
+	changed, err := ComputePolicyDigest(altered)
+	if err != nil || changed == first {
+		t.Fatal("failure policy was omitted from definition digest")
 	}
-}
-
-func TestDeniedAdmissionCannotGenerateEvidence(t *testing.T) {
-	observer := NewAdmissionObserver(assurance.AuthorityRef{})
-	policy := SampleRestrictedContainerPolicy()
-	sub := assurance.SubjectRef{Scheme: "k8s", ID: "payments/insecure-pod"}
-	epoch := assurance.AssuranceEpoch{}
-
-	_, err := observer.GenerateAdmissionEvidence(sub, policy, false, epoch, time.Now())
-	if err == nil {
-		t.Fatalf("expected error generating evidence for denied admission")
+	altered = policy.DeepCopy()
+	altered.UID = "different-declared-uid"
+	changed, err = ComputePolicyDigest(altered)
+	if err != nil || changed == first {
+		t.Fatal("policy identity was omitted")
+	}
+	if _, err := ComputePolicyDigest(nil); err == nil {
+		t.Fatal("missing policy acquired a digest")
 	}
 }

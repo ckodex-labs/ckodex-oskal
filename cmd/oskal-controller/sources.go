@@ -307,6 +307,9 @@ func (g *sourceGroup) follow(ctx context.Context, source preparedSource) {
 	}
 	failures := 0
 	for failures < 3 && ctx.Err() == nil {
+		if runtimeSourceOnHold(g.candidates, source.spec.ID) {
+			return
+		}
 		session, err := g.candidates.BeginSession(source.spec.ID)
 		if err != nil {
 			setupLog.Error(err, "cannot start evidence source", "source", source.spec.ID)
@@ -325,11 +328,13 @@ func (g *sourceGroup) follow(ctx context.Context, source preparedSource) {
 		}
 		windowEnded := errors.Is(streamCtx.Err(), context.DeadlineExceeded)
 		cancel()
-		reason := "source stream ended"
-		if err != nil {
-			reason = err.Error()
+		if finishRuntimeSession(session, err) || runtimeSourceOnHold(g.candidates, source.spec.ID) {
+			if connection != nil {
+				_ = connection.Close()
+			}
+			return
 		}
-		_ = session.End(reason)
+
 		// A responsive management API permits another observation window even
 		// when the workload is quiet. It never creates eligible workload evidence.
 		renew := false
@@ -436,4 +441,31 @@ func (g *sourceGroup) Snapshot() []sourceOperationalStatus {
 	}
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].ID < statuses[j].ID })
 	return statuses
+}
+
+// finishRuntimeSession preserves quota containment before ordinary stream end.
+// Capacity is terminal for this configured process; history remains archived.
+func finishRuntimeSession(session *collection.Session, err error) bool {
+	capacity := errors.Is(err, ports.ErrEvidenceCapacity)
+	if capacity {
+		_ = session.SafeHold(fmt.Sprintf("archive admission denied: %v; preserve history and review operator limits before restart", err))
+	}
+	reason := "source stream ended"
+	if err != nil {
+		reason = err.Error()
+	}
+	_ = session.End(reason)
+	return capacity || errors.Is(err, collection.ErrSaturated)
+}
+
+// Every governed hold is terminal for automatic runtime supervision, including
+// identity conflicts and concurrent-writer containment. Explicit manual source
+// generations remain a separate caller operation.
+func runtimeSourceOnHold(candidates *collection.Candidates, id string) bool {
+	for _, source := range candidates.Snapshot() {
+		if source.ID == id && source.Lifecycle == collection.SourceSafeHold {
+			return true
+		}
+	}
+	return false
 }

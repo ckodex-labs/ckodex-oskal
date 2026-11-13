@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/service"
 	servicesv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/services/v1"
@@ -147,7 +146,7 @@ func newGRPCServeCommand() *cobra.Command {
 		}
 		var repo ports.EvidenceRepository
 		if evidenceDir != "" {
-			repo, err = storage.OpenFilesystemEvidenceRepository(evidenceDir)
+			repo, err = openCLIArchive(evidenceDir)
 			if err != nil {
 				return fmt.Errorf("open evidence archive: %w", err)
 			}

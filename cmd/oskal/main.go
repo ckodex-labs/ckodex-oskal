@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -54,7 +55,7 @@ func loadLocalEvidence(dir string, sub assurance.SubjectRef) ([]assurance.Eviden
 	if dir == "" {
 		return nil, nil
 	}
-	repo, err := storage.OpenFilesystemEvidenceRepository(dir)
+	repo, err := openCLIArchive(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -145,12 +146,17 @@ and projects defensible results into standard OSCAL artifacts.`,
 	rootCmd.PersistentFlags().StringVar(&configFileFlag, "config", "", "Path to OSKAL configuration file (default .oskal.yaml)")
 	rootCmd.PersistentFlags().StringVar(&serverAddr, "server", "", "AssuranceService gRPC address (e.g. localhost:9090)")
 	rootCmd.PersistentFlags().StringVar(&evidenceDir, "evidence-dir", "", "Path to directory containing local EvidenceEnvelope JSON files")
+	rootCmd.PersistentFlags().Int64Var(&archiveMaxBytes, "archive-max-bytes", storage.DefaultArchiveBytes, "Maximum accounted archive bytes (1..1099511627776); history is never automatically pruned")
+	rootCmd.PersistentFlags().IntVar(&archiveMaxEntries, "archive-max-entries", storage.DefaultArchiveEntries, "Maximum accounted archive objects (1..1000000)")
 	rootCmd.PersistentFlags().StringVar(&tlsCAFile, "tls-ca-file", "", "Explicit trusted CA bundle for gRPC client connections")
 	rootCmd.PersistentFlags().StringVar(&tlsServerName, "tls-server-name", "", "Exact expected gRPC server DNS name or IP SAN")
 	rootCmd.PersistentFlags().StringVar(&tlsClientCertFile, "tls-client-cert-file", "", "Client certificate chain for gRPC mutual TLS")
 	rootCmd.PersistentFlags().StringVar(&tlsClientKeyFile, "tls-client-key-file", "", "Private key paired with the gRPC client certificate")
 
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if err := configuredArchiveLimits().Validate(); err != nil {
+			return err
+		}
 		cfg, _, err := config.LoadConfig(configFileFlag)
 		if err != nil && configFileFlag != "" {
 			return err
@@ -493,55 +499,38 @@ and projects defensible results into standard OSCAL artifacts.`,
 	verifyReceiptCmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Verify a receipt signature under an explicitly trusted Ed25519 public key",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var rcpt assurance.ControlReceipt
-			var searchDirs []string
-			if evidenceDir != "" {
-				searchDirs = append(searchDirs, evidenceDir, filepath.Join(evidenceDir, "receipts"))
-			}
-			searchDirs = append(searchDirs, "evidence", filepath.Join("evidence", "receipts"))
-
 			if verifyReceiptFile != "" {
-				data, err := os.ReadFile(verifyReceiptFile)
+				if verifyReceiptID != "" || len(args) > 0 {
+					return fmt.Errorf("--receipt-file and archive receipt IDs are mutually exclusive")
+				}
+				data, err := readBoundedFile(verifyReceiptFile, storage.MaxMetadataBytes)
 				if err != nil {
-					return fmt.Errorf("failed to read receipt file: %w", err)
+					return fmt.Errorf("read standalone receipt file: %w", err)
 				}
 				if err := json.Unmarshal(data, &rcpt); err != nil {
-					return fmt.Errorf("failed to parse receipt JSON: %w", err)
+					return fmt.Errorf("parse standalone receipt JSON: %w", err)
 				}
 			} else {
 				if verifyReceiptID == "" && len(args) > 0 {
 					verifyReceiptID = args[0]
 				}
 				if verifyReceiptID == "" {
-					return errors.New("must specify --receipt-id or --receipt-file")
+					return fmt.Errorf("specify --receipt-id with --evidence-dir, or --receipt-file for a standalone file")
 				}
-
-				var candidatePaths []string
-				if strings.HasSuffix(verifyReceiptID, ".json") {
-					candidatePaths = append(candidatePaths, verifyReceiptID)
+				if evidenceDir == "" {
+					return fmt.Errorf("archive receipt lookup requires --evidence-dir; use --receipt-file for an explicit standalone file")
 				}
-				for _, d := range searchDirs {
-					candidatePaths = append(candidatePaths,
-						filepath.Join(d, verifyReceiptID+".json"),
-						filepath.Join(d, "rcpt-"+verifyReceiptID+".json"),
-					)
+				repository, err := openCLIArchive(evidenceDir)
+				if err != nil {
+					return fmt.Errorf("open receipt archive: %w", err)
 				}
-
-				found := false
-				for _, p := range candidatePaths {
-					data, err := os.ReadFile(p)
-					if err != nil {
-						continue
-					}
-					if err := json.Unmarshal(data, &rcpt); err != nil {
-						return fmt.Errorf("failed to parse receipt from %s: %w", p, err)
-					}
-					found = true
-					break
-				}
-				if !found {
-					return fmt.Errorf("[FAIL] receipt %q not found on disk (searched %v)", verifyReceiptID, searchDirs)
+				key := strings.TrimSuffix(verifyReceiptID, ".json")
+				rcpt, err = repository.GetReceipt(cmd.Context(), key)
+				if err != nil {
+					return fmt.Errorf("lookup archive receipt %q (standalone files require --receipt-file): %w", verifyReceiptID, err)
 				}
 			}
 
@@ -574,8 +563,8 @@ and projects defensible results into standard OSCAL artifacts.`,
 			return nil
 		},
 	}
-	verifyReceiptCmd.Flags().StringVar(&verifyReceiptID, "receipt-id", "", "ID of the receipt to verify")
-	verifyReceiptCmd.Flags().StringVar(&verifyReceiptFile, "receipt-file", "", "Path to raw ControlReceipt JSON file")
+	verifyReceiptCmd.Flags().StringVar(&verifyReceiptID, "receipt-id", "", "Confined immutable receipt digest or legacy alias within --evidence-dir")
+	verifyReceiptCmd.Flags().StringVar(&verifyReceiptFile, "receipt-file", "", "Explicit standalone ControlReceipt JSON file, at most 64 KiB")
 	verifyReceiptCmd.Flags().StringVar(&verifyPublicKey, "public-key", "", "Ed25519 public key hex or path to .pub file")
 	receiptCmd.AddCommand(verifyReceiptCmd)
 
@@ -676,30 +665,34 @@ and projects defensible results into standard OSCAL artifacts.`,
 	)
 	webhookCmd := &cobra.Command{
 		Use:   "webhook",
-		Short: "Start the Kubernetes Validating Admission Webhook with in-flight attestation",
+		Short: "Start a validating admission webhook for declared Pod settings",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := webhook.ServerConfig{
-				ListenAddr:  webhookListenAddr,
-				TLSCertPath: webhookTLSCertFile,
-				TLSKeyPath:  webhookTLSKeyFile,
-				Mode:        webhook.WebhookMode(webhookMode),
-				ObserverAuth: assurance.AuthorityRef{
-					Scheme:  "k8s:admission-controller",
-					Subject: fmt.Sprintf("%s/%s", webhookNamespace, webhookServiceName),
-				},
+			archivePath, err := webhookArchivePath(evidenceDir, webhookEvidenceDir)
+			if err != nil {
+				return err
+			}
+			var archive *storage.ContentAddressedEvidenceRepository
+			if archivePath != "" {
+				archive, err = newCLIArchive(archivePath)
+				if err != nil {
+					return fmt.Errorf("open webhook capture archive: %w", err)
+				}
 			}
 
-			if webhookEvidenceDir != "" {
-				if err := os.MkdirAll(webhookEvidenceDir, 0755); err != nil {
-					return fmt.Errorf("failed to create evidence directory: %w", err)
-				}
-				cfg.EvidenceSink = func(env assurance.EvidenceEnvelope) {
-					data, err := json.MarshalIndent(env, "", "  ")
-					if err != nil {
-						return
+			cfg := webhook.ServerConfig{
+				ListenAddr:   webhookListenAddr,
+				TLSCertPath:  webhookTLSCertFile,
+				TLSKeyPath:   webhookTLSKeyFile,
+				Mode:         webhook.WebhookMode(webhookMode),
+				ObserverAuth: assurance.AuthorityRef{Scheme: "local", Subject: "oskal-cli-webhook"},
+			}
+
+			if archive != nil {
+				cfg.EvidenceSink = func(ctx context.Context, envelope assurance.EvidenceEnvelope, payload []byte) error {
+					if _, err := archive.Put(ctx, envelope, bytes.NewReader(payload)); err != nil {
+						return fmt.Errorf("persist admission capture: %w", err)
 					}
-					filename := filepath.Join(webhookEvidenceDir, fmt.Sprintf("%s.json", env.ID))
-					_ = os.WriteFile(filename, data, 0644)
+					return nil
 				}
 			}
 
@@ -754,7 +747,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 	webhookCmd.Flags().BoolVar(&webhookSelfSigned, "self-signed", true, "Generate self-signed TLS certificate if files not provided")
 	webhookCmd.Flags().StringVar(&webhookServiceName, "service-name", "oskal-webhook", "Kubernetes Service name for TLS SANs")
 	webhookCmd.Flags().StringVar(&webhookNamespace, "namespace", "ckodex-system", "Kubernetes Namespace for TLS SANs")
-	webhookCmd.Flags().StringVar(&webhookEvidenceDir, "evidence-dir", "", "Directory to record admitted in-flight evidence envelopes")
+	webhookCmd.Flags().StringVar(&webhookEvidenceDir, "webhook-evidence-dir", "", "Optional admission capture archive; if combined with global --evidence-dir, paths must agree")
 	webhookCmd.Flags().StringVar(&webhookMode, "mode", "enforcing", "Webhook enforcement mode: enforcing, audit, warn")
 
 	// 9. oscal validate <file> [--schema <type>] [--output <format>]
@@ -895,7 +888,7 @@ Supported profiles: nist-sp-800-53, pci-dss, soc-2, iso-27001.`,
 		Long: `Examines runtime substrate, Kubernetes connectivity, SPIFFE/SPIRE Workload API socket,
 Sigstore trust root, local CAS evidence directory, and embedded NIST OSCAL v1.2.3 schemas.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			report := diagnostics.RunDoctor(cmd.Context(), evidenceDir)
+			report := diagnostics.RunDoctorWithLimits(cmd.Context(), evidenceDir, configuredArchiveLimits())
 
 			outFormat, err := format.NormalizeFormat(doctorOutput)
 			if err != nil {
@@ -1079,7 +1072,7 @@ for Claude Code, Cursor, OpenCode, and AI developer environments over stdio.`,
 				return err
 			}
 			defer runtime.close()
-			srv, err := mcp.NewServerWithBroker(cmd.InOrStdin(), cmd.OutOrStdout(), evidenceDir, runtime.broker)
+			srv, err := mcp.NewServerWithLimits(cmd.InOrStdin(), cmd.OutOrStdout(), evidenceDir, runtime.broker, configuredArchiveLimits())
 			if err != nil {
 				return err
 			}
@@ -1103,6 +1096,7 @@ producer trust, freshness, drift, or live enforcement.`,
 				RefreshInterval: cockpitRefresh,
 				Once:            cockpitOnce,
 				EvidenceDir:     evidenceDir,
+				ArchiveLimits:   configuredArchiveLimits(),
 				SubjectFilter:   cockpitSubject,
 				Writer:          os.Stdout,
 			})
@@ -1174,7 +1168,7 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 			if dir == "" {
 				dir = "evidence"
 			}
-			repo, err := storage.OpenFilesystemEvidenceRepository(dir)
+			repo, err := openCLIArchive(dir)
 			if err != nil {
 				return fmt.Errorf("failed to open evidence repository at %s: %w", dir, err)
 			}
@@ -1284,7 +1278,7 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 			if len(args) > 0 {
 				q = args[0]
 			}
-			reg, err := utcp.NewRegistry(evidenceDir, nil)
+			reg, err := utcp.NewRegistryWithLimits(evidenceDir, nil, configuredArchiveLimits())
 			if err != nil {
 				return err
 			}
@@ -1305,7 +1299,7 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 	utcpSearchCmd.Flags().IntVar(&utcpSearchLimit, "limit", 10, "Maximum results")
 
 	runListTools := func(cmd *cobra.Command, _ []string) error {
-		reg, err := utcp.NewRegistry(evidenceDir, nil)
+		reg, err := utcp.NewRegistryWithLimits(evidenceDir, nil, configuredArchiveLimits())
 		if err != nil {
 			return err
 		}
@@ -1371,6 +1365,18 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 			switch key {
 			case "args":
 				explicitArgsJSON = val
+			case "archive-max-bytes":
+				value, err := strconv.ParseInt(val, 10, 64)
+				if err != nil {
+					return fmt.Errorf("invalid --archive-max-bytes: %w", err)
+				}
+				archiveMaxBytes = value
+			case "archive-max-entries":
+				value, err := strconv.Atoi(val)
+				if err != nil {
+					return fmt.Errorf("invalid --archive-max-entries: %w", err)
+				}
+				archiveMaxEntries = value
 			case "evidence-dir":
 				evidenceDir = val
 				explicitEvidenceDir = true
@@ -1440,6 +1446,9 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 			}
 		}
 
+		if err := configuredArchiveLimits().Validate(); err != nil {
+			return err
+		}
 		if explicitConfig && configFileFlag != "" {
 			cfg, _, err := config.LoadConfig(configFileFlag)
 			if err != nil {
@@ -1495,7 +1504,7 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 			return err
 		}
 		defer runtime.close()
-		reg, err := utcp.NewRegistry(evidenceDir, runtime.broker)
+		reg, err := utcp.NewRegistryWithLimits(evidenceDir, runtime.broker, configuredArchiveLimits())
 		if err != nil {
 			return err
 		}
@@ -1540,7 +1549,7 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 				return err
 			}
 			defer runtime.close()
-			reg, err := utcp.NewRegistry(evidenceDir, runtime.broker)
+			reg, err := utcp.NewRegistryWithLimits(evidenceDir, runtime.broker, configuredArchiveLimits())
 			if err != nil {
 				return err
 			}
