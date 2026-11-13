@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -21,6 +22,8 @@ import (
 const MaxCompressedBytes = 1 << 20
 const MaxUncompressedBytes = 4 << 20
 const MaxBatchEvents = 128
+
+var ErrBatchLimit = errors.New("OPA batch bounds exceeded")
 
 type Config struct {
 	DecisionPath string
@@ -63,7 +66,7 @@ func (d *Decoder) DecodeBatch(reader io.Reader) ([]policyreports.Capture, error)
 		return nil, err
 	}
 	if len(compressed) > MaxCompressedBytes {
-		return nil, fmt.Errorf("OPA compressed batch exceeds bound")
+		return nil, fmt.Errorf("%w: compressed bytes", ErrBatchLimit)
 	}
 	gz, err := gzip.NewReader(bytes.NewReader(compressed))
 	if err != nil {
@@ -75,7 +78,7 @@ func (d *Decoder) DecodeBatch(reader io.Reader) ([]policyreports.Capture, error)
 		return nil, fmt.Errorf("read OPA gzip batch: %w", err)
 	}
 	if len(plain) > MaxUncompressedBytes {
-		return nil, fmt.Errorf("OPA uncompressed batch exceeds bound")
+		return nil, fmt.Errorf("%w: uncompressed bytes", ErrBatchLimit)
 	}
 	if err := uniqueJSON(plain); err != nil {
 		return nil, err
@@ -84,8 +87,11 @@ func (d *Decoder) DecodeBatch(reader io.Reader) ([]policyreports.Capture, error)
 	if err := json.Unmarshal(plain, &batch); err != nil {
 		return nil, fmt.Errorf("OPA batch must be a JSON array")
 	}
-	if len(batch) == 0 || len(batch) > MaxBatchEvents {
-		return nil, fmt.Errorf("OPA batch event count is outside bounds")
+	if len(batch) == 0 {
+		return nil, fmt.Errorf("OPA decision batch is empty")
+	}
+	if len(batch) > MaxBatchEvents {
+		return nil, fmt.Errorf("%w: decision count", ErrBatchLimit)
 	}
 	captures := make([]policyreports.Capture, 0, len(batch))
 	for _, raw := range batch {
@@ -204,7 +210,7 @@ func uniqueJSON(raw []byte) error {
 	var value func(int) error
 	value = func(depth int) error {
 		if depth > 32 {
-			return fmt.Errorf("OPA JSON nesting exceeds bound")
+			return fmt.Errorf("%w: JSON nesting", ErrBatchLimit)
 		}
 		token, err := decoder.Token()
 		if err != nil {
@@ -219,7 +225,7 @@ func uniqueJSON(raw []byte) error {
 			seen := map[string]bool{}
 			for decoder.More() {
 				if len(seen) >= 256 {
-					return fmt.Errorf("OPA JSON object exceeds field bound")
+					return fmt.Errorf("%w: JSON object fields", ErrBatchLimit)
 				}
 				keyToken, err := decoder.Token()
 				if err != nil {
@@ -239,7 +245,7 @@ func uniqueJSON(raw []byte) error {
 			for decoder.More() {
 				count++
 				if count > MaxBatchEvents {
-					return fmt.Errorf("OPA JSON array exceeds element bound")
+					return fmt.Errorf("%w: JSON array elements", ErrBatchLimit)
 				}
 				if err := value(depth + 1); err != nil {
 					return err

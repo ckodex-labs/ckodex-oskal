@@ -3,7 +3,8 @@
 Observed on 2026-11-13. These adapters ingest engine observations; they do not
 turn an engine's `pass`, `allow`, or zero violations into a global compliance
 claim. Controller watchers, authenticated HTTP admission and claim mapping are
-separate application integration boundaries.
+separate application integration boundaries. The subsequent production polling
+and HTTP handler work is recorded in [policy delivery evidence](p1-policy-delivery-evidence.md).
 
 ## Published source contracts
 
@@ -90,7 +91,8 @@ check → subject epoch → filesystem CAS → payload digest verification passe
 | OPA allow | `b6f5ad97bb0fd6ad39f3cbad67779bb6b9d81b3965d1b4bb20edb817cc7b567c` |
 | OPA deny | `46e4844550f9ef07eb70767a701508b20de7cff13d2edb0c0e294c4525e667d8` |
 
-An independent filesystem SHA-256 pass verified all fourteen retained payloads:
+At the initial decoder verification, an independent filesystem SHA-256 pass
+verified all fourteen then-retained payloads:
 three standard reports, six OpenReports, one Gatekeeper audit, and four OPA
 decisions from two actual runs. The ingestion writer's CAS verification also ran
 for each test capture. The separate coverage contract remained UNKNOWN.

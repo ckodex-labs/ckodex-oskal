@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/policyreports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/ingestion"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/policycollection"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -189,6 +192,100 @@ func TestLiveGatekeeperAuditCapture(t *testing.T) {
 	verifyPolicyCapture(t, writer, repo, capture)
 }
 
+func TestLivePolicyCollectionRunners(t *testing.T) {
+	client, writer, repo := policyLive(t)
+	started, finished := 0, 0
+	var completionError error
+	begin := func(context.Context) (ports.CapturedEventWriter, func(error), error) {
+		started++
+		return writer, func(err error) { finished++; completionError = err }, nil
+	}
+	config := policycollection.ReportsConfig{Client: client, GVR: schema.GroupVersionResource{Group: "openreports.io", Version: "v1alpha1", Resource: "reports"}, Namespace: "oskal-policy-test", Producer: assurance.AuthorityRef{Scheme: "local-test", Subject: "policy-snapshot-poller"}, PollInterval: time.Second, RequestTimeout: 5 * time.Second, MaxObjects: 16, MaxBatchBytes: 2 << 20, BeginBatch: begin}
+	for _, source := range []string{"reports", "gatekeeper"} {
+		current := config
+		if source == "gatekeeper" {
+			current.GVR = schema.GroupVersionResource{Group: "constraints.gatekeeper.sh", Version: "v1beta1", Resource: "oskalrequiredlabels"}
+			current.Kind = "OskalRequiredLabels"
+			current.Namespace = ""
+		}
+		runner, err := policycollection.NewReportsRunner(current)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := runner.Poll(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if started != finished || completionError != nil {
+			t.Fatal("actual successful source batch did not finish")
+		}
+	}
+	subject := assurance.SubjectRef{Scheme: "k8s", ID: "oskal-policy-test/ConfigMap/has-team"}
+	envelopes, err := repo.ListBySubject(t.Context(), subject)
+	if err != nil || len(envelopes) == 0 {
+		t.Fatalf("real report poll did not persist: %v", err)
+	}
+	for _, envelope := range envelopes {
+		if ok, err := repo.Verify(t.Context(), envelope.Artifact); !ok || err != nil {
+			t.Fatalf("actual poll payload verification failed: %v", err)
+		}
+	}
+	config.MaxObjects = 1
+	capped, err := policycollection.NewReportsRunner(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCap := started
+	if err := capped.Run(t.Context()); !errors.Is(err, policycollection.ErrSafeHold) || !errors.Is(completionError, policycollection.ErrSafeHold) || started != beforeCap+1 {
+		t.Fatalf("actual API cap did not invalidate its batch: %v", err)
+	}
+	config.MaxObjects = 16
+	config.GVR = schema.GroupVersionResource{Group: "constraints.gatekeeper.sh", Version: "v1beta1", Resource: "oskalunconfiguredconstraints"}
+	config.Kind = "OskalUnconfiguredConstraint"
+	config.Namespace = ""
+	missing, err := policycollection.NewReportsRunner(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := missing.Poll(t.Context()); err == nil || completionError == nil {
+		t.Fatal("missing actual CRD was accepted as empty success")
+	}
+	config.GVR = schema.GroupVersionResource{Group: "openreports.io", Version: "v1alpha1", Resource: "reports"}
+	config.Namespace = "oskal-p1-policy-gatekeeper"
+	config.Kind = ""
+	empty, err := policycollection.NewReportsRunner(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := empty.Poll(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if started != finished || completionError != nil {
+		t.Fatal("empty snapshot did not establish a distinct completed batch")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	cycles := 0
+	config.Namespace = "oskal-policy-test"
+	config.BeginBatch = func(context.Context) (ports.CapturedEventWriter, func(error), error) {
+		return writer, func(err error) {
+			if err == nil {
+				cycles++
+				if cycles == 2 {
+					cancel()
+				}
+			}
+		}, nil
+	}
+	continuous, err := policycollection.NewReportsRunner(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := continuous.Run(ctx); !errors.Is(err, context.Canceled) || cycles != 2 {
+		t.Fatalf("continuous actual source polling did not stop after two completed snapshots: cycles=%d err=%v", cycles, err)
+	}
+	t.Logf("actual Lists and CAS writes; batches=%d completed=%d; capped/missing sources invalidated; empty source emitted no evidence", started, finished)
+}
+
 // TestLiveOPADecisionCapture starts the actual configured OPA binary, loads a real
 // revisioned bundle, invokes it, and receives its own gzip log plugin over mTLS.
 func TestLiveOPADecisionCapture(t *testing.T) {
@@ -243,7 +340,7 @@ drop if input.path != "oskal/authz/allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoder, err := opa.NewDecoder(opa.Config{DecisionPath: "oskal/authz/allow", BundleName: "oskal", AllowResult: json.RawMessage("true"), DenyResult: json.RawMessage("false"), Producer: assurance.AuthorityRef{Scheme: "local-test", Subject: "authenticated-opa-test-client"}})
+	decoder, err := opa.NewDecoder(opa.Config{DecisionPath: "oskal/authz/allow", BundleName: "oskal", AllowResult: json.RawMessage("true"), DenyResult: json.RawMessage("false"), Producer: assurance.AuthorityRef{Scheme: "local-test", Subject: "opa-policy-collector"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,8 +349,24 @@ drop if input.path != "oskal/authz/allow"
 		t.Fatal(err)
 	}
 	var mu sync.Mutex
-	var captures []policyreports.Capture
 	var receiveError error
+	completed := 0
+	activeWriter := writer
+	begin := func(context.Context) (ports.CapturedEventWriter, func(error), error) {
+		mu.Lock()
+		current := activeWriter
+		mu.Unlock()
+		return current, func(err error) { mu.Lock(); defer mu.Unlock(); receiveError = err; completed++ }, nil
+	}
+	receiver, err := policycollection.NewOPAReceiver(policycollection.OPAConfig{Decoder: decoder, Principals: policyPKIPrincipal{roots: pool}, ExpectedPrincipal: "spiffe://oskal-policy-test/opa", BeginBatch: begin, RequestTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deniedReceiver, err := policycollection.NewOPAReceiver(policycollection.OPAConfig{Decoder: decoder, Principals: policyPKIPrincipal{roots: pool}, ExpectedPrincipal: "spiffe://oskal-policy-test/different-publisher", BeginBatch: begin, RequestTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
 	server := &http.Server{ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second,
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool},
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -266,27 +379,15 @@ drop if input.path != "oskal/authz/allow"
 				_, _ = w.Write(bundle)
 				return
 			}
+			if r.URL.Path == "/denied" {
+				deniedReceiver.ServeHTTP(w, r)
+				return
+			}
 			if r.URL.Path != "/logs" || r.Method != http.MethodPost || r.Header.Get("Content-Encoding") != "gzip" {
 				http.Error(w, "invalid decision log request", http.StatusBadRequest)
 				return
 			}
-			batch, err := decoder.DecodeBatch(r.Body)
-			if err == nil {
-				for _, capture := range batch {
-					if err = writer.WriteCapturedEvent(r.Context(), capture.Event); err != nil {
-						break
-					}
-				}
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				receiveError = err
-				http.Error(w, "decision capture rejected", http.StatusBadRequest)
-				return
-			}
-			captures = append(captures, batch...)
-			w.WriteHeader(http.StatusNoContent)
+			receiver.ServeHTTP(w, r)
 		})}
 	go func() { _ = server.ServeTLS(listener, serverCert, serverKey) }()
 	t.Cleanup(func() {
@@ -374,26 +475,165 @@ ready:
 			t.Fatalf("real OPA decision logs did not arrive: %v", err)
 		case <-ticker.C:
 			mu.Lock()
-			received := append([]policyreports.Capture(nil), captures...)
 			err := receiveError
+			done := completed
 			mu.Unlock()
 			if err != nil {
 				t.Fatalf("actual OPA logs were rejected: %v", err)
 			}
 			seen := map[string]bool{}
-			for _, capture := range received {
-				if strings.Contains(string(capture.Record.SourceBytes), "OPA_INPUT_MUST_NOT_PERSIST") {
-					t.Fatal("OPA masking failed before persistence")
+			var lastSource []byte
+			for _, name := range []string{"has-team", "missing-team"} {
+				envelopes, err := repo.ListBySubject(ctx, assurance.SubjectRef{Scheme: "k8s", ID: "oskal-policy-test/ConfigMap/" + name})
+				if err != nil {
+					t.Fatal(err)
 				}
-				seen[capture.Record.Metadata["resultMapping"]] = true
-				verifyPolicyCapture(t, writer, repo, capture)
-				verifyOPARejections(t, decoder, capture.Record.SourceBytes)
+				for _, envelope := range envelopes {
+					if envelope.CapturedAt.Before(started) || envelope.Producer.Canonical() != "local-test://opa-policy-collector" {
+						continue
+					}
+					body, err := repo.Get(ctx, envelope.Artifact)
+					if err != nil {
+						t.Fatal(err)
+					}
+					payload, err := io.ReadAll(body)
+					_ = body.Close()
+					if err != nil {
+						t.Fatal(err)
+					}
+					var record policyreports.Record
+					if err := json.Unmarshal(payload, &record); err != nil {
+						t.Fatal(err)
+					}
+					if record.Metadata["authenticatedPublisher"] != "spiffe://oskal-policy-test/opa" || record.Metadata["observer"] != "local-test://opa-policy-collector" {
+						t.Fatal("receiver conflated authenticated publisher and observing collector")
+					}
+					capture := policyreports.Capture{Record: record, Event: ports.CapturedEvent{Subject: envelope.Subject, Type: envelope.ObservationType, CapturedAt: envelope.CapturedAt, Producer: envelope.Producer, Payload: payload, MediaType: envelope.Artifact.MediaType, ControlRefs: envelope.ControlRefs}}
+					if strings.Contains(string(capture.Record.SourceBytes), "OPA_INPUT_MUST_NOT_PERSIST") {
+						t.Fatal("OPA masking failed before persistence")
+					}
+					seen[capture.Record.Metadata["resultMapping"]] = true
+					lastSource = capture.Record.SourceBytes
+					verifyPolicyCapture(t, writer, repo, capture)
+					verifyOPARejections(t, decoder, capture.Record.SourceBytes)
+				}
 			}
-			if seen["allow"] && seen["deny"] {
+			if seen["allow"] && seen["deny"] && done > 0 {
+				cert, err := tls.LoadX509KeyPair(clientCert, clientKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				transport := http.DefaultTransport.(*http.Transport).Clone()
+				transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, Certificates: []tls.Certificate{cert}}
+				defer transport.CloseIdleConnections()
+				secureClient := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+				mu.Lock()
+				before := completed
+				mu.Unlock()
+				response, err := secureClient.Post("https://"+listener.Addr().String()+"/denied", "application/json", strings.NewReader("not-gzip-and-must-not-be-decoded"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = response.Body.Close()
+				if response.StatusCode != http.StatusForbidden {
+					t.Fatalf("wrong exact publisher received status %d", response.StatusCode)
+				}
+				mu.Lock()
+				after := completed
+				mu.Unlock()
+				if before != after {
+					t.Fatal("unauthorized publisher began a source batch")
+				}
+				request, err := http.NewRequest(http.MethodPost, "https://"+listener.Addr().String()+"/logs", strings.NewReader("not-a-gzip-batch"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("Content-Encoding", "gzip")
+				response, err = secureClient.Do(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = response.Body.Close()
+				if response.StatusCode != http.StatusBadRequest {
+					t.Fatalf("authenticated invalid batch received status %d", response.StatusCode)
+				}
+				mu.Lock()
+				after, err = completed, receiveError
+				mu.Unlock()
+				if after != before+1 || err == nil {
+					t.Fatal("failed authenticated batch did not invalidate through completion callback")
+				}
+				failedWriter := brokenPolicyWriter(t, writer)
+				mu.Lock()
+				activeWriter = failedWriter
+				before = completed
+				mu.Unlock()
+				request, err = http.NewRequest(http.MethodPost, "https://"+listener.Addr().String()+"/logs", gzipJSON(t, append(append([]byte("["), lastSource...), ']')))
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("Content-Encoding", "gzip")
+				response, err = secureClient.Do(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = response.Body.Close()
+				mu.Lock()
+				after, err = completed, receiveError
+				mu.Unlock()
+				if response.StatusCode != http.StatusServiceUnavailable || after != before+1 || !errors.Is(err, syscall.ENOTDIR) {
+					t.Fatalf("real CAS failure was acknowledged or not invalidated: status=%d error=%v", response.StatusCode, err)
+				}
+				t.Log("production receiver authenticated publisher before batch; malformed authenticated batch returned 400 after End(error)")
+				t.Log("actual filesystem persistence failure returned 503 and End(error); retained CAS history was not deleted")
 				return
 			}
 		}
 	}
+}
+
+func brokenPolicyWriter(t *testing.T, template *ingestion.Writer) *ingestion.Writer {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cas")
+	repo, err := storage.NewFilesystemEvidenceRepository(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Preserve even this empty test repository, then obstruct only its original
+	// path with a file. Production Put must return the actual filesystem error.
+	if err := os.Rename(path, path+"-retained"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("bounded write-failure test"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	copy := *template
+	copy.Repository = repo
+	return &copy
+}
+
+// This resolver performs real current PKI verification, then derives identity
+// from the verified leaf URI. It does not trust headers or asserted log labels.
+type policyPKIPrincipal struct{ roots *x509.CertPool }
+
+func (p policyPKIPrincipal) AuthenticatedPrincipal(ctx context.Context) (string, error) {
+	state, ok := policycollection.PeerTLSState(ctx)
+	if !ok || len(state.PeerCertificates) == 0 || len(state.VerifiedChains) == 0 {
+		return "", fmt.Errorf("verified TLS peer is missing")
+	}
+	intermediates := x509.NewCertPool()
+	for _, cert := range state.PeerCertificates[1:] {
+		intermediates.AddCert(cert)
+	}
+	if _, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{Roots: p.roots, Intermediates: intermediates, CurrentTime: time.Now(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		return "", err
+	}
+	if len(state.PeerCertificates[0].URIs) != 1 {
+		return "", fmt.Errorf("exact peer URI is required")
+	}
+	return state.PeerCertificates[0].URIs[0].String(), nil
 }
 
 func verifyReportRejections(t *testing.T, raw []byte, capture policyreports.Capture, writer *ingestion.Writer) {
