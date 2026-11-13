@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 )
 
 func TestBuildAndValidateOSKALManual(t *testing.T) {
@@ -369,6 +370,9 @@ func TestGenerateSDKConfigs_AllLanguages(t *testing.T) {
 func TestUTCP_SSRFProtectionRetryBackpressureAndDriftTruth(t *testing.T) {
 	ctx := context.Background()
 	evDir := t.TempDir()
+	if _, err := storage.NewFilesystemEvidenceRepository(evDir); err != nil {
+		t.Fatal(err)
+	}
 	reg, err := NewRegistry(evDir, nil)
 	if err != nil {
 		t.Fatalf("NewRegistry failed: %v", err)
@@ -470,7 +474,7 @@ func TestUTCP_SSRFProtectionRetryBackpressureAndDriftTruth(t *testing.T) {
 	}
 	<-httpSrv.sem
 
-	// 5. detect_drift reports DECOHERENT / FAILED on violation evidence in CAS
+	// 5. Unverified adverse metadata cannot establish runtime decoherence or failure.
 	violEnv := assurance.EvidenceEnvelope{
 		Schema:          "assurance.ckodex.io/evidence/v1alpha1",
 		ID:              "ev-viol-drift",
@@ -489,8 +493,8 @@ func TestUTCP_SSRFProtectionRetryBackpressureAndDriftTruth(t *testing.T) {
 		t.Fatalf("detect_drift failed: %v", err)
 	}
 	driftMap, _ := driftRes.Output.(map[string]interface{})
-	if driftMap["status"] != "DECOHERENT" || driftMap["assurance_status"] != "FAILED" {
-		t.Fatalf("expected detect_drift status=DECOHERENT assurance_status=FAILED, got: %+v", driftMap)
+	if driftMap["status"] != "UNKNOWN" || driftMap["assurance_status"] != "UNKNOWN" {
+		t.Fatalf("unverified metadata was promoted to a runtime determination: %+v", driftMap)
 	}
 
 	// 6. QA-08: Built-in "oskal" manual and tools are protected from overwrite or deletion
