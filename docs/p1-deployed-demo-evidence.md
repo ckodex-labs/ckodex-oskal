@@ -119,3 +119,75 @@ This demonstrates bounded local deployed behavior and local Ed25519 receipt
 verification. It does not establish production trust, SPIFFE source authority,
 hardware attestation, admission enforcement, complete process coverage, or
 native support for architectures other than the observed Linux ARM64 node.
+
+## Final default-command proof on Go 1.27.4
+
+The final runtime source was clean detached commit
+`02a9f36737115afd2ee17f19897861d565a4952f`. The actual command was exactly:
+
+```sh
+make demo
+```
+
+`DEMO_SOURCE`, `DEMO_TETRAGON_CHART` and `GOMAXPROCS` were unset. The command used
+the current checkout and downloaded the official Tetragon 1.8.0 chart through
+its default path. The downloaded chart SHA-256 was
+`38a10bca4bffd3efac7cbcc7f99b24dbcd3ef76402aa7bbb72c0b2e2dc0c8111`.
+Actual stdout:
+
+```text
+go run ./cmd/demo --source "." --tetragon-chart ""
+Real deployed OSKAL controller + Tetragon demo
+Cluster: oskal-deployed-1794580791347715000
+Artifacts: /private/var/folders/c2/hd1nq7p54lq4_3wys4p9ymp40000gn/T/oskal-deployed-demo-2702283156
+Scope: current process effective-UID evidence and host-pinned local Ed25519 receipts; no SPIFFE or hardware-attestation claim.
+Retained cluster; review before cleanup: kind delete cluster --name oskal-deployed-1794580791347715000
+Before: ASSURED, 1/1 verified, root=sha256:ea667a485cba14fe41364fdb6ce25767958e3f7b87688fab79100d9e28613084, signed receipt=rcpt-55cd983060949917afe2b85f30ba2084819ac854df84623956306959c1c12e4a
+After: UNKNOWN, 0/1 verified, root cleared, signed receipt=rcpt-f4ebf1ec7e84c14e2467740c62e3657a2a1aef05c6d00299481285abc33f5344
+Source-loss transition observed in 3.014099416s.
+Both receipts verified with the actual CLI and the host-pinned public key.
+Demo acceptance duration: 1m30.990875542s.
+```
+
+Make exited **0**. The measured complete command took **91.8009409905 seconds**,
+including initial helper compilation and return to the wrapper; the program's
+own acceptance interval above excludes those outer steps. Start/end epoch
+seconds were `1794580790.7044870853` and `1794580882.5054280758`.
+
+This fresh run verified the full OCI index/manifest/config/layer chain, the
+immutable CRI alias, the deployed Go 1.27.4 binary, unchanged controller Pod UID
+and zero restarts. Both raw copied receipt SHA-256 values matched the published
+full-digest references. Actual host and container CLI checks used the host public
+key pinned before deployment, and both altered-root receipts were rejected.
+The owned source DaemonSet reached desired=0 and ready=0. Its earlier evidence
+remained archived without current eligibility.
+
+The immediately preceding final attempt failed before the controller started.
+The log wrapper had set process-local umask 077; Go's output executables became
+root-owned mode 0700, and the deployed non-root process with all capabilities
+dropped could not execute them. The exported image's actual layer header and an
+actual constrained Docker invocation confirmed this cause. Make exited **2**,
+with a complete command duration of **224.1373200417 seconds**. No source or
+image-identity gate was weakened. The rerun pre-created log files with mode 0600
+and retained the ordinary shell umask 022, which produced executable mode 0755.
+This was a wrapper failure, not a successful acceptance run.
+
+Preserved protected logs and command records:
+
+```text
+/private/tmp/oskal-final-plain-demo-02a9f367-attempt1.log
+/private/tmp/oskal-final-plain-demo-02a9f367-attempt1-command.json
+/private/tmp/oskal-final-plain-demo-02a9f367-attempt2.log
+/private/tmp/oskal-final-plain-demo-02a9f367-attempt2-command.json
+```
+
+Both owned nodes were stopped and retained after their evidence was collected.
+Docker stop returned 0; their container exit status was 137 after its stop
+timeout. This is not evidence of an OOM or graceful node shutdown. The shared
+VM's temporarily authorized inotify instance limit was restored to **128** and
+read back as 128 after all runtime work. Unrelated infrastructure was preserved.
+
+This proof uses the canonical receipt signature together with the trusted full
+JSON reference. Supplemental subject attributes are outside the legacy signed
+tuple; signature validity alone does not prove those attributes or current
+assurance. See [receipt verification scope](p1-receipt-verification-scope.md).
