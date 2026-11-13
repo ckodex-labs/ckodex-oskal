@@ -13,7 +13,8 @@ type ReceiptManager struct {
 	inner *receipts.ReceiptManager
 }
 
-// NewReceiptManager creates a ReceiptManager with an evaluator authority identity.
+// NewReceiptManager requires an explicit evaluator authority. A signing key does
+// not authenticate that authority claim or establish trust in its evidence.
 func NewReceiptManager(evaluator AuthorityRef) (*ReceiptManager, error) {
 	mgr, err := receipts.NewReceiptManager(evaluator)
 	if err != nil {
@@ -39,7 +40,8 @@ func (m *ReceiptManager) IssueReceipt(
 	return m.inner.IssueReceipt(subject, control, state, epoch, evidences, evaluatedAt)
 }
 
-// VerifyReceipt checks the Ed25519 digital signature and structural integrity of a ControlReceipt.
+// VerifyReceipt checks the signature under this manager's key. It does not
+// independently authenticate the evaluator claim or verify source observations.
 func (m *ReceiptManager) VerifyReceipt(rcpt assurance.ControlReceipt) bool {
 	valid, _ := receipts.VerifyIndependentReceipt(rcpt, m.inner.PublicKey())
 	return valid

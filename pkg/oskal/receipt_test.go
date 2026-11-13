@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+func TestReceiptManagerRequiresExplicitAuthority(t *testing.T) {
+	if manager, err := NewReceiptManager(AuthorityRef{}); err == nil || manager != nil {
+		t.Fatal("an absent authority created a public SDK signer")
+	}
+}
+
 func TestReceiptManagerLifecycle(t *testing.T) {
 	evaluatorAuth := AuthorityRef{
 		Scheme:  "spiffe",

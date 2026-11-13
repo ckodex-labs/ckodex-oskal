@@ -406,11 +406,8 @@ func TestEvidenceSigningRequiresExplicitAuthority(t *testing.T) {
 		t.Fatal("signer asserted a different producer")
 	}
 	unconfigured, err := receipts.NewReceiptManager(assurance.AuthorityRef{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := unconfigured.SignEvidence(ctx, envelope); err == nil {
-		t.Fatal("legacy default receipt authority signed runtime evidence")
+	if err == nil || unconfigured != nil {
+		t.Fatal("an absent authority must not construct a receipt or evidence signer")
 	}
 	signed := f.sign(t, envelope)
 	if _, err := f.signer.SignEvidence(ctx, signed); err == nil {

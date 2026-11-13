@@ -139,7 +139,7 @@ func TestArchiveReceiptQuotaAndConcurrentAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, receipt := receiptFixture(t)
+	signer, receipt := receiptFixture(t)
 	first, err := repo.PutReceipt(t.Context(), receipt)
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +153,10 @@ func TestArchiveReceiptQuotaAndConcurrentAdmission(t *testing.T) {
 	}
 	changed := receipt
 	changed.EvidenceRoot = assurance.ComputeStringDigest("another receipt root")
-	changed = signStoredTestReceipt(t, changed)
+	changed, err = signer.SignReceipt(t.Context(), changed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := repo.PutReceipt(t.Context(), changed); err == nil {
 		t.Fatal("receipt exceeded file count")
 	} else {

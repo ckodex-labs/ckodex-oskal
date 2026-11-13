@@ -320,7 +320,7 @@ func TestSVIDValidatorRejectsAmbiguousIdentity(t *testing.T) {
 }
 
 func TestAuthorityRejectsContradictoryTrustDomain(t *testing.T) {
-	resolver := NewSpireAuthorityResolver(nil)
+	resolver := NewSpireAuthorityResolver(&AuthorityPolicy{AllowedTrustDomains: []string{"prod"}})
 	if err := resolver.ValidateIdentity(assurance.AuthorityRef{Scheme: "spiffe", Subject: "prod/workload", TrustDomain: "foreign"}); err == nil {
 		t.Fatal("contradictory trust domain accepted")
 	}
