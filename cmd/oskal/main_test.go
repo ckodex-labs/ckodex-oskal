@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 )
 
 func TestCLI_HelpAndVersion(t *testing.T) {
@@ -48,41 +51,30 @@ func TestCLI_AssuranceExplain(t *testing.T) {
 	}
 }
 
-func TestCLI_ExportOSCAL(t *testing.T) {
-	// 1. assessment-results
-	cmdAR := NewRootCommand()
-	bufAR := new(bytes.Buffer)
-	cmdAR.SetOut(bufAR)
-	cmdAR.SetArgs([]string{"export", "assessment-results", "--subject", "k8s://prod/payments/Deployment/payments-api"})
-	if err := cmdAR.Execute(); err != nil {
-		t.Fatalf("unexpected error exporting assessment results: %v", err)
+func TestCLI_ExportOSCALRequiresAuthoredContext(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(config, []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
-
-	// 2. component-definition
-	cmdCD := NewRootCommand()
-	bufCD := new(bytes.Buffer)
-	cmdCD.SetOut(bufCD)
-	cmdCD.SetArgs([]string{"export", "component-definition", "--component", "payments-api"})
-	if err := cmdCD.Execute(); err != nil {
-		t.Fatalf("unexpected error exporting component definition: %v", err)
-	}
-
-	// 3. assessment-plan
-	cmdAP := NewRootCommand()
-	bufAP := new(bytes.Buffer)
-	cmdAP.SetOut(bufAP)
-	cmdAP.SetArgs([]string{"export", "assessment-plan", "--subject", "k8s://prod/payments/Deployment/payments-api"})
-	if err := cmdAP.Execute(); err != nil {
-		t.Fatalf("unexpected error exporting assessment plan: %v", err)
-	}
-
-	// 4. poam
-	cmdPOAM := NewRootCommand()
-	bufPOAM := new(bytes.Buffer)
-	cmdPOAM.SetOut(bufPOAM)
-	cmdPOAM.SetArgs([]string{"export", "poam", "--subject", "k8s://prod/payments/Deployment/payments-api"})
-	if err := cmdPOAM.Execute(); err != nil {
-		t.Fatalf("unexpected error exporting poam: %v", err)
+	for _, test := range []struct {
+		document, selector, subject, missing string
+	}{
+		{"assessment-results", "--subject", "k8s://example/Pod/material", "assessment_plan_href"},
+		{"component-definition", "--component", "material", "component"},
+		{"assessment-plan", "--subject", "k8s://example/Pod/material", "system_security_plan_href"},
+		{"ssp", "--subject", "k8s://example/Pod/material", "system"},
+	} {
+		t.Run(test.document, func(t *testing.T) {
+			command := NewRootCommand()
+			var diagnostic bytes.Buffer
+			command.SetOut(&diagnostic)
+			command.SetErr(&diagnostic)
+			command.SetArgs([]string{"--config", config, "--server=", "--evidence-dir=", "export", test.document, test.selector, test.subject})
+			var input *oscal.ProjectionInputError
+			if err := command.Execute(); !errors.As(err, &input) || input.Field != test.missing {
+				t.Fatalf("missing authored %s must fail at %s: %v", test.document, test.missing, err)
+			}
+		})
 	}
 }
 
