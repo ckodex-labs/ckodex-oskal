@@ -1,74 +1,92 @@
-OSKAL checks Kubernetes evidence and reports UNKNOWN by default when required evidence is missing.
+OSKAL checks Kubernetes security evidence and reports UNKNOWN by default when required evidence is missing.
 
 [![CI](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml/badge.svg)](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ckodex-labs/ckodex-oskal/badge)](https://scorecard.dev/viewer/?uri=github.com/ckodex-labs/ckodex-oskal)
 
-Code-Review and Contributors scores may be low because this project has a solo maintainer; the badge reports the measured result.
-Scorecard publishing runs on the default branch. Pull requests run a read-only scan; the result badge remains unverified until the publishing workflow is merged and run.
-
-With Go matching go.mod, make, Docker, Kind and kubectl installed, run from this checkout:
+With Go matching go.mod, make, Docker, Kind, kubectl, Helm and Git installed:
 
 ```sh
 make demo
 ```
 
-A real fresh-cluster run produced:
+A fresh-cluster run deployed the real controller and Tetragon sensor, observed a
+non-root process, then stopped the sensor:
 
 ```text
-before: demo:api-node-ready = PASS (OSKAL control state ASSURED); Verified 1/1 requirements
-after: demo:api-node-ready = UNKNOWN; Verified 0/1 requirements
-Elapsed: 32.236s
+Before: ASSURED, 1/1 verified, root=sha256:aa5f5d807c79e3bc25ae66e3cd640ce7dc648c1250e894039676fa8a8d99c0e0, signed receipt=rcpt-9dad178f057f509fb28cfe26a30852bcab86f48657ed8dcb891f7a497978a6ea
+After: UNKNOWN, 0/1 verified, root cleared, signed receipt=rcpt-b1e82640a59083bc95dad1a9d0f8da5dcd5177c94b7a407f3d5692b0ba370d23
+Source-loss transition observed in 3.014592917s.
+Both receipts verified with the actual CLI and the host-pinned public key.
+Demo acceptance duration: 1m26.568509s.
 ```
 
-The demo creates a Kind cluster, installs six resource definitions, reads its real
-node condition through a local API proxy, and runs the OSKAL reconciler locally.
-Stopping that proxy removes the current observation. The affected control becomes
-UNKNOWN while its earlier evidence remains archived. PASS here means only that
-the Kubernetes API reported Node Ready=True; it is not a security audit.
+The control means that this Pod was observed executing with a nonzero effective
+UID. It does not certify all process privileges or the cluster's overall security.
+The collector uses mutual TLS, signs the captured evidence, and evaluates it against
+an explicit contract and policy. When the source stops, earlier evidence remains
+archived but loses eligibility for the current assessment. The demo verifies both
+receipts against a public key created before deployment.
 
-The controller container is not deployed by this demo. Observations are unsigned,
-and there is no hardware attestation. The demo checks current source availability
-explicitly; production repository ingestion does not yet implement that contract.
-Clusters and artifacts are retained, and the command prints their locations.
-[Exact run, prerequisites, failures and tool versions](docs/p1-demo-evidence.md).
-Two earlier attempts failed because the shared Colima VM exhausted its inotify
-instance limit. The successful run required an approved temporary limit increase,
-which was restored afterward. A clean-machine first-run result remains unverified.
+The quoted run used an unchanged source snapshot and the inspected official chart;
+three earlier image-identity checks failed and were corrected before this fresh run
+succeeded. [Exact command, output, failures and scope](docs/p1-deployed-demo-evidence.md).
+The cluster and protected artifacts are retained for inspection; cleanup is printed.
+Local signing keys are not hardware-backed, and no TEE assurance is claimed.
 
-## What exists
+## Implemented and verified
 
-The committed implementation has been built, vetted, linted and tested with the
-Go race detector. These local checks do not prove every external integration.
+A control is a named requirement. An EvidenceContract declares which observations,
+producers and freshness windows it needs. A ControlBinding connects that contract
+to a real workload. A separate AssurancePolicy authorizes promotion from VERIFIED
+to ASSURED. Missing or unverifiable evidence never becomes a pass; explicit policy
+may escalate UNKNOWN to FAILED.
 
-| Capability | Implementation and limits |
+| Capability | Demonstrated behavior |
 | --- | --- |
-| Evaluation | Pure Go control evaluation with required evidence, freshness, producer and epoch checks. An epoch identifies the subject and policy versions to which evidence applies. Missing evidence is UNKNOWN by default; policy can escalate it to FAILED. Expired or mismatched evidence can be STALE. |
-| Kubernetes | Six custom resource definitions (CRDs) and reconciliation, plus an HTTPS admission webhook with enforcing, warning and audit modes. The demo verifies real CRD status updates. |
-| Evidence storage | SHA-256 content-addressed storage (CAS): content is located by its digest. Atomic filesystem writes and offline export/import exist. Startup recovery can skip unreadable or corrupt blobs. |
-| Receipts | Ed25519 signatures over evaluation receipts. The evidence root is a digest of sorted evidence digests, not a Merkle inclusion-proof tree. A signed receipt does not authenticate unsigned observations. |
-| Runtime adapters | Tetragon and Cilium event normalization exists. Live event subscriptions are not wired into the controller. |
-| Identity | X.509 SPIFFE identity validation exists. A live SPIRE Workload API integration is not wired. SPIFFE identifies workloads; SPIRE supplies those identities. |
-| Supply chain | The adapter named Sigstore uses a custom signature payload, not cosign/Fulcio/Rekor verification. The committed baseline can accept a trusted signer without a pinned verification key. Do not use it as a production signature admission control. |
-| Capability leases | Time- and turn-bounded authorization exists in the in-memory broker. Kubernetes lease status reconciliation is not connected to broker enforcement. |
-| OSCAL | Five embedded NIST OSCAL 1.2.3 schemas and document projection exist. OSCAL is a machine-readable format for control and assessment information. Schema validation does not establish semantic completeness or compliance. |
+| Runtime capture | Real Tetragon 1.8.0 and Hubble/Cilium 1.20.4 APIs over mutual TLS, live Pod identity checks, and disk-backed evidence. Effective-UID and observed-flow facts do not imply complete least privilege or isolation. |
+| Policy-engine inputs | Real Kyverno PolicyReport/OpenReports, Gatekeeper audit and masked OPA decision logs decoded and delivered to storage. Reporter pass, zero violations and truncated audit lists are not automatic compliance decisions. |
+| Identity | Real SPIRE Workload API identity, exact mutual-TLS peers, stopped-agent denial and recovery. SPIFFE identifies workloads; SPIRE supplies those identities. |
+| Artifact verification | Real Sigstore signatures and provenance bundles, exact issuer/signer, explicit trusted-root pin and artifact digest. Wrong identity, missing proof and tampering are rejected. Historical verification does not prove current TUF freshness or running-image lineage. |
+| Evidence and receipts | SHA-256 content-addressed storage (CAS), atomic writes, immutable full-digest receipt references, and Ed25519 evaluation receipts. Corrupt recovery fails closed and preserves bytes. The aggregate root is not a Merkle inclusion-proof tree. |
+| Execution authority | Kubernetes CapabilityLease reads and atomic turn reservations, authenticated caller/scope/capability checks, actual completion history and crash-safe pending state. Execution chains are unsigned and do not protect against an administrator rewriting status. |
+| OSCAL export | All five embedded NIST OSCAL 1.2.3 schemas, with explicit document relationships and system facts. OSCAL is a machine-readable assessment format; schema validity is not certification. Missing mandatory facts produce errors. |
+| Diagnostics and clients | Unverified material remains UNKNOWN in CLI, MCP, UTCP, service and SDK paths. Receipt verification requires an explicit key. Network clients require explicit TLS trust; archive inventory does not invent current assurance. |
 
-## Not built or not proven
+The pure Go semantic kernel contains domain rules; adapters own Kubernetes, RPC,
+identity and storage integration. Source sessions separate current eligibility from
+immutable history. Detailed evidence and boundaries are recorded in the
+[controller](docs/p1-publication-guards.md), [runtime](docs/p1-runtime-evidence.md),
+[policy ingestion](docs/p1-policy-ingestion-evidence.md),
+[delivery](docs/p1-policy-delivery-evidence.md),
+[lease](docs/p1-capability-lease-evidence.md),
+[CLI](docs/p1-cli-truth.md), and [service](docs/p1-service-evaluation.md) records.
 
-Attested in-guest telemetry, sensor heartbeats, event-loss accounting, replay
-rejection, hardware-backed attestation and production sensor-liveness enforcement
-are not implemented by this change. They require a separately approved Phase 2.
+## Known limits
 
-The diagnostics still contain assertions that should not be treated as verification:
-Sigstore doctor status can reflect configuration presence, and inspect reconstructs
-some execution and lineage labels without checking actual receipts. The controller
-can fall back to memory if its filesystem store cannot initialize. These limits
-must be addressed before relying on the system for consequential admission.
-
-No performance, scale, hardware, production-readiness or compliance claim is made.
+- Phase 2 attested in-guest telemetry, hardware or software TPM quotes, signed
+  heartbeats and complete sensor-loss accounting are not implemented. An explicit
+  Hubble loss notice faults the source; that is not proof of loss-free visibility.
+- Policy-engine ingestion retains native assertions, missing revisions and audit
+  truncation. Capture-only records do not authorize control promotion; an authored
+  mapping and sufficient proof are required.
+- Bound workload resolution supports Pods and Deployments. Unsupported or ambiguous
+  attribution fails closed. UID-less flows have an additional creation-time guard.
+- Multi-object Kubernetes reads/publications are not transactional. Consumers must
+  verify current epoch and validity deadlines before consequential actions.
+- Lease revocation constrains new admissions; already-granted external effects need
+  downstream fencing for guaranteed cancellation. Pending uncertain effects are
+  never automatically replayed or refunded.
+- The deployed runtime proof was Linux arm64 in a four-CPU, approximately 8 GiB
+  Colima VM. Cross-compilation does not establish native support on other targets.
+  Resource contention caused earlier control-plane delays; unrelated workloads
+  were preserved. No performance or scale claim is made.
+- Scorecard publishing runs on the default branch. The PR scan is read-only; the
+  published result badge remains unverified until an approved merge and publishing
+  run. Code-Review and Contributors may score low for a solo maintainer.
 
 ## Development
 
-The following checks were run successfully against this change:
+The integrated source has passed build, vet, race tests and the existing linter:
 
 ```sh
 go build ./...
@@ -77,9 +95,10 @@ go test -count=1 -race ./...
 golangci-lint run ./...
 ```
 
-See [architecture](docs/architecture/CKX-OSKAL-001.md),
-[contribution guidance](CONTRIBUTING.md) and [security reporting](SECURITY.md).
-The Apache 2.0 [license](LICENSE) applies.
+Use [explicit projection inputs](docs/oscal-projection-inputs.md) for OSCAL exports,
+[security reporting](SECURITY.md) for disclosures, and
+[contribution guidance](CONTRIBUTING.md) for changes. The Apache 2.0
+[license](LICENSE) applies.
 
 ## Verify this release
 
