@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -130,132 +131,200 @@ func isValidHexDigest(hexHash string) bool {
 	return true
 }
 
+// IntegrityError prevents opening an incomplete or corrupt durable evidence store.
+// Affected files are preserved in place for investigation and explicit recovery.
+type IntegrityError struct {
+	Path   string
+	Reason string
+}
+
+func (e *IntegrityError) Error() string {
+	return fmt.Sprintf("evidence store integrity failure at %s: %s; preserve this file, inspect the store and restore verified bytes before reopening", e.Path, e.Reason)
+}
+
+func readEvidenceFile(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, &IntegrityError{Path: path, Reason: "cannot inspect file: " + err.Error()}
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &IntegrityError{Path: path, Reason: "expected a regular evidence file"}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, &IntegrityError{Path: path, Reason: "cannot read file: " + err.Error()}
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, MaxPayloadBytes+1))
+	if err != nil {
+		return nil, &IntegrityError{Path: path, Reason: "cannot read evidence bytes: " + err.Error()}
+	}
+	if len(data) > MaxPayloadBytes {
+		return nil, &IntegrityError{Path: path, Reason: fmt.Sprintf("file exceeds %d-byte restore bound", MaxPayloadBytes)}
+	}
+	return data, nil
+}
+
+func (r *ContentAddressedEvidenceRepository) indexEnvelope(env assurance.EvidenceEnvelope, data []byte) {
+	h := sha256.Sum256(data)
+	digest := "sha256:" + hex.EncodeToString(h[:])
+	if _, exists := r.envelopes[digest]; exists {
+		return
+	}
+	r.envelopes[digest] = env
+	r.blobs[digest] = data
+	uri := env.Subject.URI()
+	r.subjectIndex[uri] = appendUniqueDigest(r.subjectIndex[uri], digest)
+}
+
+func validStoredEnvelope(env assurance.EvidenceEnvelope) bool {
+	return env.ID != "" && env.Subject.Validate() == nil && env.ObservationType != "" && !env.CapturedAt.IsZero()
+}
+
+func (r *ContentAddressedEvidenceRepository) restoreReceipt(path string, data []byte) error {
+	var receipt assurance.ControlReceipt
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return &IntegrityError{Path: path, Reason: "invalid receipt JSON"}
+	}
+	sig, err := hex.DecodeString(receipt.Signature)
+	if err != nil || len(sig) != ed25519.SignatureSize || receipt.Subject.Validate() != nil || receipt.Control.Validate() != nil {
+		return &IntegrityError{Path: path, Reason: "malformed receipt identity, control or Ed25519 signature encoding"}
+	}
+	// Parsing and content addressing do not authenticate the receipt. Verification
+	// requires an explicit trusted public key at the inspection/admission boundary.
+	h := sha256.Sum256(data)
+	hash := hex.EncodeToString(h[:])
+	key := strings.TrimSuffix(filepath.Base(path), ".json")
+	suffix := strings.TrimPrefix(key, "rcpt-")
+	if len(suffix) == 12 && key != "rcpt-"+receipt.Control.ID {
+		if _, err := hex.DecodeString(suffix); err == nil && suffix != hash[:12] {
+			return &IntegrityError{Path: path, Reason: "receipt content does not match its digest filename"}
+		}
+	}
+	r.receipts[key] = receipt
+	r.receipts[hash] = receipt
+	_, _, leaf := extractSubjectNamespaceKindAndLeaf(receipt.Subject)
+	if leaf != "" && receipt.Control.ID != "" {
+		r.receipts[fmt.Sprintf("%s-%s", leaf, receipt.Control.ID)] = receipt
+		r.receipts[fmt.Sprintf("rcpt-%s-%s", leaf, receipt.Control.ID)] = receipt
+	}
+	return nil
+}
+
 func (r *ContentAddressedEvidenceRepository) loadFromDisk() error {
 	blobsDir := filepath.Join(r.baseDir, "blobs", "sha256")
-	dirsToScan := []string{
-		blobsDir,
-		r.baseDir,
+	entries, err := os.ReadDir(blobsDir)
+	if err != nil {
+		return &IntegrityError{Path: blobsDir, Reason: "cannot enumerate CAS blobs: " + err.Error()}
 	}
-
-	for _, dir := range dirsToScan {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
+	for _, entry := range entries {
+		name := entry.Name()
+		ext := filepath.Ext(name)
+		if ext != ".json" && ext != ".bin" {
 			continue
 		}
-
-		for _, entry := range entries {
-			if entry.IsDir() {
+		path := filepath.Join(blobsDir, name)
+		expected := strings.TrimSuffix(name, ext)
+		if !isValidHexDigest(expected) {
+			return &IntegrityError{Path: path, Reason: "invalid SHA-256 blob filename"}
+		}
+		data, err := readEvidenceFile(path)
+		if err != nil {
+			return err
+		}
+		h := sha256.Sum256(data)
+		if hex.EncodeToString(h[:]) != expected {
+			return &IntegrityError{Path: path, Reason: "SHA-256 digest does not match blob filename"}
+		}
+		if ext == ".bin" {
+			r.blobs["sha256:"+expected] = data
+			continue
+		}
+		var env assurance.EvidenceEnvelope
+		if err := json.Unmarshal(data, &env); err != nil || !validStoredEnvelope(env) {
+			return &IntegrityError{Path: path, Reason: "malformed evidence envelope"}
+		}
+		r.indexEnvelope(env, data)
+	}
+	// Legacy top-level envelopes remain supported. Unrelated valid export JSON is
+	// not evidence and must not be imported into the observation index.
+	entries, err = os.ReadDir(r.baseDir)
+	if err != nil {
+		return &IntegrityError{Path: r.baseDir, Reason: "cannot enumerate legacy evidence: " + err.Error()}
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		path := filepath.Join(r.baseDir, name)
+		data, err := readEvidenceFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(name, "rcpt-") {
+			if err := r.restoreReceipt(path, data); err != nil {
+				return err
+			}
+			continue
+		}
+		var list []assurance.EvidenceEnvelope
+		if err := json.Unmarshal(data, &list); err == nil {
+			hasEnvelope := false
+			for _, env := range list {
+				if env.ID != "" {
+					hasEnvelope = true
+					break
+				}
+			}
+			if !hasEnvelope {
 				continue
 			}
-			name := entry.Name()
-			if dir == blobsDir && strings.HasSuffix(name, ".bin") {
-				expectedHex := strings.TrimSuffix(name, ".bin")
-				if !isValidHexDigest(expectedHex) {
-					continue
+			for _, env := range list {
+				if !validStoredEnvelope(env) {
+					return &IntegrityError{Path: path, Reason: "malformed legacy evidence envelope"}
 				}
-				path := filepath.Join(dir, name)
-				data, err := os.ReadFile(path)
+				raw, err := json.Marshal(env)
 				if err != nil {
-					continue
+					return &IntegrityError{Path: path, Reason: "cannot encode legacy envelope"}
 				}
-				h := sha256.Sum256(data)
-				actualHex := hex.EncodeToString(h[:])
-				if actualHex != expectedHex {
-					continue
-				}
-				r.blobs["sha256:"+actualHex] = data
-				continue
+				r.indexEnvelope(env, raw)
 			}
-			if !strings.HasSuffix(name, ".json") {
-				continue
-			}
-			path := filepath.Join(dir, name)
-			data, err := os.ReadFile(path)
-			if err != nil {
-				continue
-			}
-
-			if dir == blobsDir {
-				expectedHex := strings.TrimSuffix(name, ".json")
-				if !isValidHexDigest(expectedHex) {
-					continue
-				}
-				h := sha256.Sum256(data)
-				actualHex := hex.EncodeToString(h[:])
-				if actualHex != expectedHex {
-					// Tampered blob in content-addressed store: reject on startup
-					continue
-				}
-				var env assurance.EvidenceEnvelope
-				if err := json.Unmarshal(data, &env); err == nil && env.ID != "" {
-					digest := "sha256:" + actualHex
-					if _, exists := r.envelopes[digest]; !exists {
-						r.envelopes[digest] = env
-						r.blobs[digest] = data
-						subURI := env.Subject.URI()
-						r.subjectIndex[subURI] = append(r.subjectIndex[subURI], digest)
-					}
-				}
-				continue
-			}
-
-			// Try list of envelopes
-			var envList []assurance.EvidenceEnvelope
-			if err := json.Unmarshal(data, &envList); err == nil && len(envList) > 0 {
-				for _, env := range envList {
-					if env.ID != "" {
-						digest := env.Digest()
-						if _, exists := r.envelopes[digest]; !exists {
-							r.envelopes[digest] = env
-							raw, _ := json.Marshal(env)
-							r.blobs[digest] = raw
-							subURI := env.Subject.URI()
-							r.subjectIndex[subURI] = append(r.subjectIndex[subURI], digest)
-						}
-					}
-				}
-				continue
-			}
-
-			// Try single envelope
-			var env assurance.EvidenceEnvelope
-			if err := json.Unmarshal(data, &env); err == nil && env.ID != "" {
-				digest := env.Digest()
-				if _, exists := r.envelopes[digest]; !exists {
-					r.envelopes[digest] = env
-					r.blobs[digest] = data
-					subURI := env.Subject.URI()
-					r.subjectIndex[subURI] = append(r.subjectIndex[subURI], digest)
-				}
-			}
+			continue
 		}
+		var env assurance.EvidenceEnvelope
+		if err := json.Unmarshal(data, &env); err != nil {
+			return &IntegrityError{Path: path, Reason: "invalid legacy JSON; unable to establish store contents"}
+		}
+		if env.ID == "" {
+			continue
+		}
+		if !validStoredEnvelope(env) {
+			return &IntegrityError{Path: path, Reason: "malformed legacy evidence envelope"}
+		}
+		r.indexEnvelope(env, data)
 	}
-
 	receiptsDir := filepath.Join(r.baseDir, "receipts")
-	if entries, err := os.ReadDir(receiptsDir); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-				continue
-			}
-			data, err := os.ReadFile(filepath.Join(receiptsDir, entry.Name()))
-			if err != nil {
-				continue
-			}
-			var rcpt assurance.ControlReceipt
-			if err := json.Unmarshal(data, &rcpt); err == nil && rcpt.Signature != "" {
-				key := strings.TrimSuffix(entry.Name(), ".json")
-				r.receipts[key] = rcpt
-				h := sha256.Sum256(data)
-				r.receipts[hex.EncodeToString(h[:])] = rcpt
-				_, _, subLeaf := extractSubjectNamespaceKindAndLeaf(rcpt.Subject)
-				if subLeaf != "" && rcpt.Control.ID != "" {
-					r.receipts[fmt.Sprintf("%s-%s", subLeaf, rcpt.Control.ID)] = rcpt
-					r.receipts[fmt.Sprintf("rcpt-%s-%s", subLeaf, rcpt.Control.ID)] = rcpt
-				}
-			}
+	entries, err = os.ReadDir(receiptsDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return &IntegrityError{Path: receiptsDir, Reason: "cannot enumerate receipts: " + err.Error()}
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(receiptsDir, entry.Name())
+		data, err := readEvidenceFile(path)
+		if err != nil {
+			return err
+		}
+		if err := r.restoreReceipt(path, data); err != nil {
+			return err
 		}
 	}
-
 	return nil
 }
 
@@ -271,6 +340,10 @@ func (r *ContentAddressedEvidenceRepository) Put(
 	envelopeData, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
 		return assurance.EvidenceRef{}, fmt.Errorf("failed to serialize evidence envelope: %w", err)
+	}
+
+	if len(envelopeData) > MaxPayloadBytes {
+		return assurance.EvidenceRef{}, fmt.Errorf("evidence envelope exceeds %d-byte storage bound", MaxPayloadBytes)
 	}
 
 	var rawPayload []byte
@@ -691,6 +764,10 @@ func (r *ContentAddressedEvidenceRepository) PutReceipt(ctx context.Context, rec
 		return "", fmt.Errorf("failed to serialize control receipt: %w", err)
 	}
 
+	if len(data) > MaxPayloadBytes {
+		return "", fmt.Errorf("receipt exceeds %d-byte storage bound", MaxPayloadBytes)
+	}
+
 	h := sha256.Sum256(data)
 	hexHash := hex.EncodeToString(h[:])
 	rcptID := fmt.Sprintf("rcpt-%s", hexHash[:12])
@@ -720,14 +797,20 @@ func (r *ContentAddressedEvidenceRepository) PutReceipt(ctx context.Context, rec
 		}
 		byHashPath := filepath.Join(receiptsDir, fmt.Sprintf("rcpt-%s.json", hexHash[:12]))
 		if byHashPath != byIDPath {
-			_ = writeFileAtomic(byHashPath, data, 0644)
+			if err := writeFileAtomic(byHashPath, data, 0644); err != nil {
+				return "", fmt.Errorf("persist receipt digest alias: %w", err)
+			}
 		}
 		if subControlRcptKey != "" {
 			bySubControlPath := filepath.Join(receiptsDir, fmt.Sprintf("%s.json", subControlRcptKey))
-			_ = writeFileAtomic(bySubControlPath, data, 0644)
+			if err := writeFileAtomic(bySubControlPath, data, 0644); err != nil {
+				return "", fmt.Errorf("persist receipt subject alias: %w", err)
+			}
 		}
 		topPath := filepath.Join(r.baseDir, fmt.Sprintf("%s.json", rcptID))
-		_ = writeFileAtomic(topPath, data, 0644)
+		if err := writeFileAtomic(topPath, data, 0644); err != nil {
+			return "", fmt.Errorf("persist legacy receipt alias: %w", err)
+		}
 	}
 
 	r.receipts[rcptID] = receipt
@@ -759,34 +842,37 @@ func (r *ContentAddressedEvidenceRepository) VerifyIntegrity(ctx context.Context
 		verified++
 	}
 
-	if r.baseDir != "" {
-		blobsDir := filepath.Join(r.baseDir, "blobs", "sha256")
-		entries, err := os.ReadDir(blobsDir)
-		if err == nil {
-			for _, entry := range entries {
-				if ctx != nil && ctx.Err() != nil {
-					return verified, ctx.Err()
-				}
-				if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-					continue
-				}
-				ext := filepath.Ext(entry.Name())
-				if ext != ".json" && ext != ".bin" {
-					continue
-				}
-				expectedHex := strings.TrimSuffix(entry.Name(), ext)
-				data, err := os.ReadFile(filepath.Join(blobsDir, entry.Name()))
-				if err != nil {
-					return verified, fmt.Errorf("failed reading CAS blob %s: %w", entry.Name(), err)
-				}
-				h := sha256.Sum256(data)
-				actualHex := hex.EncodeToString(h[:])
-				if actualHex != expectedHex {
-					return verified, fmt.Errorf("on-disk CAS integrity tampering detected in %s: expected sha256:%s, computed sha256:%s", entry.Name(), expectedHex, actualHex)
-				}
-			}
+	if r.baseDir == "" {
+		return verified, nil
+	}
+	blobsDir := filepath.Join(r.baseDir, "blobs", "sha256")
+	entries, err := os.ReadDir(blobsDir)
+	if err != nil {
+		return verified, &IntegrityError{Path: blobsDir, Reason: "cannot enumerate CAS blobs: " + err.Error()}
+	}
+	for _, entry := range entries {
+		if ctx != nil && ctx.Err() != nil {
+			return verified, ctx.Err()
+		}
+		ext := filepath.Ext(entry.Name())
+		if ext != ".json" && ext != ".bin" {
+			continue
+		}
+		path := filepath.Join(blobsDir, entry.Name())
+		expected := strings.TrimSuffix(entry.Name(), ext)
+		if !isValidHexDigest(expected) {
+			return verified, &IntegrityError{Path: path, Reason: "invalid SHA-256 blob filename"}
+		}
+		data, err := readEvidenceFile(path)
+		if err != nil {
+			return verified, err
+		}
+		h := sha256.Sum256(data)
+		if hex.EncodeToString(h[:]) != expected {
+			return verified, &IntegrityError{Path: path, Reason: "SHA-256 digest does not match blob filename"}
 		}
 	}
+
 	return verified, nil
 }
 

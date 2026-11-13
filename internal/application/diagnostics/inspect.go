@@ -7,11 +7,13 @@ import (
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 )
 
 // TelemetryTrace answers: What did the machinery do? (Constitution Section 13.1)
 type TelemetryTrace struct {
+	Scope              string `json:"scope"`
 	EvaluationDuration string `json:"evaluation_duration"`
 	EvidenceFetchTime  string `json:"evidence_fetch_time"`
 	RuleExecutionTime  string `json:"rule_execution_time"`
@@ -56,11 +58,19 @@ type EvidenceItem struct {
 
 // EvidenceTrace answers: What can be proven afterward? (Constitution Section 13.4)
 type EvidenceTrace struct {
-	EvidenceRoot    string         `json:"evidence_root"`
-	SignerIdentity  string         `json:"signer_identity"`
-	Artifacts       []EvidenceItem `json:"artifacts"`
-	MerkleValid     bool           `json:"merkle_valid"`
-	LineageVerified bool           `json:"lineage_verified"`
+	EvidenceRoot   string         `json:"evidence_root"`
+	SignerIdentity string         `json:"signer_identity"`
+	Artifacts      []EvidenceItem `json:"artifacts"`
+	// Legacy compatibility: no Merkle inclusion proof is available; use RootConsistency.
+	MerkleValid bool `json:"merkle_valid"`
+	// Legacy compatibility: a receipt does not establish observation lineage.
+	LineageVerified              bool        `json:"lineage_verified"`
+	RootConsistency              CheckStatus `json:"root_consistency"`
+	ReceiptVerification          CheckStatus `json:"receipt_verification"`
+	ReceiptBinding               CheckStatus `json:"receipt_binding"`
+	ProducerIdentityVerification CheckStatus `json:"producer_identity_verification"`
+	LineageVerification          CheckStatus `json:"lineage_verification"`
+	VerificationDetail           string      `json:"verification_detail"`
 }
 
 // RemediationAction provides actionable advice and remediation steps to achieve or restore compliance.
@@ -84,194 +94,140 @@ type InspectionReport struct {
 	Remediation    *RemediationAction `json:"remediation,omitempty"`
 }
 
-// InspectSubject inspects a workload subject and reconstructs all 4 Truth Channels.
-func InspectSubject(
-	_ context.Context,
-	subject assurance.SubjectRef,
-	eval assurance.ClaimEvaluation,
-	envelopes []assurance.EvidenceEnvelope,
-) *InspectionReport {
-	now := time.Now().UTC()
+// InspectSubject describes supplied evaluation facts. It does not reconstruct
+// historical execution, authenticate producers, or infer the existence of receipts.
+func InspectSubject(ctx context.Context, subject assurance.SubjectRef, eval assurance.ClaimEvaluation, envelopes []assurance.EvidenceEnvelope) *InspectionReport {
 	start := time.Now()
-	ruleStart := time.Now()
-
-	var validEnvelopes []assurance.EvidenceEnvelope
-	hasStaleEnvelope := false
+	now := start.UTC()
+	var items []EvidenceItem
 	for _, env := range envelopes {
-		if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
+		if env.CapturedAt.IsZero() || env.CapturedAt.After(now) {
 			continue
 		}
-		if now.Sub(env.CapturedAt) > 15*time.Minute {
-			hasStaleEnvelope = true
-		}
-		validEnvelopes = append(validEnvelopes, env)
-	}
-	if len(envelopes) > 0 && len(validEnvelopes) == 0 {
-		eval.State = assurance.AssuranceStateUnknown
-		eval.EvidenceRoot = ""
-	} else if hasStaleEnvelope && (eval.State == assurance.AssuranceStateAssured || eval.State == assurance.AssuranceStateVerified) {
-		eval.State = assurance.AssuranceStateStale
-	}
-
-	// 1. Telemetry Trace (populated with measured runtime metrics at end of inspection)
-	var memStats runtime.MemStats
-	runtime.ReadMemStats(&memStats)
-	telemetry := TelemetryTrace{
-		MemoryAllocatedKB: memStats.Alloc / 1024,
-		CacheHit:          len(validEnvelopes) > 0,
-	}
-
-	// 2. Execution Trace
-	cryptoOutcome := "VERIFIED"
-	policyOutcome := "EVALUATED"
-	receiptOutcome := "EMITTED"
-	switch eval.State {
-	case assurance.AssuranceStateUnknown, assurance.AssuranceStateUnspecified:
-		if len(validEnvelopes) == 0 {
-			cryptoOutcome = "UNVERIFIED"
-			policyOutcome = "SKIPPED"
-			receiptOutcome = "SKIPPED"
-		} else {
-			cryptoOutcome = "UNVERIFIED"
-			receiptOutcome = "SKIPPED"
-		}
-	case assurance.AssuranceStateStale:
-		cryptoOutcome = "STALE"
-		receiptOutcome = "DEFERRED"
-	case assurance.AssuranceStateFailed:
-		cryptoOutcome = "FAILED"
-		receiptOutcome = "SKIPPED"
-	}
-
-	execSteps := []ExecutionStep{
-		{Order: 1, Stage: "Ingestion", Action: "Resolve subject reference", Outcome: "RESOLVED"},
-		{Order: 2, Stage: "EvidenceGathering", Action: fmt.Sprintf("Query CAS repository (%d envelopes)", len(validEnvelopes)), Outcome: "COMPLETED"},
-		{Order: 3, Stage: "CryptographicVerification", Action: "Verify Merkle root & producer SPIFFE identities", Outcome: cryptoOutcome},
-		{Order: 4, Stage: "PolicyEvaluation", Action: fmt.Sprintf("Evaluate CEL contract for %s", eval.Control.ID), Outcome: policyOutcome},
-		{Order: 5, Stage: "StateTransition", Action: "Compute 6D Vector State transition", Outcome: eval.State.String()},
-		{Order: 6, Stage: "ReceiptGeneration", Action: "Emit signed in-toto receipt & Merkle attestation", Outcome: receiptOutcome},
-	}
-	execTrace := ExecutionTrace{
-		PathID: fmt.Sprintf("trace-%s-%d", eval.Control.ID, now.UnixNano()),
-		Steps:  execSteps,
-	}
-
-	// 3. Decision Trace
-	disposition := "ADMIT"
-	rationale := "All evidence requirements satisfied with valid cryptographic proofs."
-	switch eval.State {
-	case assurance.AssuranceStateUnknown:
-		disposition = "SAFE_HOLD"
-		rationale = "Absence of verified evidence (Section 15: EMPTY != NEGATIVE, but requires SAFE_HOLD)."
-	case assurance.AssuranceStateFailed:
-		disposition = "DENY"
-		rationale = "Non-conformant evaluation or anti-invariant violation."
-	case assurance.AssuranceStateStale:
-		disposition = "ADMIT_WITH_OBLIGATIONS"
-		rationale = "Operating on stale evidence; obligation to refresh evidence emitted."
-	}
-
-	decTrace := DecisionTrace{
-		ControlID:       eval.Control.ID,
-		PolicyDigest:    eval.Epoch.PolicyDigest,
-		EffectivePolicy: fmt.Sprintf("cel:policy:%s:v1", eval.Control.ID),
-		Disposition:     disposition,
-		Obligations:     []string{"log-admission-event", "refresh-within-15m"},
-		InputBindings: map[string]string{
-			"subject.uri":  subject.URI(),
-			"control.id":   eval.Control.ID,
-			"epoch.digest": eval.Epoch.PolicyDigest,
-		},
-		Rationale: rationale,
-	}
-	ruleDur := time.Since(ruleStart)
-	evStart := time.Now()
-
-	// 4. Evidence Trace
-	var items []EvidenceItem
-	var evRefs []assurance.EvidenceRef
-	for _, env := range validEnvelopes {
-		evRefs = append(evRefs, env.Artifact)
-		freshness := "FRESH"
-		if eval.State == assurance.AssuranceStateStale || now.Sub(env.CapturedAt) > 15*time.Minute {
-			freshness = "STALE"
-		}
 		items = append(items, EvidenceItem{
-			EnvelopeID: env.ID,
-			Type:       env.ObservationType,
-			Digest:     env.Artifact.Digest,
-			Producer:   env.Producer.Canonical(),
-			Timestamp:  env.CapturedAt.Format(time.RFC3339),
-			Freshness:  freshness,
+			EnvelopeID: env.ID, Type: env.ObservationType,
+			Digest: env.Artifact.Digest, Producer: env.Producer.Canonical(),
+			Timestamp: env.CapturedAt.Format(time.RFC3339), Freshness: "UNKNOWN",
 		})
 	}
-
-	evRoot := eval.EvidenceRoot
-	if evRoot == "" && len(evRefs) > 0 {
-		evRoot = receipts.ComputeEvidenceRoot(evRefs)
+	if len(items) == 0 && (eval.State == assurance.AssuranceStateAssured || eval.State == assurance.AssuranceStateVerified) {
+		eval.State = assurance.AssuranceStateUnknown
+		eval.EvidenceRoot = ""
 	}
-
-	signerID := "none"
-	if len(validEnvelopes) > 0 {
-		signerID = validEnvelopes[0].Producer.Canonical()
-	} else if eval.State == assurance.AssuranceStateAssured || eval.State == assurance.AssuranceStateVerified {
-		signerID = "spiffe://assurance.ckodex.io/server"
+	evidence := EvidenceTrace{
+		EvidenceRoot: eval.EvidenceRoot, SignerIdentity: "UNKNOWN", Artifacts: items,
+		RootConsistency: StatusUnknown, ReceiptVerification: StatusUnknown,
+		ReceiptBinding: StatusUnknown, ProducerIdentityVerification: StatusUnknown,
+		LineageVerification: StatusUnknown,
+		VerificationDetail:  "No receipt or trusted verification key supplied. Observation payload integrity and producer identity have not been verified by inspection.",
 	}
-
-	evidenceTrace := EvidenceTrace{
-		EvidenceRoot:    evRoot,
-		SignerIdentity:  signerID,
-		Artifacts:       items,
-		MerkleValid:     len(items) > 0 && eval.State != assurance.AssuranceStateFailed,
-		LineageVerified: len(items) > 0 && (eval.State == assurance.AssuranceStateAssured || eval.State == assurance.AssuranceStateVerified),
+	if len(eval.Evidence) > 0 && eval.EvidenceRoot != "" {
+		evidence.RootConsistency = StatusFail
+		if receipts.ComputeEvidenceRoot(eval.Evidence) == eval.EvidenceRoot {
+			evidence.RootConsistency = StatusPass
+		}
 	}
-	evDur := time.Since(evStart)
-
-	var remediation *RemediationAction
-	ctrlID := eval.Control.ID
-	if ctrlID == "" {
-		ctrlID = "AC-6"
+	if evidence.RootConsistency == StatusFail {
+		evidence.VerificationDetail = "Supplied evidence reference digests contradict the reported aggregate root; preserve the inputs and investigate."
+		if eval.State != assurance.AssuranceStateFailed {
+			eval.State = assurance.AssuranceStateUnknown
+		}
 	}
-
+	disposition := "SAFE_HOLD"
+	rationale := "The supplied evaluation does not establish an admission decision."
 	switch eval.State {
+	case assurance.AssuranceStateAssured, assurance.AssuranceStateVerified:
+		disposition = "ADMIT"
+		rationale = "The supplied evaluation reports its evidence requirements satisfied; inspection has not authenticated that evaluation or its observations."
 	case assurance.AssuranceStateUnknown:
-		remediation = &RemediationAction{
-			TargetControl:  ctrlID,
-			Disposition:    "SAFE_HOLD",
-			MissingSignals: []string{"kubernetes.admission evidence", "runtime.ebpf telemetry", "spiffe.svid identity"},
-			RemediationCmd: "oskal record admission --file <manifest.yaml> OR deploy ckodex-webhook to cluster",
-			Explanation:    "Subject is in SAFE_HOLD because no verified evidence envelopes exist in CAS (EMPTY != NEGATIVE). Ingest observations to transition out of UNKNOWN.",
-		}
+		rationale = "The supplied evaluation lacks sufficient eligible evidence. UNKNOWN does not establish a violation."
 	case assurance.AssuranceStateFailed:
-		remediation = &RemediationAction{
-			TargetControl:  ctrlID,
-			Disposition:    "DENY",
-			MissingSignals: []string{"non-root securityContext", "dropped capabilities (CAP_SYS_ADMIN, CAP_NET_ADMIN)"},
-			RemediationCmd: "Update pod spec: set securityContext.runAsNonRoot=true and drop privileged capabilities",
-			Explanation:    "Subject violated non-negotiable security invariant (Invariant I-01). Resource execution is blocked.",
-		}
+		disposition = "DENY"
+		rationale = "The supplied evaluation reports a failed control; inspect its decision trace and governing contract for the cause."
 	case assurance.AssuranceStateStale:
-		remediation = &RemediationAction{
-			TargetControl:  ctrlID,
-			Disposition:    "ADMIT_WITH_OBLIGATIONS",
-			MissingSignals: []string{"fresh evidence within 15-minute validity epoch"},
-			RemediationCmd: "oskal daemon sync OR trigger observer refresh for subject",
-			Explanation:    "Existing evidence is older than maximum freshness window. Refresh required to maintain assurance standing.",
-		}
+		disposition = "ADMIT_WITH_OBLIGATIONS"
+		rationale = "The supplied evaluation reports stale evidence. The governing policy determines any obligations."
 	}
-
+	policy := eval.Epoch.PolicyDigest
+	if policy == "" {
+		policy = "UNKNOWN"
+	}
 	report := &InspectionReport{
-		Subject:        subject.URI(),
-		AssuranceState: eval.State.String(),
-		Timestamp:      now,
-		Telemetry:      telemetry,
-		Execution:      execTrace,
-		Decision:       decTrace,
-		Evidence:       evidenceTrace,
-		Remediation:    remediation,
+		Subject: subject.URI(), AssuranceState: eval.State.String(), Timestamp: now,
+		Execution: ExecutionTrace{PathID: eval.ID, Steps: []ExecutionStep{
+			{Order: 1, Stage: "Inspection", Action: fmt.Sprintf("Describe %d supplied evidence envelopes", len(items)), Outcome: "OBSERVED"},
+			{Order: 2, Stage: "HistoricalExecution", Action: "Original execution trace was not supplied", Outcome: "UNKNOWN"},
+			{Order: 3, Stage: "ReceiptVerification", Action: "No receipt or trusted verification key supplied", Outcome: "UNKNOWN"},
+		}},
+		Decision: DecisionTrace{
+			ControlID: eval.Control.ID, PolicyDigest: eval.Epoch.PolicyDigest,
+			EffectivePolicy: policy, Disposition: disposition,
+			InputBindings: map[string]string{
+				"subject.uri": subject.URI(), "control.id": eval.Control.ID,
+				"epoch.digest": eval.Epoch.CompositeDigest(),
+			},
+			Rationale: rationale,
+		},
+		Evidence: evidence,
 	}
-	report.Telemetry.RuleExecutionTime = formatDurationASCII(ruleDur)
-	report.Telemetry.EvidenceFetchTime = formatDurationASCII(evDur)
+	if ctx.Err() != nil {
+		report.Evidence.VerificationDetail = "Inspection interrupted: " + ctx.Err().Error()
+	}
+	if disposition != "ADMIT" {
+		report.Remediation = &RemediationAction{TargetControl: eval.Control.ID, Disposition: disposition, Explanation: "Inspect the governing EvidenceContract and evaluation decision trace; refresh missing or stale observations or investigate reported violations. No recovery operation has been executed."}
+	}
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	report.Telemetry.MemoryAllocatedKB = mem.Alloc / 1024
+	report.Telemetry.Scope = "inspection"
+	report.Telemetry.EvidenceFetchTime = "UNKNOWN"
+	report.Telemetry.RuleExecutionTime = "UNKNOWN"
 	report.Telemetry.EvaluationDuration = formatDurationASCII(time.Since(start))
 	return report
+}
+
+// InspectStoredSubject verifies a persisted receipt using an explicit trust anchor.
+// The key must be trusted by the caller, not inferred from the receipt or archive.
+// A valid receipt authenticates the evaluator assertion, not the observations.
+func InspectStoredSubject(ctx context.Context, subject assurance.SubjectRef, eval assurance.ClaimEvaluation, envelopes []assurance.EvidenceEnvelope, repo ports.ReceiptRepository, receiptID, trustedPublicKey string) (*InspectionReport, error) {
+	report := InspectSubject(ctx, subject, eval, envelopes)
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if trustedPublicKey == "" {
+		return report, fmt.Errorf("an explicitly trusted receipt public key is required")
+	}
+	if repo == nil {
+		return report, fmt.Errorf("receipt repository is required")
+	}
+	receipt, err := repo.GetReceipt(ctx, receiptID)
+	if err != nil {
+		return report, fmt.Errorf("read inspection receipt: %w", err)
+	}
+	ok, err := receipts.VerifyIndependentReceipt(receipt, trustedPublicKey)
+	if err != nil || !ok {
+		report.Evidence.ReceiptVerification = StatusFail
+		report.Evidence.VerificationDetail = "Receipt signature verification failed under the supplied trust anchor."
+		if err != nil {
+			return report, fmt.Errorf("verify inspection receipt: %w", err)
+		}
+		return report, fmt.Errorf("invalid inspection receipt signature")
+	}
+	report.Evidence.ReceiptVerification = StatusPass
+	report.Evidence.SignerIdentity = receipt.Evaluator.Canonical()
+	report.Evidence.ReceiptBinding = StatusFail
+	stateMatches := receipt.State == eval.State || (receipt.State == assurance.AssuranceStateAssured && eval.State == assurance.AssuranceStateVerified)
+	if report.Evidence.RootConsistency == StatusFail ||
+		receipt.Subject.Digest() != subject.Digest() ||
+		receipt.Control.Canonical() != eval.Control.Canonical() ||
+		receipt.Epoch.CompositeDigest() != eval.Epoch.CompositeDigest() ||
+		receipt.EvidenceRoot != eval.EvidenceRoot || !stateMatches ||
+		receipt.EvaluatedAt.IsZero() || receipt.EvaluatedAt.After(time.Now().UTC()) {
+		report.Evidence.VerificationDetail = "Valid receipt signature, but receipt does not bind this subject, control, state, epoch, evidence root or valid evaluation time."
+		return report, fmt.Errorf("inspection receipt binding mismatch")
+	}
+	report.Evidence.ReceiptBinding = StatusPass
+	report.Evidence.VerificationDetail = "Receipt signature and evaluation binding verified under the explicit trust anchor. Observation payload integrity, producer identity and lineage remain UNKNOWN."
+	report.Execution.Steps[2] = ExecutionStep{Order: 3, Stage: "ReceiptVerification", Action: "Read stored receipt; verify signature and evaluation binding under explicit trust anchor", Outcome: "VERIFIED"}
+	return report, nil
 }
