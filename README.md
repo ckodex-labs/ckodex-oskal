@@ -4,6 +4,7 @@ OSKAL checks Kubernetes evidence and reports UNKNOWN when required evidence is m
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ckodex-labs/ckodex-oskal/badge)](https://scorecard.dev/viewer/?uri=github.com/ckodex-labs/ckodex-oskal)
 
 Code-Review and Contributors scores may be low because this project has a solo maintainer; the badge reports the measured result.
+Scorecard publishing runs on the default branch. Pull requests run a read-only scan; the result badge remains unverified until the publishing workflow is merged and run.
 
 With Go matching go.mod, make, Docker, Kind and kubectl installed, run from this checkout:
 
