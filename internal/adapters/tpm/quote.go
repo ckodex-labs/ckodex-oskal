@@ -158,7 +158,7 @@ func (v *Verifier) Verify(q Quote, expected [QualificationSize]byte) (VerifiedQu
 	if err != nil {
 		return VerifiedQuote{}, fmt.Errorf("quote ECDSA signature: %w", err)
 	}
-	if ecc.Hash != tpm2.TPMAlgSHA256 || len(ecc.SignatureR.Buffer) != 32 || len(ecc.SignatureS.Buffer) != 32 {
+	if ecc.Hash != tpm2.TPMAlgSHA256 || !p256ScalarSize(ecc.SignatureR.Buffer) || !p256ScalarSize(ecc.SignatureS.Buffer) {
 		return VerifiedQuote{}, fmt.Errorf("quote signature hash or scalar size mismatch")
 	}
 	digest := sha256.Sum256(q.Attestation)
@@ -183,3 +183,5 @@ func selection(index uint32) tpm2.TPMLPCRSelection {
 func matchingSelection(s tpm2.TPMLPCRSelection, index uint32) bool {
 	return bytes.Equal(tpm2.Marshal(s), tpm2.Marshal(selection(index)))
 }
+
+func p256ScalarSize(scalar []byte) bool { return len(scalar) > 0 && len(scalar) <= 32 }

@@ -19,7 +19,11 @@ convert verified quote facts into source eligibility.
 
 Consequential mutations are confined to explicit integration-test provisioning:
 reset demo PCR 16, measure the running test executable, extend that digest, and
-create an authorization-protected restricted signing AK. The test harness is the
+create an authorization-protected restricted signing AK. The test harness also
+uses the dedicated disposable TPM's known default lockout authorization to reset
+its dictionary-attack counter before provisioning and after intentional wrong-AK
+authorization tests. Dictionary-attack protection and its parameters remain
+enabled and unchanged. Production code never performs this recovery. The harness is the
 measurement authority for this experiment; this is not an independent guest
 measurement broker, measured boot, IMA validation, or memory-integrity proof.
 Production adapter code does not provision keys, reset PCRs, or enroll itself.
@@ -206,3 +210,76 @@ exit 124 under a two-second bound. The complete real TPM integration race suite
 then passed through the published host-loopback endpoint. The original bridge
 run is not used as network-isolation proof. Network metadata, the negative probe,
 and the new integration output are retained with the private runtime evidence.
+
+## Opaque report port and enrollment coherence
+
+`Provider.Attest(ctx, qualification)` obtains a real quote and produces a version
+1 JSON report bounded to 4096 bytes. Its quote fields use canonical standard
+padded base64 for the original attestation, TPM signature, and exactly 32 PCR
+bytes. The shared `signedrecords.DecodeJSON` rejects duplicate/unknown/case-aliased
+fields, malformed Unicode, excess nesting, and trailing documents. The report
+does not supply an AK or policy that could establish its own trust.
+
+`Verifier.VerifyAttestation(ctx, report, qualification)` implements the application
+port and returns `assurance.AttestedEnvironment` only after real cryptographic
+verification and the final cancellation check. Every error returns zero facts.
+`Verifier.Environment()` describes the trusted configuration for operator
+enrollment; calling it alone is not verification of a quote.
+
+The measurement descriptor is:
+
+```text
+SHA256("oskal.tpm.measurement.v1\x00"
+       || Marshal(enrolled TPML_PCR_SELECTION)
+       || expected SHA-256 PCR value)
+```
+
+It binds the bank, index, and expected value through the canonical TPM encoding.
+It is distinct from the executable hash that was extended into the PCR. The
+application compares the verified measurement descriptor, root kind, and root
+label with its externally supplied enrollment before admitting the source. A
+report cannot relabel this software verifier as hardware-backed.
+
+The provider now rejects empty/incomplete quote responses before returning them.
+ECDSA scalars accept 1..32-byte unsigned representations, with Go's standard
+ECDSA verifier enforcing the scalar range and cryptographic validity. The TPM
+wire encoding still must round-trip exactly. The current libtpms implementation
+emits padded curve-order-sized values, while the TCG structure is a sized ECC
+parameter rather than a fixed 32-byte field. See
+[libtpms signing conversion](https://github.com/stefanberger/libtpms/blob/v0.10.2/src/tpm2/crypto/openssl/CryptEccSignature.c#L143)
+and [TCG Part 2, sections 11.2.5.1 and 11.3.2](https://medias.cdn.trustedcomputinggroup.org/production/Trusted_Platform_Module_2_0_Library_Part_2_Structures_Version_185_pub_c0a962a931.pdf).
+
+### Real report and session verification
+
+The updated real integration race run passed in 3.317 seconds on the dedicated
+network. It exercised strict JSON/report errors, wrong qualification,
+cancellation, and verified environment facts. A bounded real-quote search found
+a leading-zero scalar after 202 quotes. Removing only that leading zero preserved
+the same integer and valid signature. This demonstrates verification of an
+equivalent minimal encoding; it does not claim the TPM emitted minimal encoding.
+If a bounded search finds no such scalar, the test explicitly reports
+`NOT_DEMONSTRATED` rather than claiming that coverage.
+
+Real quotes and real DSSE export-key proofs then drove the application session:
+wrong nonce/key/TLS channel; wrong proof key; measurement/root mismatch; challenge
+expiry and replay; concurrent single-use consumption; signed-record replay;
+exact missing heartbeat and sequence ranges; invalid initial timestamp; counter
+reset; healthy windows across periodic reattestation; rejection of premature
+reattest requests; expired-quote fencing; canceled admission. Rejected admission
+left no historical standing or verified quote digest.
+
+Session time inputs were explicit deterministic transition times. Cryptography,
+TPM transport, and the independent TLS exporters were real; this test does not
+replace an elapsed-time end-to-end watchdog or a live Tetragon loss measurement.
+Counter values are signed transition inputs, not a completeness claim about a
+running sensor. Root-mismatch rejection reports UNKNOWN; before admission,
+snapshot root metadata describes requested enrollment policy, not an observed
+environment. Only a successfully verified standing contains admitted facts.
+
+A retained-state rerun exposed a real `TPM_RC_LOCKOUT` after repeated intentional
+bad-password vectors. That failure log was preserved. Explicit test-owned
+dictionary-attack recovery made reruns reproducible without resetting TPM state
+or disabling protection. The upstream legacy command reader rejects `(n, EOF)`
+even when `n` contains the entire response, while the modern transport bridge
+returns that pair. A test-only reader adapter preserves the actual framed bytes
+and defers EOF until the next read; no response or TPM behavior is synthesized.

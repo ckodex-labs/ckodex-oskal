@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -25,7 +26,9 @@ import (
 	"testing"
 	"time"
 
+	legacy "github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/tpm2/transport"
 )
 
 func TestSoftwareTPMQuote(t *testing.T) {
@@ -127,6 +130,7 @@ func TestSoftwareTPMQuote(t *testing.T) {
 		}
 	})
 	t.Run("wrong_AK_authorization", func(t *testing.T) {
+		defer resetTestLockout(t, tr)
 		other := config
 		other.AKAuth = []byte("wrong authorization")
 		p, err := NewProvider(other)
@@ -265,6 +269,7 @@ func provision(t *testing.T, tr *socketTransport, address string) (Enrollment, P
 	t.Helper()
 	// These mutations are restricted to an explicitly supplied disposable demo
 	// TPM. Production provider code never creates keys or resets measurements.
+	resetTestLockout(t, tr)
 	if _, err := (tpm2.PCRReset{PCRHandle: tpm2.TPMHandle(16)}).Execute(tr); err != nil {
 		t.Fatal(err)
 	}
@@ -316,6 +321,31 @@ func provision(t *testing.T, tr *socketTransport, address string) (Enrollment, P
 	enrollment := Enrollment{AKPublic: bytes.Clone(read.OutPublic.Bytes()), AKName: bytes.Clone(read.Name.Buffer), AKQualifiedName: bytes.Clone(read.QualifiedName.Buffer), PCRIndex: 16, ExpectedPCR: sha256.Sum256(preimage[:])}
 	config := ProviderConfig{Network: "tcp", Address: address, AKHandle: uint32(rsp.ObjectHandle), AKName: enrollment.AKName, AKAuth: auth[:], PCRIndex: 16, CommandTimeout: 5 * time.Second}
 	return enrollment, config
+}
+
+func resetTestLockout(t *testing.T, tr *socketTransport) {
+	t.Helper()
+	// Only the dedicated test TPM uses the known default lockout authorization.
+	// Keep dictionary-attack protection enabled; recover the counter explicitly
+	// after intentional bad-authorization tests instead of changing its policy.
+	if err := legacy.DictionaryAttackLockReset(legacyTPMReader{transport.ToReadWriter(tr)}, legacy.AuthCommand{
+		Session: legacy.HandlePasswordSession, Attributes: legacy.AttrContinueSession,
+	}); err != nil {
+		t.Fatalf("recover dedicated test TPM lockout: %v", err)
+	}
+}
+
+// go-tpm's transport.ToReadWriter returns (n, EOF) with the complete response,
+// while legacy RunCommandRaw rejects any nonnil Read error before consuming n.
+// Preserve actual framed TPM bytes and defer EOF until the next read.
+type legacyTPMReader struct{ io.ReadWriter }
+
+func (r legacyTPMReader) Read(p []byte) (int, error) {
+	n, err := r.ReadWriter.Read(p)
+	if n > 0 && errors.Is(err, io.EOF) {
+		return n, nil
+	}
+	return n, err
 }
 
 func extend(t *testing.T, tr *socketTransport, digest [32]byte) {

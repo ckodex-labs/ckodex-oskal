@@ -84,7 +84,15 @@ func (p *Provider) Quote(ctx context.Context, qualification [QualificationSize]b
 	if err != nil {
 		return Quote{}, fmt.Errorf("TPM2_Quote: %w", err)
 	}
-	return Quote{Attestation: bytes.Clone(rsp.Quoted.Bytes()), Signature: tpm2.Marshal(rsp.Signature),
+	attestation := rsp.Quoted.Bytes()
+	if len(attestation) == 0 || len(attestation) > maxAttestationSize || rsp.Signature.SigAlg != tpm2.TPMAlgECDSA {
+		return Quote{}, fmt.Errorf("TPM returned an empty or unsupported quote response")
+	}
+	signature, err := rsp.Signature.Signature.ECDSA()
+	if err != nil || signature.Hash != tpm2.TPMAlgSHA256 || !p256ScalarSize(signature.SignatureR.Buffer) || !p256ScalarSize(signature.SignatureS.Buffer) {
+		return Quote{}, fmt.Errorf("TPM returned an incomplete ECDSA quote signature")
+	}
+	return Quote{Attestation: bytes.Clone(attestation), Signature: tpm2.Marshal(rsp.Signature),
 		PCRValue: [32]byte(read.PCRValues.Digests[0].Buffer), RootCode: SoftwareRootCode, RootLabel: SoftwareRootLabel}, nil
 }
 
