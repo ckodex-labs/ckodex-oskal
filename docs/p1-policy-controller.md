@@ -254,3 +254,10 @@ Private reproducible evidence was retained outside Git:
 No engine resources, VM settings, release artifacts, remote branches, or
 production services were modified by this manager proof. The test manager
 processes drained and exited; the owned API and evidence remain available.
+
+
+Subsequent native OPA-to-manager and live SPIFFE bundle-membership-change checks
+are recorded in [the final live verification](p1-policy-final-live-verification.md).
+They supersede the corresponding unverified integration boundaries of the earlier
+report-manager proof while retaining its original measured scope and failures.
+Primary SPIRE CA rotation remains unverified.
