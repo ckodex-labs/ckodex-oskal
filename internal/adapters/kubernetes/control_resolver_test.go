@@ -22,15 +22,7 @@ func TestControlResolver(t *testing.T) {
 	}
 
 	controls, err := resolver.ResolveControls(ctx, sub)
-	if err != nil {
-		t.Fatalf("ResolveControls failed: %v", err)
-	}
-
-	if len(controls) == 0 {
-		t.Fatal("expected at least 1 resolved control")
-	}
-
-	if controls[0].ID != "container.least-privilege" {
-		t.Fatalf("unexpected control ID: %s", controls[0].ID)
+	if err == nil || len(controls) != 0 {
+		t.Fatalf("missing authoritative reader fabricated controls: %+v %v", controls, err)
 	}
 }

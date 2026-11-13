@@ -134,26 +134,21 @@ func TestMatchesSelector(t *testing.T) {
 	}
 }
 
-func TestSubjectResolver(t *testing.T) {
+func TestSubjectResolverRequiresAuthoritativeReader(t *testing.T) {
 	resolver := NewSubjectResolver(nil)
-	ctx := t.Context()
+	sub, err := resolver.ResolveSubject(t.Context(), "k8s://payments/Deployment/payments-api")
+	if err == nil || sub.URI() != "" {
+		t.Fatalf("missing reader fabricated subject: %+v %v", sub, err)
+	}
+	digest, err := resolver.ComputeSubjectDigest(t.Context(), assurance.SubjectRef{Scheme: "k8s", ID: "payments/Deployment/payments-api"})
+	if err == nil || digest != "" {
+		t.Fatalf("missing reader fabricated digest: %s %v", digest, err)
+	}
+}
 
-	sub, err := resolver.ResolveSubject(ctx, "k8s://production/payments/Deployment/payments-api")
-	if err != nil {
-		t.Fatalf("ResolveSubject failed: %v", err)
-	}
-	if sub.Scheme != "k8s" {
-		t.Fatalf("expected scheme k8s, got %s", sub.Scheme)
-	}
-	if sub.Attributes["namespace"] != "payments" || sub.Attributes["name"] != "payments-api" {
-		t.Fatalf("unexpected attributes: %+v", sub.Attributes)
-	}
-
-	digest, err := resolver.ComputeSubjectDigest(ctx, sub)
-	if err != nil {
-		t.Fatalf("ComputeSubjectDigest failed: %v", err)
-	}
-	if digest == "" {
-		t.Fatal("expected non-empty digest")
+func TestEpochDoesNotInventMissingDimensions(t *testing.T) {
+	epoch := CalculateEpoch("subject-digest", "", "", "", "")
+	if epoch.SubjectDigest != "subject-digest" || epoch.ImplementationDigest != "" || epoch.PolicyDigest != "" || epoch.AuthorityDigest != "" || epoch.EnvironmentDigest != "" {
+		t.Fatalf("invented epoch dimensions: %+v", epoch)
 	}
 }
