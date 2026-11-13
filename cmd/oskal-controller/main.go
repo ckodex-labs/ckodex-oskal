@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -19,7 +20,6 @@ import (
 	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/kubernetes"
-	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/spire"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/webhook"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/reconcile"
@@ -96,20 +96,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	var evidenceRepo ports.EvidenceRepository
-	if evidenceDir != "" {
-		fsRepo, err := storage.NewFilesystemEvidenceRepository(evidenceDir)
-		if err != nil {
-			setupLog.Error(err, "unable to initialize filesystem evidence repository, falling back to in-memory", "path", evidenceDir)
-			evidenceRepo = storage.NewMemoryEvidenceRepository()
-		} else {
-			evidenceRepo = fsRepo
-			setupLog.Info("Initialized filesystem content-addressed evidence repository", "path", evidenceDir)
-		}
-	} else {
-		evidenceRepo = storage.NewMemoryEvidenceRepository()
-		setupLog.Info("Initialized in-memory content-addressed evidence repository")
+	evidenceRepo, err := openEvidenceRepository(evidenceDir)
+	if err != nil {
+		setupLog.Error(err, "cannot initialize durable evidence storage; inspect the path and permissions before restarting", "path", evidenceDir)
+		os.Exit(1)
 	}
+	setupLog.Info("Initialized durable content-addressed evidence repository", "path", evidenceDir)
 
 	evaluator := &reconcile.ContractEvaluator{
 		EvidenceRepo: evidenceRepo,
@@ -117,9 +109,8 @@ func main() {
 	}
 
 	receiptMgr, err := receipts.LoadOrCreateReceiptManager(assurance.AuthorityRef{
-		Scheme:      "spiffe",
-		Subject:     "prod/ns/ckodex-system/sa/oskal-controller",
-		TrustDomain: "prod",
+		Scheme:  "local",
+		Subject: "oskal-controller",
 	}, evidenceDir)
 	if err != nil {
 		setupLog.Error(err, "unable to initialize receipt manager")
@@ -128,12 +119,6 @@ func main() {
 
 	subjectResolver := kubernetes.NewSubjectResolver(mgr.GetClient())
 	controlResolver := kubernetes.NewControlResolver(mgr.GetClient())
-	svidValidator := spire.NewSVIDValidator(spire.NewTrustBundle(), assurance.AuthorityRef{
-		Scheme:      "spiffe",
-		Subject:     "prod/ns/ckodex-system/sa/oskal-controller",
-		TrustDomain: "prod",
-	})
-
 	if err = (&reconcile.ControlBindingReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
@@ -143,7 +128,6 @@ func main() {
 		SubjectResolver: subjectResolver,
 		ControlResolver: controlResolver,
 		ReceiptSigner:   receiptMgr,
-		SVIDValidator:   svidValidator,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ControlBinding")
 		os.Exit(1)
@@ -254,6 +238,17 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func openEvidenceRepository(path string) (ports.EvidenceRepository, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("--evidence-dir must name a durable writable directory")
+	}
+	repo, err := storage.NewFilesystemEvidenceRepository(path)
+	if err != nil {
+		return nil, fmt.Errorf("open durable evidence store: %w", err)
+	}
+	return repo, nil
 }
 
 func fileReadable(path string) bool {

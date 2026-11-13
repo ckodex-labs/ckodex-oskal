@@ -323,10 +323,13 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	metaCondition := metav1.Condition{
 		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
+		Status:             metav1.ConditionFalse,
 		LastTransitionTime: metav1.Now(),
 		Reason:             targetState.String(),
 		Message:            statusMsg,
+	}
+	if targetState == assurance.AssuranceStateAssured {
+		metaCondition.Status = metav1.ConditionTrue
 	}
 
 	var derogCond *metav1.Condition
