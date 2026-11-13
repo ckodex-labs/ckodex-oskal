@@ -145,3 +145,43 @@ preserved in `/private/tmp/oskal-p1-pin-spire-evidence/final`, including a prote
 container command requires re-creating that explicitly owned isolated environment.
 No VM setting, global trust store, unrelated container, release, or remote branch
 was changed.
+
+## Bounded archive and service readiness integration
+
+The native manager test was extended after archive bounds and capture service
+readiness were integrated. It now requires `/readyz` HTTP 200 before OPA starts,
+while no native decision exists, and HTTP 500 after the oversized authenticated
+batch enters SAFE_HOLD. HTTP 500 is controller-runtime 0.25.2's actual health
+checker failure response; subsequent ingestion remains HTTP 503.
+
+The test also now fails immediately if a visible envelope's raw artifact cannot
+be read. Immutable storage publishes payloads before envelopes; the test no
+longer tolerates the earlier incomplete disk-observer window.
+
+On 2026-11-13 the actual explicit fixture command below exited 0:
+
+```sh
+OSKAL_POLICY_CONTROLLER_KUBECONFIG=/private/tmp/oskal-p1-runtime-evidence/kubeconfig OSKAL_POLICY_CONTROLLER_NAMESPACE=oskal-policy-test OSKAL_POLICY_OPA_BINARY=/private/tmp/oskal-p1-policy-evidence/opa OSKAL_POLICY_TLS_CA=/private/tmp/oskal-p1-policy-evidence/opa-ca.crt OSKAL_POLICY_TLS_CA_KEY=/private/tmp/oskal-p1-policy-evidence/opa-ca.key OSKAL_POLICY_TLS_SERVER_CERT=/private/tmp/oskal-p1-policy-evidence/opa-server.crt OSKAL_POLICY_TLS_SERVER_KEY=/private/tmp/oskal-p1-policy-evidence/opa-server.key OSKAL_POLICY_TLS_CLIENT_CERT=/private/tmp/oskal-p1-policy-evidence/opa-client.crt OSKAL_POLICY_TLS_CLIENT_KEY=/private/tmp/oskal-p1-policy-evidence/opa-client.key OSKAL_POLICY_CONTROLLER_EVIDENCE=/private/tmp/oskal-p1-policy-controller-evidence/readiness-bounded go test -count=1 -race -run '^TestRealManagerOPACapture$' -v ./cmd/oskal-controller
+```
+
+Output excerpt:
+
+```text
+actual manager service readiness HTTP200
+actual manager handler HTTP401
+actual manager handler HTTP400
+actual manager handler HTTP503
+actual manager handler HTTP413
+actual manager service readiness HTTP500
+actual manager handler HTTP503
+actual manager handler HTTP503
+VERIFIED oversized actual source exposed SAFE_HOLD, stable reason across expiry, next deliveries denied; mode=SAFE_HOLD reason=policy source bound exceeded; operator review and restart required
+--- PASS: TestRealManagerOPACapture (18.65s)
+PASS
+ok github.com/ckodex-labs/ckodex-oskal/cmd/oskal-controller 20.276s
+```
+
+Both native allow/deny payloads and their masked raw source bytes were verified
+under the actual observer key. The full output is retained at
+`/private/tmp/oskal-final-native-readiness-bounded.log`. This is a real host
+manager/API/OPA integration check, not a deployed Helm or Service-network proof.

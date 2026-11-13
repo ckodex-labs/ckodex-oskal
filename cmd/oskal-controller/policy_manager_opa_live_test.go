@@ -263,6 +263,34 @@ func TestRealManagerOPACapture(t *testing.T) {
 		data, _ := os.ReadFile(managerLog)
 		t.Fatalf("actual manager listener not ready: %s", data)
 	}
+	probeClient := &http.Client{Timeout: 2 * time.Second}
+	assertReadiness := func(expected int) {
+		t.Helper()
+		var status int
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+probeAddress+"/readyz", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := probeClient.Do(request)
+			if err == nil {
+				status = response.StatusCode
+				_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+				if err := errors.Join(readErr, response.Body.Close()); err != nil {
+					t.Fatal(err)
+				}
+				if status == expected {
+					t.Logf("actual manager service readiness HTTP%d", status)
+					return
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Fatalf("actual manager service readiness status=%d expected=%d", status, expected)
+	}
+	// A Kubernetes Service must be able to deliver OPA's first batch; no
+	// native decision or control standing exists at this point.
+	assertReadiness(http.StatusOK)
 	clientTLS := map[string]any{"ca_cert": caPath}
 	credentials := map[string]any{"client_tls": map[string]any{"cert": clientCert, "private_key": clientKey}}
 	opaConfig := map[string]any{"services": map[string]any{"capture": map[string]any{"url": "https://" + managerAddress, "tls": clientTLS, "credentials": credentials}, "artifact": map[string]any{"url": "https://" + bundleListener.Addr().String(), "tls": clientTLS, "credentials": credentials}}, "bundles": map[string]any{"oskal": map[string]any{"service": "artifact", "resource": "/bundle.tar.gz", "polling": map[string]any{"min_delay_seconds": 1, "max_delay_seconds": 2}}}, "decision_logs": map[string]any{"service": "capture", "resource": "/logs", "reporting": map[string]any{"min_delay_seconds": 1, "max_delay_seconds": 1}}}
@@ -323,13 +351,8 @@ func TestRealManagerOPACapture(t *testing.T) {
 		for _, envelope := range envelopes {
 			reader, err := repository.Get(ctx, envelope.Artifact)
 			if err != nil {
-				// A disk observer can see a just-published envelope before the
-				// writer completes its payload publication. Never treat that
-				// in-flight filesystem snapshot as successful evidence.
-				path := filepath.Join(store, "blobs", "sha256", strings.TrimPrefix(envelope.Artifact.Digest, "sha256:")+".bin")
-				if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
-					continue
-				}
+				// Immutable writers publish raw bytes before the referring
+				// envelope. A visible envelope must already have its artifact.
 				t.Fatal(err)
 			}
 			payload, readErr := io.ReadAll(reader)
@@ -523,6 +546,8 @@ func TestRealManagerOPACapture(t *testing.T) {
 	if hold.Lifecycle != collection.SourceSafeHold || hold.Reason == "" {
 		t.Fatalf("oversized actual source did not expose SAFE_HOLD: %+v", hold)
 	}
+	// controller-runtime healthz.Handler responds 500 when a checker fails.
+	assertReadiness(http.StatusInternalServerError)
 	call(secure, bytes.NewReader(compressed.Bytes()), 503)
 	time.Sleep(11 * time.Second)
 	after := snapshotStatus()
