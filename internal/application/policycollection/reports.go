@@ -38,6 +38,9 @@ type ReportsConfig struct {
 	MaxObjects     int
 	MaxBatchBytes  int
 	BeginBatch     BeginBatch
+	// PollCompleted reports delivery health, including a valid empty snapshot.
+	// It conveys no evidence eligibility or control assessment.
+	PollCompleted func(error)
 }
 
 type ReportsRunner struct {
@@ -109,6 +112,11 @@ func (r *ReportsRunner) Run(ctx context.Context) error {
 // Poll performs a fresh snapshot, without an RV/name cache. Deletion, replacement
 // and empty lists therefore cannot carry an old batch's eligibility forward.
 func (r *ReportsRunner) Poll(ctx context.Context) (result error) {
+	defer func() {
+		if r.config.PollCompleted != nil {
+			r.config.PollCompleted(result)
+		}
+	}()
 	select {
 	case r.active <- struct{}{}:
 		defer func() { <-r.active }()

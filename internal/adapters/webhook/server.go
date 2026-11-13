@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -14,19 +15,13 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
-	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/cel"
 )
 
-var (
-	universalDeserializer = serializer.NewCodecFactory(runtime.NewScheme()).UniversalDeserializer()
-)
-
-// EvidenceSink is a callback to consume in-flight evidence envelopes produced during admission.
-type EvidenceSink func(env assurance.EvidenceEnvelope)
+// EvidenceSink must durably persist the unchanged envelope/payload or return an
+// error. A nil sink selects policy-only operation; no durable reference is issued.
+type EvidenceSink func(context.Context, assurance.EvidenceEnvelope, []byte) error
 
 // WebhookMode defines the enforcement behavior of the admission webhook.
 type WebhookMode string
@@ -41,36 +36,48 @@ const (
 	// MaxWebhookBodyBytes bounds AdmissionReview request payload size (4 MiB) per Constitution Section 30.
 	MaxWebhookBodyBytes = 4 << 20
 	// MaxWebhookInFlight bounds simultaneous in-flight admission validations before backpressure.
-	MaxWebhookInFlight = 256
+	MaxWebhookInFlight = 16
 )
 
 // ServerConfig configures the admission webhook server.
 type ServerConfig struct {
-	ListenAddr   string
-	TLSCertPath  string
-	TLSKeyPath   string
-	TLSCertBytes []byte
-	TLSKeyBytes  []byte
-	ObserverAuth assurance.AuthorityRef
-	EvidenceSink EvidenceSink
-	Mode         WebhookMode
+	ListenAddr     string
+	TLSCertPath    string
+	TLSKeyPath     string
+	TLSCertBytes   []byte
+	TLSKeyBytes    []byte
+	ObserverAuth   assurance.AuthorityRef
+	EvidenceSink   EvidenceSink
+	Mode           WebhookMode
+	RequestTimeout time.Duration
 }
 
 // AdmissionWebhookServer handles Kubernetes ValidatingAdmissionWebhook requests.
 type AdmissionWebhookServer struct {
-	config   ServerConfig
-	observer *cel.AdmissionObserver
-	server   *http.Server
-	sem      chan struct{}
+	config      ServerConfig
+	configError error
+	server      *http.Server
+	sem         chan struct{}
 }
 
 // NewAdmissionWebhookServer creates a new AdmissionWebhookServer.
 func NewAdmissionWebhookServer(cfg ServerConfig) *AdmissionWebhookServer {
-	observer := cel.NewAdmissionObserver(cfg.ObserverAuth)
+	if cfg.RequestTimeout == 0 {
+		cfg.RequestTimeout = DefaultRequestTimeout
+	}
+	var configError error
+	if cfg.RequestTimeout <= 0 || cfg.RequestTimeout > 10*time.Second {
+		configError = fmt.Errorf("admission request timeout must be in (0,10s]")
+	}
+	if cfg.EvidenceSink != nil {
+		if err := captureIdentityValid(cfg.ObserverAuth); err != nil {
+			configError = fmt.Errorf("explicit capture observer identity required: %w", err)
+		}
+	}
 	s := &AdmissionWebhookServer{
-		config:   cfg,
-		observer: observer,
-		sem:      make(chan struct{}, MaxWebhookInFlight),
+		config:      cfg,
+		configError: configError,
+		sem:         make(chan struct{}, MaxWebhookInFlight),
 	}
 
 	mux := http.NewServeMux()
@@ -81,7 +88,7 @@ func NewAdmissionWebhookServer(cfg ServerConfig) *AdmissionWebhookServer {
 	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				http.Error(w, fmt.Sprintf("admission webhook panic recovered: %v", rec), http.StatusInternalServerError)
+				http.Error(w, "admission request processing failed", http.StatusInternalServerError)
 			}
 		}()
 		mux.ServeHTTP(w, r)
@@ -92,7 +99,7 @@ func NewAdmissionWebhookServer(cfg ServerConfig) *AdmissionWebhookServer {
 		Handler:           wrapped,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		WriteTimeout:      cfg.RequestTimeout + 5*time.Second,
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
@@ -107,29 +114,54 @@ func (s *AdmissionWebhookServer) Handler() http.Handler {
 
 // Start launches the HTTPS webhook server. It satisfies manager.Runnable.
 func (s *AdmissionWebhookServer) Start(ctx context.Context) error {
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = s.server.Shutdown(shutdownCtx)
-	}()
-
-	var err error
-	if len(s.config.TLSCertBytes) > 0 && len(s.config.TLSKeyBytes) > 0 {
-		cert, keyErr := tls.X509KeyPair(s.config.TLSCertBytes, s.config.TLSKeyBytes)
-		if keyErr != nil {
-			return fmt.Errorf("failed to parse in-memory TLS key pair: %w", keyErr)
-		}
-		s.server.TLSConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-		}
-		err = s.server.ListenAndServeTLS("", "")
-	} else {
-		err = s.server.ListenAndServeTLS(s.config.TLSCertPath, s.config.TLSKeyPath)
+	if s.configError != nil {
+		return s.configError
 	}
+	var certificate tls.Certificate
+	var err error
+	if len(s.config.TLSCertBytes) > 0 || len(s.config.TLSKeyBytes) > 0 {
+		if len(s.config.TLSCertBytes) == 0 || len(s.config.TLSKeyBytes) == 0 {
+			return fmt.Errorf("inline TLS certificate and key must be supplied together")
+		}
+		certificate, err = tls.X509KeyPair(s.config.TLSCertBytes, s.config.TLSKeyBytes)
+	} else {
+		if s.config.TLSCertPath == "" || s.config.TLSKeyPath == "" {
+			return fmt.Errorf("TLS certificate and key must be explicitly supplied")
+		}
+		certificate, err = tls.LoadX509KeyPair(s.config.TLSCertPath, s.config.TLSKeyPath)
+	}
+	if err != nil {
+		return fmt.Errorf("load webhook TLS identity: %w", err)
+	}
+	s.server.TLSConfig = &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13}
+	listener, err := net.Listen("tcp", s.config.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("listen for admission requests: %w", err)
+	}
+	limited := newConnectionListener(listener, MaxWebhookConnections)
+	defer func() { _ = limited.Close() }()
+	finished := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		select {
+		case <-finished:
+			return
+		case <-ctx.Done():
+		}
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.server.Shutdown(shutdown); err != nil {
+			_ = s.server.Close()
+		}
+	}()
+	err = s.server.ServeTLS(limited, "", "")
+	close(finished)
+	// A context-triggered shutdown owns its bounded drain/forced close. Do not
+	// let the manager return while that work is still running in a goroutine.
+	<-shutdownDone
 
-	if err != nil && err != http.ErrServerClosed {
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
@@ -146,6 +178,10 @@ func (s *AdmissionWebhookServer) handleHealthz(w http.ResponseWriter, r *http.Re
 }
 
 func (s *AdmissionWebhookServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if s.configError != nil {
+		http.Error(w, "admission capture configuration invalid", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ready"))
 }
@@ -167,6 +203,14 @@ func (s *AdmissionWebhookServer) handleValidate(w http.ResponseWriter, r *http.R
 		}
 	}
 
+	ctx, cancel := context.WithTimeout(r.Context(), s.config.RequestTimeout)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	if err := http.NewResponseController(w).SetReadDeadline(deadline); err != nil {
+		http.Error(w, "host cannot enforce admission read deadline", http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { _ = http.NewResponseController(w).SetReadDeadline(time.Time{}) }()
 	r.Body = http.MaxBytesReader(w, r.Body, MaxWebhookBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -180,21 +224,26 @@ func (s *AdmissionWebhookServer) handleValidate(w http.ResponseWriter, r *http.R
 	}
 	defer func() { _ = r.Body.Close() }()
 
+	if err := boundAdmissionJSON(body); err != nil {
+		http.Error(w, "admission JSON is malformed, ambiguous or exceeds structural bounds", http.StatusBadRequest)
+		return
+	}
 	var review admissionv1.AdmissionReview
-	if _, _, err := universalDeserializer.Decode(body, nil, &review); err != nil {
-		// Fallback to standard JSON unmarshaling
-		if jsonErr := json.Unmarshal(body, &review); jsonErr != nil {
-			http.Error(w, fmt.Sprintf("could not decode admission review: %v", jsonErr), http.StatusBadRequest)
-			return
-		}
+	if err := json.Unmarshal(body, &review); err != nil {
+		http.Error(w, "could not decode admission review", http.StatusBadRequest)
+		return
 	}
 
+	if review.APIVersion != "" && review.APIVersion != "admission.k8s.io/v1" || review.Kind != "" && review.Kind != "AdmissionReview" {
+		http.Error(w, "unsupported admission review type", http.StatusBadRequest)
+		return
+	}
 	if review.Request == nil {
 		http.Error(w, "admission review request is nil", http.StatusBadRequest)
 		return
 	}
 
-	resp := s.validateRequest(review.Request)
+	resp := s.validateRequest(ctx, review.Request, body, time.Now().UTC())
 	resp.UID = review.Request.UID
 
 	responseReview := admissionv1.AdmissionReview{
@@ -215,164 +264,7 @@ func (s *AdmissionWebhookServer) handleValidate(w http.ResponseWriter, r *http.R
 	_, _ = w.Write(respBytes)
 }
 
-// validateRequest executes in-flight validation and generates evidence envelopes.
-func (s *AdmissionWebhookServer) validateRequest(req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
-	// Only evaluate Pod resource creations / updates
-	if req.Kind.Kind != "Pod" {
-		return &admissionv1.AdmissionResponse{Allowed: true}
-	}
-
-	var pod corev1.Pod
-	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
-		return &admissionv1.AdmissionResponse{
-			Allowed: false,
-			Result: &metav1.Status{
-				Status:  "Failure",
-				Message: fmt.Sprintf("failed to unmarshal Pod object: %v", err),
-			},
-		}
-	}
-
-	now := time.Now().UTC()
-	podName := req.Name
-	if podName == "" && pod.Name != "" {
-		podName = pod.Name
-	}
-	if podName == "" && pod.GenerateName != "" {
-		podName = fmt.Sprintf("%s%s", pod.GenerateName, string(req.UID))
-	}
-	if podName == "" {
-		podName = string(req.UID)
-	}
-
-	sub := assurance.SubjectRef{
-		Scheme: "k8s",
-		ID:     fmt.Sprintf("%s/Pod/%s", req.Namespace, podName),
-		Attributes: map[string]string{
-			"namespace": req.Namespace,
-			"name":      podName,
-			"uid":       string(req.UID),
-		},
-	}
-
-	epoch := assurance.AssuranceEpoch{
-		SubjectDigest:        sub.Digest(),
-		ImplementationDigest: assurance.ComputeStringDigest("kubernetes:validating-webhook"),
-		AuthorityDigest:      assurance.ComputeStringDigest(s.config.ObserverAuth.Canonical()),
-		EnvironmentDigest:    assurance.ComputeStringDigest("cluster:kubernetes"),
-	}
-
-	// 1. Invariant Evaluation: Run as non-root
-	nonRootViolations := checkNonRootCompliance(&pod)
-
-	// 2. Invariant Evaluation: Dropped capabilities and privilege escalation
-	capViolations := checkCapabilityCompliance(&pod)
-
-	var allViolations []string
-	allViolations = append(allViolations, nonRootViolations...)
-	allViolations = append(allViolations, capViolations...)
-
-	mode := WebhookMode(strings.ToLower(strings.TrimSpace(string(s.config.Mode))))
-	if mode != ModeAudit && mode != ModeWarn {
-		mode = ModeEnforcing
-	}
-
-	if len(allViolations) > 0 {
-		if mode != ModeAudit && mode != ModeWarn {
-			return &admissionv1.AdmissionResponse{
-				Allowed: false,
-				Result: &metav1.Status{
-					Status:  "Failure",
-					Message: fmt.Sprintf("Admission denied by policy: %s", strings.Join(allViolations, "; ")),
-				},
-			}
-		}
-
-		// Degraded mode: ModeAudit or ModeWarn permits admission with full diagnostic audit trail
-		// AND emits adverse violation evidence to EvidenceSink so CAS truthfully transitions to FAILED/DECOHERENT (Section 29).
-		policy := cel.SampleRestrictedContainerPolicy()
-		policyDigest := cel.ComputePolicyDigest(policy)
-		epochWithPolicy := epoch
-		epochWithPolicy.PolicyDigest = policyDigest
-		rawViolationPayload := fmt.Sprintf("admission-violation|%s|%s|mode=%s|violations=%s|%d",
-			sub.URI(), policy.Name, string(mode), strings.Join(allViolations, ";"), now.Unix())
-		violationDigest := assurance.ComputeStringDigest(rawViolationPayload)
-		adverseEnv := assurance.EvidenceEnvelope{
-			Schema:          "assurance.ckodex.io/evidence/v1alpha1",
-			ID:              fmt.Sprintf("ev-adm-viol-%d", now.UnixNano()),
-			Subject:         sub,
-			ObservationType: "kubernetes.admission.violation",
-			CapturedAt:      now,
-			Producer:        s.config.ObserverAuth,
-			Artifact: assurance.EvidenceRef{
-				URI:       fmt.Sprintf("evidence://admission-violation/%s/%s", req.Namespace, podName),
-				Digest:    violationDigest,
-				MediaType: "application/vnd.ckodex.evidence+json",
-			},
-			IntegrityDigest: violationDigest,
-			Epoch:           epochWithPolicy,
-			ControlRefs: []assurance.ControlRef{
-				{Namespace: "ckodex", ID: "container.least-privilege"},
-			},
-		}
-		if adverseEnv.Producer.Scheme == "" {
-			adverseEnv.Producer = assurance.AuthorityRef{
-				Scheme:      "spiffe",
-				Subject:     "prod/ns/ckodex-assurance/sa/cel-admission-observer",
-				TrustDomain: "prod",
-			}
-		}
-		if s.config.EvidenceSink != nil {
-			s.config.EvidenceSink(adverseEnv)
-		}
-
-		auditAnnotations := map[string]string{
-			"assurance.ckodex.io/admitted-in-degraded-mode": "true",
-			"assurance.ckodex.io/webhook-mode":              string(mode),
-			"assurance.ckodex.io/violations":                strings.Join(allViolations, "; "),
-			"assurance.ckodex.io/admission-envelope-id":     adverseEnv.ID,
-			"assurance.ckodex.io/admission-envelope-digest": adverseEnv.IntegrityDigest,
-		}
-
-		resp := &admissionv1.AdmissionResponse{
-			Allowed:          true,
-			AuditAnnotations: auditAnnotations,
-		}
-		if mode == ModeWarn {
-			resp.Warnings = allViolations
-		}
-		return resp
-	}
-
-	// 3. Generate In-Flight Evidence Envelope (Proof before side effect)
-	policy := cel.SampleRestrictedContainerPolicy()
-	env, err := s.observer.GenerateAdmissionEvidence(sub, policy, true, epoch, now)
-	if err != nil {
-		return &admissionv1.AdmissionResponse{
-			Allowed: false,
-			Result: &metav1.Status{
-				Status:  "Failure",
-				Message: fmt.Sprintf("Failed to generate in-flight admission evidence: %v", err),
-			},
-		}
-	}
-
-	// Deliver evidence to sink if configured
-	if s.config.EvidenceSink != nil {
-		s.config.EvidenceSink(env)
-	}
-
-	return &admissionv1.AdmissionResponse{
-		Allowed: true,
-		AuditAnnotations: map[string]string{
-			"assurance.ckodex.io/admission-envelope-id":     env.ID,
-			"assurance.ckodex.io/admission-envelope-digest": env.IntegrityDigest,
-			"assurance.ckodex.io/assurance-epoch":           env.Epoch.CompositeDigest(),
-		},
-	}
-}
-
-// checkNonRootCompliance validates that container executes as non-root.
+// allContainers includes regular, init and ephemeral container declarations.
 func allContainers(pod *corev1.Pod) []corev1.Container {
 	total := len(pod.Spec.Containers) + len(pod.Spec.InitContainers) + len(pod.Spec.EphemeralContainers)
 	all := make([]corev1.Container, 0, total)
@@ -413,7 +305,8 @@ func checkNonRootCompliance(pod *corev1.Pod) []string {
 	return violations
 }
 
-// checkCapabilityCompliance validates dropped capabilities and privilege escalation prohibitions.
+// checkCapabilityCompliance rejects explicit prohibited privilege requests.
+// It does not require capability drops or treat omitted escalation flags as false.
 func checkCapabilityCompliance(pod *corev1.Pod) []string {
 	var violations []string
 	forbiddenCaps := map[string]bool{
@@ -434,9 +327,11 @@ func checkCapabilityCompliance(pod *corev1.Pod) []string {
 				violations = append(violations, fmt.Sprintf("container %s allows privilege escalation", c.Name))
 			}
 			if c.SecurityContext.Capabilities != nil {
+				seen := make(map[string]bool)
 				for _, addCap := range c.SecurityContext.Capabilities.Add {
 					norm := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(string(addCap))), "CAP_")
-					if forbiddenCaps[norm] {
+					if forbiddenCaps[norm] && !seen[norm] {
+						seen[norm] = true
 						violations = append(violations, fmt.Sprintf("container %s adds prohibited capability %s", c.Name, addCap))
 					}
 				}

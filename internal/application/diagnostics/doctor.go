@@ -44,12 +44,23 @@ type DoctorReport struct {
 
 // RunDoctor performs deep system preflight diagnostics (Constitution Section 36 & 37).
 func RunDoctor(ctx context.Context, evidenceDir string) *DoctorReport {
+	return RunDoctorWithLimits(ctx, evidenceDir, storage.DefaultArchiveLimits())
+}
+
+// RunDoctorWithLimits validates an explicit archive budget before any diagnostic effects.
+func RunDoctorWithLimits(ctx context.Context, evidenceDir string, limits storage.ArchiveLimits) *DoctorReport {
 	start := time.Now()
 	report := &DoctorReport{
 		Timestamp:    start.UTC(),
 		OverallState: StatusPass,
 	}
 
+	if err := limits.Validate(); err != nil {
+		report.OverallState = StatusFail
+		report.Duration = formatDurationASCII(time.Since(start))
+		report.addCheck(DiagnosticCheck{Name: "Archive Limits", Target: evidenceDir, Status: StatusFail, Message: err.Error(), Remediation: "Use reviewed positive archive byte and entry budgets"})
+		return report
+	}
 	// 1. Runtime Substrate Check
 	report.addCheck(checkRuntimeSubstrate())
 
@@ -57,7 +68,7 @@ func RunDoctor(ctx context.Context, evidenceDir string) *DoctorReport {
 	report.addCheck(checkOscalSchemas())
 
 	// 3. Evidence Storage / CAS Integrity Check
-	report.addCheck(checkEvidenceStorage(ctx, evidenceDir))
+	report.addCheck(checkEvidenceStorageWithLimits(ctx, evidenceDir, limits))
 
 	// 4. SPIFFE / SPIRE Workload API Socket Check
 	report.addCheck(checkSPIFFEWorkloadAPI(ctx))
@@ -140,7 +151,7 @@ func checkOscalSchemas() DiagnosticCheck {
 	}
 }
 
-func checkEvidenceStorage(ctx context.Context, dir string) DiagnosticCheck {
+func checkEvidenceStorageWithLimits(ctx context.Context, dir string, limits storage.ArchiveLimits) DiagnosticCheck {
 	start := time.Now()
 	if dir == "" {
 		return DiagnosticCheck{
@@ -191,7 +202,7 @@ func checkEvidenceStorage(ctx context.Context, dir string) DiagnosticCheck {
 		}
 	}
 
-	repo, err := storage.NewFilesystemEvidenceRepository(dir)
+	repo, err := storage.NewFilesystemEvidenceRepositoryWithLimits(dir, limits)
 	if err != nil {
 		return DiagnosticCheck{
 			Name:        "Content-Addressable Storage (CAS)",

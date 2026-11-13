@@ -12,19 +12,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/health"
-	"google.golang.org/grpc/health/grpc_health_v1"
-	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/status"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/mcp"
@@ -32,14 +25,12 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/utcp"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/webhook"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/diagnostics"
-	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/evaluation"
 	"github.com/ckodex-labs/ckodex-oskal/internal/config"
-	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	recoscal "github.com/ckodex-labs/ckodex-oskal/internal/reconciler/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/scaffold"
-	"github.com/ckodex-labs/ckodex-oskal/internal/service"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ui/cockpit"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ui/format"
 	commonv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
@@ -49,36 +40,22 @@ import (
 )
 
 var (
-	version     = "v1.0.0"
-	commit      = "dev"
-	date        = "unknown"
-	serverAddr  string
-	evidenceDir string
-	tlsCAFile   string
+	version           = "v1.0.1"
+	commit            = "dev"
+	date              = "unknown"
+	serverAddr        string
+	evidenceDir       string
+	tlsCAFile         string
+	tlsServerName     string
+	tlsClientCertFile string
+	tlsClientKeyFile  string
 )
-
-func getGRPCClient(ctx context.Context, addr string) (servicesv1.AssuranceServiceClient, *grpc.ClientConn, error) {
-	creds := insecure.NewCredentials()
-	if tlsCAFile != "" {
-		tlsCreds, err := credentials.NewClientTLSFromFile(tlsCAFile, "")
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to load TLS CA file %s: %w", tlsCAFile, err)
-		}
-		creds = tlsCreds
-	}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to connect to gRPC server at %s: %w", addr, err)
-	}
-	client := servicesv1.NewAssuranceServiceClient(conn)
-	return client, conn, nil
-}
 
 func loadLocalEvidence(dir string, sub assurance.SubjectRef) ([]assurance.EvidenceEnvelope, error) {
 	if dir == "" {
 		return nil, nil
 	}
-	repo, err := storage.OpenFilesystemEvidenceRepository(dir)
+	repo, err := openCLIArchive(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -99,10 +76,10 @@ func resolveSubjectFromArgsOrFlags(args []string, kind, name, namespace string) 
 	}
 	if name != "" {
 		if namespace == "" {
-			namespace = "default"
+			return assurance.SubjectRef{}, errors.New("--subject-namespace is required with --subject-name")
 		}
 		if kind == "" {
-			kind = "Deployment"
+			return assurance.SubjectRef{}, errors.New("--subject-kind is required with --subject-name")
 		}
 		return assurance.SubjectRef{
 			Scheme: "k8s",
@@ -112,123 +89,19 @@ func resolveSubjectFromArgsOrFlags(args []string, kind, name, namespace string) 
 	return assurance.SubjectRef{}, errors.New("must specify subject URI as positional argument or via --subject-name")
 }
 
-const defaultMaxEvidenceAge = 15 * time.Minute
-
 func evaluateLocalEnvelopes(
 	sub assurance.SubjectRef,
 	ctrl assurance.ControlRef,
 	envelopes []assurance.EvidenceEnvelope,
 	now time.Time,
 ) (assurance.ClaimEvaluation, string, []assurance.EvidenceEnvelope) {
-	var validEnvelopes []assurance.EvidenceEnvelope
-	isStale := false
-	isViolation := false
-	for _, env := range envelopes {
-		if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
-			continue
-		}
-		if assurance.IsAdverseObservationType(env.ObservationType) {
-			isViolation = true
-		}
-		if now.Sub(env.CapturedAt) > defaultMaxEvidenceAge {
-			isStale = true
-		}
-		validEnvelopes = append(validEnvelopes, env)
-	}
-
-	if len(validEnvelopes) == 0 {
-		freshness := "unknown"
-		if len(envelopes) > 0 {
-			freshness = "invalid (future-dated)"
-		}
-		return assurance.ClaimEvaluation{
-			ID:           fmt.Sprintf("eval-unknown-%s", ctrl.ID),
-			Subject:      sub,
-			Control:      ctrl,
-			State:        assurance.AssuranceStateUnknown,
-			Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(sub.URI())},
-			Evidence:     nil,
-			Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 0, Missing: 1},
-			EvidenceRoot: "",
-			EvaluatedAt:  now,
-			ValidUntil:   now.Add(5 * time.Minute),
-		}, freshness, nil
-	}
-
-	var evRefs []assurance.EvidenceRef
-	for _, env := range validEnvelopes {
-		evRefs = append(evRefs, env.Artifact)
-	}
-	evRoot := receipts.ComputeEvidenceRoot(evRefs)
-	policyDigest := assurance.ComputeStringDigest(sub.URI() + ":" + evRoot)
-
-	state := assurance.AssuranceStateAssured
-	freshness := "current"
-	comp := assurance.EvidenceCompleteness{
-		Required: len(evRefs),
-		Present:  len(evRefs),
-		Verified: len(evRefs),
-	}
-	if isViolation {
-		state = assurance.AssuranceStateFailed
-		comp = assurance.EvidenceCompleteness{
-			Required: len(evRefs),
-			Present:  len(evRefs),
-			Verified: 0,
-			Missing:  1,
-		}
-	} else if isStale {
-		state = assurance.AssuranceStateStale
-		freshness = "stale"
-		comp = assurance.EvidenceCompleteness{
-			Required: len(evRefs),
-			Present:  len(evRefs),
-			Verified: 0,
-			Stale:    len(evRefs),
+	matching := make([]assurance.EvidenceEnvelope, 0, len(envelopes))
+	for _, envelope := range envelopes {
+		if envelope.Subject.URI() == sub.URI() {
+			matching = append(matching, envelope)
 		}
 	}
-
-	return assurance.ClaimEvaluation{
-		ID:      fmt.Sprintf("eval-%s", ctrl.ID),
-		Subject: sub,
-		Control: ctrl,
-		State:   state,
-		Epoch: assurance.AssuranceEpoch{
-			SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-			ImplementationDigest: assurance.ComputeStringDigest("kubernetes:admission-policy"),
-			PolicyDigest:         policyDigest,
-			AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/operator"),
-			EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
-		},
-		Evidence:     evRefs,
-		Completeness: comp,
-		EvidenceRoot: evRoot,
-		EvaluatedAt:  now,
-		ValidUntil:   now.Add(5 * time.Minute),
-	}, freshness, validEnvelopes
-}
-
-type manifestSecurityContext struct {
-	Privileged               *bool  `yaml:"privileged"`
-	RunAsNonRoot             *bool  `yaml:"runAsNonRoot"`
-	RunAsUser                *int64 `yaml:"runAsUser"`
-	AllowPrivilegeEscalation *bool  `yaml:"allowPrivilegeEscalation"`
-	Capabilities             *struct {
-		Add  []string `yaml:"add"`
-		Drop []string `yaml:"drop"`
-	} `yaml:"capabilities"`
-}
-
-type manifestContainer struct {
-	Name            string                   `yaml:"name"`
-	SecurityContext *manifestSecurityContext `yaml:"securityContext"`
-}
-
-type manifestPodSpec struct {
-	SecurityContext     *manifestSecurityContext `yaml:"securityContext"`
-	Containers          []manifestContainer      `yaml:"containers"`
-	InitContainers      []manifestContainer      `yaml:"initContainers"`
-	EphemeralContainers []manifestContainer      `yaml:"ephemeralContainers"`
+	return evaluation.UnverifiedEvaluation(sub, ctrl, matching, now), "unknown (unverified material; no authoritative contract/epoch/producer proof)", matching
 }
 
 func splitYAMLDocuments(data []byte) [][]byte {
@@ -256,121 +129,6 @@ func splitYAMLDocuments(data []byte) [][]byte {
 	return docs
 }
 
-func validateSingleManifestDoc(doc []byte) error {
-	var raw map[string]interface{}
-	if err := yaml.Unmarshal(doc, &raw); err != nil {
-		return err
-	}
-	if _, hasSpec := raw["spec"]; !hasSpec {
-		return nil
-	}
-
-	var parsed struct {
-		Kind string `yaml:"kind"`
-		Spec struct {
-			SecurityContext     *manifestSecurityContext `yaml:"securityContext"`
-			Containers          []manifestContainer      `yaml:"containers"`
-			InitContainers      []manifestContainer      `yaml:"initContainers"`
-			EphemeralContainers []manifestContainer      `yaml:"ephemeralContainers"`
-			Template            *struct {
-				Spec manifestPodSpec `yaml:"spec"`
-			} `yaml:"template"`
-			JobTemplate *struct {
-				Spec struct {
-					Template *struct {
-						Spec manifestPodSpec `yaml:"spec"`
-					} `yaml:"template"`
-				} `yaml:"spec"`
-			} `yaml:"jobTemplate"`
-		} `yaml:"spec"`
-	}
-	if err := yaml.Unmarshal(doc, &parsed); err != nil {
-		return err
-	}
-
-	podSpec := manifestPodSpec{
-		SecurityContext:     parsed.Spec.SecurityContext,
-		Containers:          parsed.Spec.Containers,
-		InitContainers:      parsed.Spec.InitContainers,
-		EphemeralContainers: parsed.Spec.EphemeralContainers,
-	}
-	if parsed.Spec.Template != nil {
-		podSpec = parsed.Spec.Template.Spec
-	} else if parsed.Spec.JobTemplate != nil && parsed.Spec.JobTemplate.Spec.Template != nil {
-		podSpec = parsed.Spec.JobTemplate.Spec.Template.Spec
-	}
-
-	var violations []string
-	podNonRoot := false
-	if podSpec.SecurityContext != nil {
-		if podSpec.SecurityContext.RunAsUser != nil && *podSpec.SecurityContext.RunAsUser == 0 {
-			violations = append(violations, "pod securityContext sets runAsUser=0 (root)")
-		}
-		if podSpec.SecurityContext.RunAsNonRoot != nil {
-			if !*podSpec.SecurityContext.RunAsNonRoot {
-				violations = append(violations, "pod securityContext explicitly sets runAsNonRoot=false")
-			} else {
-				podNonRoot = true
-			}
-		}
-	}
-
-	var allContainers []manifestContainer
-	allContainers = append(allContainers, podSpec.Containers...)
-	allContainers = append(allContainers, podSpec.InitContainers...)
-	allContainers = append(allContainers, podSpec.EphemeralContainers...)
-
-	for _, c := range allContainers {
-		cName := c.Name
-		if cName == "" {
-			cName = "unnamed"
-		}
-		if c.SecurityContext == nil {
-			if !podNonRoot {
-				violations = append(violations, fmt.Sprintf("container %s missing securityContext with runAsNonRoot=true", cName))
-			}
-			continue
-		}
-		if c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged {
-			violations = append(violations, fmt.Sprintf("container %s sets privileged=true", cName))
-		}
-		if c.SecurityContext.RunAsUser != nil && *c.SecurityContext.RunAsUser == 0 {
-			violations = append(violations, fmt.Sprintf("container %s sets runAsUser=0 (root)", cName))
-		}
-		if c.SecurityContext.RunAsNonRoot != nil && !*c.SecurityContext.RunAsNonRoot {
-			violations = append(violations, fmt.Sprintf("container %s sets runAsNonRoot=false", cName))
-		}
-		if c.SecurityContext.RunAsNonRoot == nil && !podNonRoot {
-			violations = append(violations, fmt.Sprintf("container %s does not enforce runAsNonRoot=true", cName))
-		}
-		if c.SecurityContext.AllowPrivilegeEscalation != nil && *c.SecurityContext.AllowPrivilegeEscalation {
-			violations = append(violations, fmt.Sprintf("container %s sets allowPrivilegeEscalation=true", cName))
-		}
-		if c.SecurityContext.Capabilities != nil {
-			for _, capName := range c.SecurityContext.Capabilities.Add {
-				upper := strings.ToUpper(strings.TrimSpace(capName))
-				if upper == "CAP_SYS_ADMIN" || upper == "SYS_ADMIN" || upper == "CAP_NET_ADMIN" || upper == "NET_ADMIN" {
-					violations = append(violations, fmt.Sprintf("container %s adds prohibited capability %s", cName, capName))
-				}
-			}
-		}
-	}
-
-	if len(violations) > 0 {
-		return fmt.Errorf("[DENIED] workload manifest violates admission security invariants: %s", strings.Join(violations, "; "))
-	}
-	return nil
-}
-
-func validateManifestSecurity(data []byte) error {
-	for _, doc := range splitYAMLDocuments(data) {
-		if err := validateSingleManifestDoc(doc); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func NewRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
 		SilenceUsage: true,
@@ -382,13 +140,23 @@ It evaluates continuous evidence contracts, tracks semantic drift,
 and projects defensible results into standard OSCAL artifacts.`,
 	}
 
+	execution := executionOptions{}
+	execution.flags(rootCmd)
 	var configFileFlag string
 	rootCmd.PersistentFlags().StringVar(&configFileFlag, "config", "", "Path to OSKAL configuration file (default .oskal.yaml)")
 	rootCmd.PersistentFlags().StringVar(&serverAddr, "server", "", "AssuranceService gRPC address (e.g. localhost:9090)")
 	rootCmd.PersistentFlags().StringVar(&evidenceDir, "evidence-dir", "", "Path to directory containing local EvidenceEnvelope JSON files")
-	rootCmd.PersistentFlags().StringVar(&tlsCAFile, "tls-ca-file", "", "Optional path to TLS CA certificate for gRPC client connections")
+	rootCmd.PersistentFlags().Int64Var(&archiveMaxBytes, "archive-max-bytes", storage.DefaultArchiveBytes, "Maximum accounted archive bytes (1..1099511627776); history is never automatically pruned")
+	rootCmd.PersistentFlags().IntVar(&archiveMaxEntries, "archive-max-entries", storage.DefaultArchiveEntries, "Maximum accounted archive objects (1..1000000)")
+	rootCmd.PersistentFlags().StringVar(&tlsCAFile, "tls-ca-file", "", "Explicit trusted CA bundle for gRPC client connections")
+	rootCmd.PersistentFlags().StringVar(&tlsServerName, "tls-server-name", "", "Exact expected gRPC server DNS name or IP SAN")
+	rootCmd.PersistentFlags().StringVar(&tlsClientCertFile, "tls-client-cert-file", "", "Client certificate chain for gRPC mutual TLS")
+	rootCmd.PersistentFlags().StringVar(&tlsClientKeyFile, "tls-client-key-file", "", "Private key paired with the gRPC client certificate")
 
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if err := configuredArchiveLimits().Validate(); err != nil {
+			return err
+		}
 		cfg, _, err := config.LoadConfig(configFileFlag)
 		if err != nil && configFileFlag != "" {
 			return err
@@ -449,10 +217,10 @@ and projects defensible results into standard OSCAL artifacts.`,
 					fmt.Printf("STATE:           UNKNOWN\n")
 					fmt.Printf("STATUS:          Absence of verified evidence (no observations ingested)\n")
 					fmt.Printf("EVIDENCE ROOT:   none\n")
-					fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
+					fmt.Printf("QUERIED AT:  %s\n", time.Now().UTC().Format(time.RFC3339))
 					fmt.Printf("FRESHNESS:       unknown\n")
-					fmt.Printf("MISSING SIGNALS: kubernetes.admission, runtime.ebpf, spiffe.svid\n")
-					fmt.Printf("REMEDIATION:     oskal record admission --file <manifest.yaml> OR deploy ckodex-webhook\n")
+					fmt.Printf("MISSING INPUTS:  authored contract, trusted producers, authoritative epoch and artifact verification\n")
+					fmt.Printf("REMEDIATION:     configure authenticated observers, an authored contract, and trusted producer keys\n")
 					return nil
 				}
 
@@ -461,12 +229,8 @@ and projects defensible results into standard OSCAL artifacts.`,
 					fmt.Printf("EPOCH:           %s\n", resp.Epoch.PolicyDigest)
 				}
 				fmt.Printf("EVIDENCE ROOT:   %s\n", resp.EvidenceRoot)
-				fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
-				freshness := "current"
-				if resp.State == commonv1.AssuranceState_ASSURANCE_STATE_STALE {
-					freshness = "stale"
-				}
-				fmt.Printf("FRESHNESS:       %s\n", freshness)
+				fmt.Printf("QUERIED AT:  %s\n", time.Now().UTC().Format(time.RFC3339))
+				fmt.Printf("FRESHNESS:       UNKNOWN (not independently established by this response)\n")
 				return nil
 			}
 
@@ -476,7 +240,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 					return err
 				}
 				now := time.Now().UTC()
-				ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+				ctrl := assurance.ControlRef{}
 				eval, freshness, validEnvelopes := evaluateLocalEnvelopes(sub, ctrl, envelopes, now)
 
 				fmt.Printf("SUBJECT:         %s\n", sub.URI())
@@ -488,17 +252,17 @@ and projects defensible results into standard OSCAL artifacts.`,
 						fmt.Printf("STATUS:          No matching evidence envelopes found in %s\n", evidenceDir)
 					}
 					fmt.Printf("EVIDENCE ROOT:   none\n")
-					fmt.Printf("LAST EVALUATED:  %s\n", now.Format(time.RFC3339))
+					fmt.Printf("ANALYZED AT:  %s\n", now.Format(time.RFC3339))
 					fmt.Printf("FRESHNESS:       %s\n", freshness)
-					fmt.Printf("MISSING SIGNALS: kubernetes.admission, runtime.ebpf, spiffe.svid\n")
-					fmt.Printf("REMEDIATION:     oskal record admission --file <manifest.yaml> OR specify --server\n")
+					fmt.Printf("MISSING INPUTS:  authored contract, trusted producers, authoritative epoch and artifact verification\n")
+					fmt.Printf("REMEDIATION:     use an authoritative binding and trusted producer verification, or --server\n")
 					return nil
 				}
 
 				fmt.Printf("STATE:           %s\n", eval.State.String())
-				fmt.Printf("EPOCH:           %s\n", eval.Epoch.PolicyDigest)
-				fmt.Printf("EVIDENCE ROOT:   %s\n", eval.EvidenceRoot)
-				fmt.Printf("LAST EVALUATED:  %s\n", now.Format(time.RFC3339))
+				fmt.Printf("EPOCH:           UNKNOWN\n")
+				fmt.Printf("EVIDENCE ROOT:   none (unverified references only)\n")
+				fmt.Printf("ANALYZED AT:  %s\n", now.Format(time.RFC3339))
 				fmt.Printf("FRESHNESS:       %s\n", freshness)
 				return nil
 			}
@@ -508,16 +272,16 @@ and projects defensible results into standard OSCAL artifacts.`,
 			fmt.Printf("STATE:           UNKNOWN\n")
 			fmt.Printf("STATUS:          Absence of verified evidence (specify --server or --evidence-dir)\n")
 			fmt.Printf("EVIDENCE ROOT:   none\n")
-			fmt.Printf("LAST EVALUATED:  %s\n", time.Now().UTC().Format(time.RFC3339))
+			fmt.Printf("ANALYZED AT:  %s\n", time.Now().UTC().Format(time.RFC3339))
 			fmt.Printf("FRESHNESS:       unknown\n")
-			fmt.Printf("MISSING SIGNALS: kubernetes.admission, runtime.ebpf, spiffe.svid\n")
-			fmt.Printf("REMEDIATION:     oskal record admission --file <manifest.yaml> OR specify --evidence-dir\n")
+			fmt.Printf("MISSING INPUTS:  authored contract, trusted producers, authoritative epoch and artifact verification\n")
+			fmt.Printf("REMEDIATION:     configure live observers and authoritative evaluation; local files are unverified material\n")
 			return nil
 		},
 	}
 	stateCmd.Flags().StringVar(&stateSubKind, "subject-kind", "", "Kubernetes resource kind (e.g. Deployment, Pod)")
 	stateCmd.Flags().StringVar(&stateSubName, "subject-name", "", "Workload name")
-	stateCmd.Flags().StringVar(&stateSubNS, "subject-namespace", "", "Kubernetes namespace (default: default)")
+	stateCmd.Flags().StringVar(&stateSubNS, "subject-namespace", "", "Explicit Kubernetes namespace")
 
 	// 2. oscal assurance explain [<subject-uri>] --control <control>
 	var (
@@ -538,18 +302,11 @@ and projects defensible results into standard OSCAL artifacts.`,
 			scheme := sub.Scheme
 			id := sub.ID
 
-			ctrlNamespace := "nist-sp-800-53"
-			ctrlID := "AC-6"
-			if controlFlag != "" {
-				cParts := strings.SplitN(controlFlag, ":", 2)
-				if len(cParts) == 2 {
-					ctrlNamespace = cParts[0]
-					ctrlID = cParts[1]
-				} else {
-					ctrlID = controlFlag
-				}
+			ctrl, err := evaluation.ParseControlReference(controlFlag)
+			if err != nil {
+				return err
 			}
-			ctrl := assurance.ControlRef{Namespace: ctrlNamespace, ID: ctrlID}
+			ctrlNamespace, ctrlID := ctrl.Namespace, ctrl.ID
 
 			if serverAddr != "" {
 				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
@@ -563,7 +320,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 
 				resp, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
 					Subject: &commonv1.SubjectRef{Scheme: scheme, Id: id},
-					Control: &controlv1.ControlRef{Namespace: ctrlNamespace, Id: ctrlID},
+					Control: &controlv1.ControlRef{Namespace: ctrlNamespace, Id: ctrlID, Version: ctrl.Version},
 				})
 				if err != nil {
 					return fmt.Errorf("gRPC ExplainClaim failed: %w", err)
@@ -584,27 +341,25 @@ and projects defensible results into standard OSCAL artifacts.`,
 
 			eval, _, _ := evaluateLocalEnvelopes(sub, ctrl, envelopes, time.Now().UTC())
 
-			explainer := explain.NewExplainer()
-			graph := explainer.BuildExplainGraph(cmd.Context(), sub, ctrl, eval)
-
-			fmt.Print(graph.RenderText())
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), evaluation.UnverifiedExplanation(eval))
 			return nil
 		},
 	}
-	explainCmd.Flags().StringVar(&controlFlag, "control", "nist-sp-800-53:AC-6", "Target control to explain (e.g. nist-sp-800-53:AC-6)")
+	explainCmd.Flags().StringVar(&controlFlag, "control", "", "Target control to explain (e.g. nist-sp-800-53:AC-6)")
 	explainCmd.Flags().StringVar(&explainSubKind, "subject-kind", "", "Kubernetes resource kind (e.g. Deployment, Pod)")
 	explainCmd.Flags().StringVar(&explainSubName, "subject-name", "", "Workload name")
-	explainCmd.Flags().StringVar(&explainSubNS, "subject-namespace", "", "Kubernetes namespace (default: default)")
+	explainCmd.Flags().StringVar(&explainSubNS, "subject-namespace", "", "Explicit Kubernetes namespace")
 
 	// 3. oscal assurance evidence [<subject-uri>]
 	var (
 		evidenceSubKind string
 		evidenceSubName string
 		evidenceSubNS   string
+		evidenceControl string
 	)
 	evidenceCmd := &cobra.Command{
 		Use:   "evidence [<subject-uri>]",
-		Short: "List verified evidence envelopes for a subject",
+		Short: "List supplied evidence references without inferring verification",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sub, err := resolveSubjectFromArgsOrFlags(args, evidenceSubKind, evidenceSubName, evidenceSubNS)
@@ -618,14 +373,14 @@ and projects defensible results into standard OSCAL artifacts.`,
 					return err
 				}
 				now := time.Now().UTC()
-				ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
+				ctrl := assurance.ControlRef{}
 				_, _, validEnvelopes := evaluateLocalEnvelopes(sub, ctrl, envelopes, now)
 				if len(validEnvelopes) == 0 && serverAddr == "" {
-					fmt.Printf("No verified evidence envelopes found for %s in %s\n", sub.URI(), evidenceDir)
+					fmt.Printf("No supplied evidence envelopes found for %s in %s\n", sub.URI(), evidenceDir)
 					return nil
 				}
 				if len(validEnvelopes) > 0 {
-					fmt.Printf("VERIFIED EVIDENCE ENVELOPES FOR %s (%d total):\n\n", sub.URI(), len(validEnvelopes))
+					fmt.Printf("SUPPLIED EVIDENCE REFERENCES FOR %s (%d total):\n\n", sub.URI(), len(validEnvelopes))
 					for i, env := range validEnvelopes {
 						fmt.Printf("%d. [%s]\n   ID:       %s\n   Producer: %s\n   Digest:   %s\n   URI:      %s\n   Captured: %s\n\n",
 							i+1, env.ObservationType, env.ID, env.Producer.Canonical(), env.Artifact.Digest, env.Artifact.URI, env.CapturedAt.Format(time.RFC3339))
@@ -638,6 +393,10 @@ and projects defensible results into standard OSCAL artifacts.`,
 				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 				defer cancel()
 
+				control, err := evaluation.ParseControlReference(evidenceControl)
+				if err != nil {
+					return fmt.Errorf("remote evidence lookup requires --control: %w", err)
+				}
 				client, conn, err := getGRPCClient(ctx, serverAddr)
 				if err != nil {
 					return err
@@ -646,16 +405,16 @@ and projects defensible results into standard OSCAL artifacts.`,
 
 				resp, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
 					Subject: &commonv1.SubjectRef{Scheme: sub.Scheme, Id: sub.ID},
-					Control: &controlv1.ControlRef{Namespace: "nist-sp-800-53", Id: "AC-6"},
+					Control: &controlv1.ControlRef{Namespace: control.Namespace, Id: control.ID, Version: control.Version},
 				})
 				if err != nil {
 					return fmt.Errorf("gRPC ExplainClaim failed: %w", err)
 				}
 				if len(resp.Evidence) == 0 {
-					fmt.Printf("No verified evidence envelopes found for %s on server %s\n", sub.URI(), serverAddr)
+					fmt.Printf("No supplied evidence envelopes found for %s on server %s\n", sub.URI(), serverAddr)
 					return nil
 				}
-				fmt.Printf("VERIFIED EVIDENCE ENVELOPES FOR %s (%d total):\n\n", sub.URI(), len(resp.Evidence))
+				fmt.Printf("SUPPLIED EVIDENCE REFERENCES FOR %s (%d total):\n\n", sub.URI(), len(resp.Evidence))
 				for i, ev := range resp.Evidence {
 					fmt.Printf("%d. [%s]\n   Producer: %s\n   Digest:   %s\n\n",
 						i+1, ev.MediaType, ev.Uri, ev.Digest)
@@ -663,13 +422,14 @@ and projects defensible results into standard OSCAL artifacts.`,
 				return nil
 			}
 
-			fmt.Printf("No verified evidence envelopes available for %s (specify --server or --evidence-dir).\n", sub.URI())
+			fmt.Printf("No supplied evidence envelopes available for %s (specify --server or --evidence-dir).\n", sub.URI())
 			return nil
 		},
 	}
+	evidenceCmd.Flags().StringVar(&evidenceControl, "control", "", "Explicit control for remote ExplainClaim evidence references")
 	evidenceCmd.Flags().StringVar(&evidenceSubKind, "subject-kind", "", "Kubernetes resource kind (e.g. Deployment, Pod)")
 	evidenceCmd.Flags().StringVar(&evidenceSubName, "subject-name", "", "Workload name")
-	evidenceCmd.Flags().StringVar(&evidenceSubNS, "subject-namespace", "", "Kubernetes namespace (default: default)")
+	evidenceCmd.Flags().StringVar(&evidenceSubNS, "subject-namespace", "", "Explicit Kubernetes namespace")
 
 	// 4. oscal assurance drift [<subject-uri>]
 	var (
@@ -692,52 +452,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 				if err != nil {
 					return err
 				}
-				if len(envelopes) == 0 {
-					fmt.Printf("DRIFT ANALYSIS FOR %s:\n\n", sub.URI())
-					fmt.Printf("STATUS:                 UNKNOWN (no baseline evidence found in %s)\n", evidenceDir)
-					return nil
-				}
-
-				now := time.Now().UTC()
-				ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-				eval, _, validEnvelopes := evaluateLocalEnvelopes(sub, ctrl, envelopes, now)
-
-				fmt.Printf("DRIFT ANALYSIS FOR %s:\n\n", sub.URI())
-				if len(validEnvelopes) == 0 {
-					fmt.Printf("SUBJECT STATUS:         DRIFT_DETECTED\n")
-					fmt.Printf("FRESHNESS:              INVALID (future-dated evidence rejected)\n")
-					fmt.Printf("ASSURANCE STATUS:       UNKNOWN\n")
-				} else if eval.State == assurance.AssuranceStateFailed {
-					fmt.Printf("SUBJECT STATUS:         DECOHERENT\n")
-					fmt.Printf("SEMANTIC DRIFT:         adverse or violation evidence observed\n")
-					fmt.Printf("ASSURANCE STATUS:       FAILED\n")
-				} else if eval.State == assurance.AssuranceStateStale {
-					fmt.Printf("SUBJECT STATUS:         DRIFT_DETECTED\n")
-					fmt.Printf("FRESHNESS:              STALE (evidence expired)\n")
-					fmt.Printf("ASSURANCE STATUS:       STALE\n")
-				} else {
-					policyDiverged := false
-					basePolicy := validEnvelopes[0].Epoch.PolicyDigest
-					for _, ve := range validEnvelopes[1:] {
-						if basePolicy != "" && ve.Epoch.PolicyDigest != "" && ve.Epoch.PolicyDigest != basePolicy {
-							policyDiverged = true
-							break
-						}
-					}
-					if policyDiverged {
-						fmt.Printf("SUBJECT STATUS:         DECOHERENT\n")
-						fmt.Printf("RECORDED POLICY DIGEST: %s\n", basePolicy)
-						fmt.Printf("SEMANTIC DRIFT:         1 dimension drifted (policy digest mismatch)\n")
-						fmt.Printf("ASSURANCE STATUS:       FAILED\n")
-					} else {
-						fmt.Printf("SUBJECT STATUS:         IN_SYNC\n")
-						fmt.Printf("RECORDED POLICY DIGEST: %s\n", validEnvelopes[0].Epoch.PolicyDigest)
-						fmt.Printf("CURRENT POLICY DIGEST:  %s\n", validEnvelopes[0].Epoch.PolicyDigest)
-						fmt.Printf("AUTHORITY CA ROTATION:  NONE\n")
-						fmt.Printf("SEMANTIC DRIFT:         0 dimensions drifted\n")
-						fmt.Printf("ASSURANCE STATUS:       ASSURED (no invalidation)\n")
-					}
-				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "DRIFT ANALYSIS FOR %s:\n\nSTATUS: UNKNOWN\nSUPPLIED MATERIAL: %d envelopes\nBASELINE: no authoritative current epoch or verified baseline supplied\n", sub.URI(), len(envelopes))
 				return nil
 			}
 
@@ -757,23 +472,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 				if err != nil {
 					return fmt.Errorf("gRPC GetAssuranceState failed: %w", err)
 				}
-				fmt.Printf("DRIFT ANALYSIS FOR %s:\n\n", sub.URI())
-				switch resp.State {
-				case commonv1.AssuranceState_ASSURANCE_STATE_ASSURED, commonv1.AssuranceState_ASSURANCE_STATE_VERIFIED:
-					fmt.Printf("SUBJECT STATUS:         IN_SYNC\n")
-					fmt.Printf("SEMANTIC DRIFT:         0 dimensions drifted\n")
-					fmt.Printf("ASSURANCE STATUS:       ASSURED (no invalidation)\n")
-				case commonv1.AssuranceState_ASSURANCE_STATE_FAILED:
-					fmt.Printf("SUBJECT STATUS:         DECOHERENT\n")
-					fmt.Printf("SEMANTIC DRIFT:         adverse or violation evidence observed\n")
-					fmt.Printf("ASSURANCE STATUS:       FAILED\n")
-				case commonv1.AssuranceState_ASSURANCE_STATE_STALE:
-					fmt.Printf("SUBJECT STATUS:         DRIFT_DETECTED\n")
-					fmt.Printf("FRESHNESS:              STALE (evidence expired)\n")
-					fmt.Printf("ASSURANCE STATUS:       STALE\n")
-				default:
-					fmt.Printf("STATUS:                 UNKNOWN (no baseline evidence found on server %s)\n", serverAddr)
-				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "DRIFT ANALYSIS FOR %s:\n\nSTATUS: UNKNOWN\nSERVER-REPORTED ASSURANCE: %s\nREASON: a state summary supplies no verified baseline comparison or structural drift proof\n", sub.URI(), resp.State.String())
 				return nil
 			}
 
@@ -784,7 +483,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 	}
 	driftCmd.Flags().StringVar(&driftSubKind, "subject-kind", "", "Kubernetes resource kind (e.g. Deployment, Pod)")
 	driftCmd.Flags().StringVar(&driftSubName, "subject-name", "", "Workload name")
-	driftCmd.Flags().StringVar(&driftSubNS, "subject-namespace", "", "Kubernetes namespace (default: default)")
+	driftCmd.Flags().StringVar(&driftSubNS, "subject-namespace", "", "Explicit Kubernetes namespace")
 
 	// 5. oscal assurance receipt verify
 	receiptCmd := &cobra.Command{
@@ -799,58 +498,39 @@ and projects defensible results into standard OSCAL artifacts.`,
 	)
 	verifyReceiptCmd := &cobra.Command{
 		Use:   "verify",
-		Short: "Verify an Ed25519-signed ControlReceipt and its Merkle evidence root",
+		Short: "Verify a receipt signature under an explicitly trusted Ed25519 public key",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var rcpt assurance.ControlReceipt
-			var searchDirs []string
-			if evidenceDir != "" {
-				searchDirs = append(searchDirs, evidenceDir, filepath.Join(evidenceDir, "receipts"))
-			}
-			searchDirs = append(searchDirs, "evidence", filepath.Join("evidence", "receipts"))
-
 			if verifyReceiptFile != "" {
-				data, err := os.ReadFile(verifyReceiptFile)
+				if verifyReceiptID != "" || len(args) > 0 {
+					return fmt.Errorf("--receipt-file and archive receipt IDs are mutually exclusive")
+				}
+				data, err := readBoundedFile(verifyReceiptFile, storage.MaxMetadataBytes)
 				if err != nil {
-					return fmt.Errorf("failed to read receipt file: %w", err)
+					return fmt.Errorf("read standalone receipt file: %w", err)
 				}
 				if err := json.Unmarshal(data, &rcpt); err != nil {
-					return fmt.Errorf("failed to parse receipt JSON: %w", err)
+					return fmt.Errorf("parse standalone receipt JSON: %w", err)
 				}
-				fileDir := filepath.Dir(verifyReceiptFile)
-				searchDirs = append([]string{fileDir, filepath.Dir(fileDir)}, searchDirs...)
 			} else {
 				if verifyReceiptID == "" && len(args) > 0 {
 					verifyReceiptID = args[0]
 				}
 				if verifyReceiptID == "" {
-					return errors.New("must specify --receipt-id or --receipt-file")
+					return fmt.Errorf("specify --receipt-id with --evidence-dir, or --receipt-file for a standalone file")
 				}
-
-				var candidatePaths []string
-				if strings.HasSuffix(verifyReceiptID, ".json") {
-					candidatePaths = append(candidatePaths, verifyReceiptID)
+				if evidenceDir == "" {
+					return fmt.Errorf("archive receipt lookup requires --evidence-dir; use --receipt-file for an explicit standalone file")
 				}
-				for _, d := range searchDirs {
-					candidatePaths = append(candidatePaths,
-						filepath.Join(d, verifyReceiptID+".json"),
-						filepath.Join(d, "rcpt-"+verifyReceiptID+".json"),
-					)
+				repository, err := openCLIArchive(evidenceDir)
+				if err != nil {
+					return fmt.Errorf("open receipt archive: %w", err)
 				}
-
-				found := false
-				for _, p := range candidatePaths {
-					data, err := os.ReadFile(p)
-					if err != nil {
-						continue
-					}
-					if err := json.Unmarshal(data, &rcpt); err != nil {
-						return fmt.Errorf("failed to parse receipt from %s: %w", p, err)
-					}
-					found = true
-					break
-				}
-				if !found {
-					return fmt.Errorf("[FAIL] receipt %q not found on disk (searched %v)", verifyReceiptID, searchDirs)
+				key := strings.TrimSuffix(verifyReceiptID, ".json")
+				rcpt, err = repository.GetReceipt(cmd.Context(), key)
+				if err != nil {
+					return fmt.Errorf("lookup archive receipt %q (standalone files require --receipt-file): %w", verifyReceiptID, err)
 				}
 			}
 
@@ -860,20 +540,15 @@ and projects defensible results into standard OSCAL artifacts.`,
 			}
 
 			pubKeyHex := strings.TrimSpace(verifyPublicKey)
-			if pubKeyHex != "" {
-				if data, err := os.ReadFile(pubKeyHex); err == nil {
-					pubKeyHex = strings.TrimSpace(string(data))
-				}
-			} else {
-				for _, d := range searchDirs {
-					if data, err := os.ReadFile(filepath.Join(d, "receipt-signing.pub")); err == nil {
-						pubKeyHex = strings.TrimSpace(string(data))
-						break
-					}
-				}
-			}
 			if pubKeyHex == "" {
-				return fmt.Errorf("[FAIL] cannot verify receipt %s: no public key provided (--public-key) and no receipt-signing.pub found", idDisplay)
+				return fmt.Errorf("--public-key is required from trusted custody; a key stored beside the receipt is not an authority anchor")
+			}
+			if len(pubKeyHex) != 64 {
+				raw, err := readBoundedFile(pubKeyHex, 4096)
+				if err != nil {
+					return err
+				}
+				pubKeyHex = strings.TrimSpace(string(raw))
 			}
 
 			valid, err := receipts.VerifyIndependentReceipt(rcpt, pubKeyHex)
@@ -882,340 +557,19 @@ and projects defensible results into standard OSCAL artifacts.`,
 			}
 
 			fmt.Printf("[VERIFIED] Receipt %s is cryptographically valid.\n", idDisplay)
-			fmt.Printf("Signer Identity:  %s\n", rcpt.Evaluator.Canonical())
-			fmt.Printf("Merkle Root:      %s\n", rcpt.EvidenceRoot)
-			fmt.Printf("Status:           NON-REPUDIABLE PROOF ESTABLISHED\n")
+			fmt.Printf("Signed evaluator claim: %s\n", rcpt.Evaluator.Canonical())
+			fmt.Printf("Signed evidence digest: %s\n", rcpt.EvidenceRoot)
+			fmt.Printf("Scope: signature under the supplied key; source observations, identity binding and assurance decision are not independently verified.\n")
 			return nil
 		},
 	}
-	verifyReceiptCmd.Flags().StringVar(&verifyReceiptID, "receipt-id", "", "ID of the receipt to verify")
-	verifyReceiptCmd.Flags().StringVar(&verifyReceiptFile, "receipt-file", "", "Path to raw ControlReceipt JSON file")
+	verifyReceiptCmd.Flags().StringVar(&verifyReceiptID, "receipt-id", "", "Confined immutable receipt digest or legacy alias within --evidence-dir")
+	verifyReceiptCmd.Flags().StringVar(&verifyReceiptFile, "receipt-file", "", "Explicit standalone ControlReceipt JSON file, at most 64 KiB")
 	verifyReceiptCmd.Flags().StringVar(&verifyPublicKey, "public-key", "", "Ed25519 public key hex or path to .pub file")
 	receiptCmd.AddCommand(verifyReceiptCmd)
 
-	// oscal record admission --file <manifest.yaml> [--evidence-dir <dir>]
-	var (
-		recordFile        string
-		recordEvidenceDir string
-	)
-	recordCmd := &cobra.Command{
-		Use:   "record",
-		Short: "Record evaluation evidence from local manifests or runtime checks",
-	}
-	recordAdmissionCmd := &cobra.Command{
-		Use:   "admission",
-		Short: "Record admission control evidence for a Kubernetes manifest",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if recordFile == "" {
-				return errors.New("--file flag is required")
-			}
-			targetDir := recordEvidenceDir
-			if targetDir == "" {
-				targetDir = evidenceDir
-			}
-			if targetDir == "" {
-				targetDir = "evidence"
-			}
-			data, err := os.ReadFile(recordFile)
-			if err != nil {
-				return fmt.Errorf("failed to read workload manifest: %w", err)
-			}
-			type manifestMeta struct {
-				Kind     string `yaml:"kind"`
-				Metadata struct {
-					Name      string `yaml:"name"`
-					Namespace string `yaml:"namespace"`
-				} `yaml:"metadata"`
-			}
-			var manifest manifestMeta
-			docs := splitYAMLDocuments(data)
-			for i, doc := range docs {
-				var docMeta manifestMeta
-				if err := yaml.Unmarshal(doc, &docMeta); err != nil {
-					return fmt.Errorf("failed to parse workload manifest YAML: %w", err)
-				}
-				if i == 0 || docMeta.Kind == "Deployment" || docMeta.Kind == "StatefulSet" || docMeta.Kind == "DaemonSet" || docMeta.Kind == "Pod" || docMeta.Kind == "Job" || docMeta.Kind == "CronJob" {
-					manifest = docMeta
-				}
-			}
-			if err := validateManifestSecurity(data); err != nil {
-				return err
-			}
-			if manifest.Kind == "" {
-				manifest.Kind = "Deployment"
-			}
-			if manifest.Metadata.Name == "" {
-				manifest.Metadata.Name = "payment-service"
-			}
-			if manifest.Metadata.Namespace == "" {
-				manifest.Metadata.Namespace = "production"
-			}
-
-			sub := assurance.SubjectRef{
-				Scheme: "k8s",
-				ID:     fmt.Sprintf("%s/%s/%s", manifest.Metadata.Namespace, manifest.Kind, manifest.Metadata.Name),
-			}
-			now := time.Now().UTC()
-			artifactDigest := assurance.ComputeDigest(data)
-			env := assurance.EvidenceEnvelope{
-				Schema:          "https://assurance.ckodex.io/schemas/v1",
-				ID:              fmt.Sprintf("ev-adm-%s-%d", manifest.Metadata.Name, now.Unix()),
-				Subject:         sub,
-				ObservationType: "admission",
-				CapturedAt:      now,
-				Producer: assurance.AuthorityRef{
-					Scheme:  "spiffe",
-					Subject: "ckodex.internal/ns/system/sa/oskal-admission-controller",
-				},
-				Artifact: assurance.EvidenceRef{
-					URI:       fmt.Sprintf("file://%s", recordFile),
-					Digest:    artifactDigest,
-					MediaType: "application/yaml",
-				},
-				IntegrityDigest: artifactDigest,
-				Epoch: assurance.AssuranceEpoch{
-					SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-					ImplementationDigest: assurance.ComputeStringDigest("kubernetes:admission-policy"),
-					PolicyDigest:         "sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
-					AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/admission"),
-					EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
-				},
-				ControlRefs: []assurance.ControlRef{
-					{Namespace: "nist-sp-800-53", ID: "AC-6"},
-				},
-			}
-
-			if err := os.MkdirAll(targetDir, 0755); err != nil {
-				return fmt.Errorf("failed to create evidence directory: %w", err)
-			}
-			casRepo, err := storage.NewFilesystemEvidenceRepository(targetDir)
-			if err != nil {
-				return fmt.Errorf("failed to initialize CAS evidence repository: %w", err)
-			}
-			if _, err := casRepo.Put(cmd.Context(), env, bytes.NewReader(data)); err != nil {
-				return fmt.Errorf("failed to store evidence envelope in CAS: %w", err)
-			}
-			outPath := filepath.Join(targetDir, fmt.Sprintf("%s.json", env.ID))
-			envBytes, err := json.MarshalIndent(env, "", "  ")
-			if err != nil {
-				return fmt.Errorf("failed to marshal evidence envelope: %w", err)
-			}
-			if err := os.WriteFile(outPath, envBytes, 0644); err != nil {
-				return fmt.Errorf("failed to write evidence file: %w", err)
-			}
-
-			// Issue and persist an Ed25519-signed ControlReceipt for the admission evaluation
-			rcptMgr, err := receipts.LoadOrCreateReceiptManager(env.Producer, targetDir)
-			if err != nil {
-				return fmt.Errorf("failed to initialize receipt signer: %w", err)
-			}
-			ctrlRef := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-			rcpt, err := rcptMgr.IssueReceipt(
-				sub,
-				ctrlRef,
-				assurance.AssuranceStateAssured,
-				env.Epoch,
-				[]assurance.EvidenceRef{env.Artifact},
-				now,
-			)
-			if err != nil {
-				return fmt.Errorf("failed to issue control receipt: %w", err)
-			}
-			_, _ = casRepo.PutReceipt(cmd.Context(), rcpt)
-			rcptBytes, err := json.MarshalIndent(rcpt, "", "  ")
-			if err != nil {
-				return fmt.Errorf("failed to marshal control receipt: %w", err)
-			}
-			receiptsDir := filepath.Join(targetDir, "receipts")
-			_ = os.MkdirAll(receiptsDir, 0755)
-			rcptID := fmt.Sprintf("rcpt-adm-%s", manifest.Metadata.Name)
-			for _, p := range []string{
-				filepath.Join(targetDir, rcptID+".json"),
-				filepath.Join(receiptsDir, rcptID+".json"),
-				filepath.Join(targetDir, "rcpt-AC-6.json"),
-				filepath.Join(receiptsDir, "rcpt-AC-6.json"),
-			} {
-				_ = os.WriteFile(p, rcptBytes, 0644)
-			}
-
-			fmt.Printf("[RECORDED] Evidence envelope created: %s\n", outPath)
-			fmt.Printf("Subject:   %s\n", sub.URI())
-			fmt.Printf("Envelope:  %s\n", env.ID)
-			fmt.Printf("Receipt:   %s\n", rcptID)
-			fmt.Printf("Digest:    %s\n", artifactDigest)
-			fmt.Printf("State:     COHERENT / POSITIVE / VERIFIED\n")
-			return nil
-		},
-	}
-	recordAdmissionCmd.Flags().StringVar(&recordFile, "file", "", "Path to Kubernetes workload YAML manifest")
-	recordAdmissionCmd.Flags().StringVar(&recordEvidenceDir, "evidence-dir", "", "Target directory for evidence envelopes (default: ./evidence)")
-	recordCmd.AddCommand(recordAdmissionCmd)
-
-	// 5. oscal export assessment-results --subject <subject>
-	var exportSubjectFlag string
-	exportCmd := &cobra.Command{
-		Use:   "export",
-		Short: "Export continuous assurance data to standard OSCAL formats",
-	}
-	exportARCmd := &cobra.Command{
-		Use:   "assessment-results",
-		Short: "Export to NIST OSCAL v1.2.3 Assessment Results JSON",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			subURI := exportSubjectFlag
-			if subURI == "" {
-				subURI = "k8s://prod/payments/Deployment/payments-api"
-			}
-			sub := parseSubjectURI(subURI)
-			ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-
-			var envelopes []assurance.EvidenceEnvelope
-			if evidenceDir != "" {
-				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
-			}
-
-			eval, _, _ := evaluateLocalEnvelopes(sub, ctrl, envelopes, time.Now().UTC())
-
-			projector := oscal.NewProjector()
-			data, err := projector.ProjectAssessmentResults(context.Background(), sub, []assurance.ClaimEvaluation{eval}, nil)
-			if err != nil {
-				return err
-			}
-			fmt.Println(string(data))
-			return nil
-		},
-	}
-	exportARCmd.Flags().StringVar(&exportSubjectFlag, "subject", "", "Workload subject to export")
-
-	exportCompDefCmd := &cobra.Command{
-		Use:   "component-definition",
-		Short: "Export to NIST OSCAL v1.2.3 Component Definition JSON",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			compName := exportSubjectFlag
-			if compName == "" {
-				compName = "payments-api"
-			}
-			sub := assurance.SubjectRef{Scheme: "k8s", ID: fmt.Sprintf("components/%s", compName)}
-			ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-
-			var envelopes []assurance.EvidenceEnvelope
-			if evidenceDir != "" {
-				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
-			}
-
-			eval, _, _ := evaluateLocalEnvelopes(sub, ctrl, envelopes, time.Now().UTC())
-
-			projector := oscal.NewProjector()
-			data, err := projector.ProjectComponentDefinition(context.Background(), compName, []assurance.ClaimEvaluation{eval})
-			if err != nil {
-				return err
-			}
-			fmt.Println(string(data))
-			return nil
-		},
-	}
-	exportCompDefCmd.Flags().StringVar(&exportSubjectFlag, "component", "", "Component name to export")
-
-	exportAPCmd := &cobra.Command{
-		Use:   "assessment-plan",
-		Short: "Export to NIST OSCAL v1.2.3 Assessment Plan JSON",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			subURI := exportSubjectFlag
-			if subURI == "" {
-				subURI = "k8s://prod/payments/Deployment/payments-api"
-			}
-			sub := parseSubjectURI(subURI)
-			contract := assurance.EvidenceContract{
-				ID: fmt.Sprintf("contract-%s", sub.ID),
-				Requirements: []assurance.EvidenceRequirement{
-					{ID: "req-1", EvidenceType: "admission", Required: true, MaxAge: defaultMaxEvidenceAge},
-				},
-			}
-			controls := []assurance.ControlRef{
-				{Namespace: "nist-sp-800-53", ID: "AC-6"},
-			}
-			projector := oscal.NewProjector()
-			data, err := projector.ProjectAssessmentPlan(context.Background(), sub, contract, controls)
-			if err != nil {
-				return err
-			}
-			fmt.Println(string(data))
-			return nil
-		},
-	}
-	exportAPCmd.Flags().StringVar(&exportSubjectFlag, "subject", "", "Workload subject to export")
-
-	exportPOAMCmd := &cobra.Command{
-		Use:   "poam",
-		Short: "Export to NIST OSCAL v1.2.3 Plan of Action and Milestones JSON",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			subURI := exportSubjectFlag
-			if subURI == "" {
-				subURI = "k8s://prod/payments/Deployment/payments-api"
-			}
-			sub := parseSubjectURI(subURI)
-			ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-
-			var envelopes []assurance.EvidenceEnvelope
-			if evidenceDir != "" {
-				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
-			}
-			now := time.Now().UTC()
-			eval, freshness, _ := evaluateLocalEnvelopes(sub, ctrl, envelopes, now)
-
-			// Truthfully report findings when continuous assurance is not ASSURED
-			var findings []assurance.Finding
-			if eval.State != assurance.AssuranceStateAssured {
-				findings = append(findings, assurance.Finding{
-					ID:           fmt.Sprintf("finding-%s-%s", ctrl.ID, strings.ToLower(eval.State.String())),
-					Subject:      sub,
-					Control:      ctrl,
-					Severity:     "HIGH",
-					Title:        fmt.Sprintf("Control %s Assurance State is %s", ctrl.Canonical(), eval.State),
-					Description:  fmt.Sprintf("Subject %s does not have current verified evidence for %s (state: %s, freshness: %s).", sub.URI(), ctrl.Canonical(), eval.State, freshness),
-					DiscoveredAt: now,
-				})
-			}
-			projector := oscal.NewProjector()
-			data, err := projector.ProjectPOAM(context.Background(), sub, findings)
-			if err != nil {
-				return err
-			}
-			fmt.Println(string(data))
-			return nil
-		},
-	}
-	exportPOAMCmd.Flags().StringVar(&exportSubjectFlag, "subject", "", "Workload subject to export")
-
-	exportSSPCmd := &cobra.Command{
-		Use:   "ssp",
-		Short: "Export to NIST OSCAL v1.2.3 System Security Plan JSON",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			subURI := exportSubjectFlag
-			if subURI == "" {
-				subURI = "k8s://prod/payments/Deployment/payments-api"
-			}
-			sub := parseSubjectURI(subURI)
-			ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-
-			var envelopes []assurance.EvidenceEnvelope
-			if evidenceDir != "" {
-				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
-			}
-
-			eval, _, _ := evaluateLocalEnvelopes(sub, ctrl, envelopes, time.Now().UTC())
-
-			projector := oscal.NewProjector()
-			data, err := projector.ProjectSSP(context.Background(), sub.ID, []assurance.ClaimEvaluation{eval})
-			if err != nil {
-				return err
-			}
-			fmt.Println(string(data))
-			return nil
-		},
-	}
-	exportSSPCmd.Flags().StringVar(&exportSubjectFlag, "subject", "", "Workload subject to export")
-
-	exportCmd.AddCommand(exportARCmd, exportCompDefCmd, exportAPCmd, exportSSPCmd, exportPOAMCmd)
+	recordCmd := newRecordCommand()
+	exportCmd := newExportCommand()
 
 	// 6. oscal import oscal --file <path> [--namespace <ns>] [--output-dir <dir>]
 	var (
@@ -1296,98 +650,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 
 	importCmd.AddCommand(importOscalCmd)
 
-	// 7. oscal serve --port <port>
-	var (
-		port         int
-		serveTLSCert string
-		serveTLSKey  string
-	)
-	serveCmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Start the gRPC AssuranceService daemon",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-			if err != nil {
-				return fmt.Errorf("failed to listen on port %d: %w", port, err)
-			}
-
-			serverOpts := []grpc.ServerOption{
-				grpc.MaxRecvMsgSize(16 << 20),
-				grpc.MaxSendMsgSize(16 << 20),
-				grpc.MaxConcurrentStreams(256),
-				grpc.KeepaliveParams(keepalive.ServerParameters{
-					MaxConnectionIdle: 5 * time.Minute,
-					Time:              2 * time.Minute,
-					Timeout:           20 * time.Second,
-				}),
-				grpc.UnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-					defer func() {
-						if rec := recover(); rec != nil {
-							err = status.Errorf(codes.Internal, "panic recovered in %s: %v", info.FullMethod, rec)
-						}
-					}()
-					return handler(ctx, req)
-				}),
-				grpc.StreamInterceptor(func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
-					defer func() {
-						if rec := recover(); rec != nil {
-							err = status.Errorf(codes.Internal, "stream panic recovered in %s: %v", info.FullMethod, rec)
-						}
-					}()
-					return handler(srv, ss)
-				}),
-			}
-			if serveTLSCert != "" && serveTLSKey != "" {
-				tlsCreds, err := credentials.NewServerTLSFromFile(serveTLSCert, serveTLSKey)
-				if err != nil {
-					return fmt.Errorf("failed to load server TLS credentials: %w", err)
-				}
-				serverOpts = append(serverOpts, grpc.Creds(tlsCreds))
-			}
-
-			var repo ports.EvidenceRepository
-			if evidenceDir != "" {
-				fsRepo, err := storage.NewFilesystemEvidenceRepository(evidenceDir)
-				if err != nil {
-					return fmt.Errorf("failed to open evidence repository at %s: %w", evidenceDir, err)
-				}
-				repo = fsRepo
-			}
-
-			grpcServer := grpc.NewServer(serverOpts...)
-			srv := service.NewServer(nil, repo)
-			servicesv1.RegisterAssuranceServiceServer(grpcServer, srv)
-
-			healthSrv := health.NewServer()
-			healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-			healthSrv.SetServingStatus(servicesv1.AssuranceService_ServiceDesc.ServiceName, grpc_health_v1.HealthCheckResponse_SERVING)
-			grpc_health_v1.RegisterHealthServer(grpcServer, healthSrv)
-
-			fmt.Printf("OSKAL AssuranceService gRPC daemon listening on port %d\n", port)
-
-			stopCh := make(chan os.Signal, 1)
-			signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
-			defer signal.Stop(stopCh)
-
-			go func() {
-				select {
-				case <-stopCh:
-				case <-cmd.Context().Done():
-				}
-				fmt.Println("Shutting down OSKAL AssuranceService gRPC daemon...")
-				healthSrv.Shutdown()
-				grpcServer.GracefulStop()
-			}()
-
-			if err := grpcServer.Serve(lis); err != nil && err != grpc.ErrServerStopped {
-				return fmt.Errorf("gRPC server error: %w", err)
-			}
-			return nil
-		},
-	}
-	serveCmd.Flags().IntVar(&port, "port", 9090, "Port for gRPC service to listen on")
-	serveCmd.Flags().StringVar(&serveTLSCert, "tls-cert-file", "", "Optional path to TLS server certificate file")
-	serveCmd.Flags().StringVar(&serveTLSKey, "tls-key-file", "", "Optional path to TLS server private key file")
+	serveCmd := newGRPCServeCommand()
 
 	// 8. oscal webhook
 	var (
@@ -1402,30 +665,34 @@ and projects defensible results into standard OSCAL artifacts.`,
 	)
 	webhookCmd := &cobra.Command{
 		Use:   "webhook",
-		Short: "Start the Kubernetes Validating Admission Webhook with in-flight attestation",
+		Short: "Start a validating admission webhook for declared Pod settings",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := webhook.ServerConfig{
-				ListenAddr:  webhookListenAddr,
-				TLSCertPath: webhookTLSCertFile,
-				TLSKeyPath:  webhookTLSKeyFile,
-				Mode:        webhook.WebhookMode(webhookMode),
-				ObserverAuth: assurance.AuthorityRef{
-					Scheme:  "k8s:admission-controller",
-					Subject: fmt.Sprintf("%s/%s", webhookNamespace, webhookServiceName),
-				},
+			archivePath, err := webhookArchivePath(evidenceDir, webhookEvidenceDir)
+			if err != nil {
+				return err
+			}
+			var archive *storage.ContentAddressedEvidenceRepository
+			if archivePath != "" {
+				archive, err = newCLIArchive(archivePath)
+				if err != nil {
+					return fmt.Errorf("open webhook capture archive: %w", err)
+				}
 			}
 
-			if webhookEvidenceDir != "" {
-				if err := os.MkdirAll(webhookEvidenceDir, 0755); err != nil {
-					return fmt.Errorf("failed to create evidence directory: %w", err)
-				}
-				cfg.EvidenceSink = func(env assurance.EvidenceEnvelope) {
-					data, err := json.MarshalIndent(env, "", "  ")
-					if err != nil {
-						return
+			cfg := webhook.ServerConfig{
+				ListenAddr:   webhookListenAddr,
+				TLSCertPath:  webhookTLSCertFile,
+				TLSKeyPath:   webhookTLSKeyFile,
+				Mode:         webhook.WebhookMode(webhookMode),
+				ObserverAuth: assurance.AuthorityRef{Scheme: "local", Subject: "oskal-cli-webhook"},
+			}
+
+			if archive != nil {
+				cfg.EvidenceSink = func(ctx context.Context, envelope assurance.EvidenceEnvelope, payload []byte) error {
+					if _, err := archive.Put(ctx, envelope, bytes.NewReader(payload)); err != nil {
+						return fmt.Errorf("persist admission capture: %w", err)
 					}
-					filename := filepath.Join(webhookEvidenceDir, fmt.Sprintf("%s.json", env.ID))
-					_ = os.WriteFile(filename, data, 0644)
+					return nil
 				}
 			}
 
@@ -1480,7 +747,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 	webhookCmd.Flags().BoolVar(&webhookSelfSigned, "self-signed", true, "Generate self-signed TLS certificate if files not provided")
 	webhookCmd.Flags().StringVar(&webhookServiceName, "service-name", "oskal-webhook", "Kubernetes Service name for TLS SANs")
 	webhookCmd.Flags().StringVar(&webhookNamespace, "namespace", "ckodex-system", "Kubernetes Namespace for TLS SANs")
-	webhookCmd.Flags().StringVar(&webhookEvidenceDir, "evidence-dir", "", "Directory to record admitted in-flight evidence envelopes")
+	webhookCmd.Flags().StringVar(&webhookEvidenceDir, "webhook-evidence-dir", "", "Optional admission capture archive; if combined with global --evidence-dir, paths must agree")
 	webhookCmd.Flags().StringVar(&webhookMode, "mode", "enforcing", "Webhook enforcement mode: enforcing, audit, warn")
 
 	// 9. oscal validate <file> [--schema <type>] [--output <format>]
@@ -1621,7 +888,7 @@ Supported profiles: nist-sp-800-53, pci-dss, soc-2, iso-27001.`,
 		Long: `Examines runtime substrate, Kubernetes connectivity, SPIFFE/SPIRE Workload API socket,
 Sigstore trust root, local CAS evidence directory, and embedded NIST OSCAL v1.2.3 schemas.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			report := diagnostics.RunDoctor(cmd.Context(), evidenceDir)
+			report := diagnostics.RunDoctorWithLimits(cmd.Context(), evidenceDir, configuredArchiveLimits())
 
 			outFormat, err := format.NormalizeFormat(doctorOutput)
 			if err != nil {
@@ -1671,22 +938,17 @@ for a governed workload subject without collapsing them into generic logs.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sub := parseSubjectURI(args[0])
-			ctrlID := "AC-6"
-			ctrlNS := "nist-sp-800-53"
-			if inspectControl != "" {
-				parts := strings.SplitN(inspectControl, ":", 2)
-				if len(parts) == 2 {
-					ctrlNS = parts[0]
-					ctrlID = parts[1]
-				} else {
-					ctrlID = inspectControl
-				}
+			ctrl, err := evaluation.ParseControlReference(inspectControl)
+			if err != nil {
+				return err
 			}
-			ctrl := assurance.ControlRef{Namespace: ctrlNS, ID: ctrlID}
 
 			var envelopes []assurance.EvidenceEnvelope
 			if evidenceDir != "" {
-				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
+				envelopes, err = loadLocalEvidence(evidenceDir, sub)
+				if err != nil {
+					return err
+				}
 			}
 			if len(envelopes) == 0 && serverAddr != "" {
 				return fmt.Errorf("remote ExplainClaim supplies references, not canonical observations; use assurance explain with --server, or inspect a local evidence store with --evidence-dir")
@@ -1796,7 +1058,7 @@ for a governed workload subject without collapsing them into generic logs.`,
 		},
 	}
 	inspectCmd.Flags().StringVar(&inspectOutput, "output", "table", "Output format: table, tree, json, yaml")
-	inspectCmd.Flags().StringVar(&inspectControl, "control", "nist-sp-800-53:AC-6", "Control to inspect")
+	inspectCmd.Flags().StringVar(&inspectControl, "control", "", "Control to inspect")
 
 	// 13. oscal mcp
 	mcpCmd := &cobra.Command{
@@ -1805,7 +1067,12 @@ for a governed workload subject without collapsing them into generic logs.`,
 		Long: `Exposes OSKAL continuous assurance capabilities as native MCP tools
 for Claude Code, Cursor, OpenCode, and AI developer environments over stdio.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			srv, err := mcp.NewServer(os.Stdin, os.Stdout, evidenceDir)
+			runtime, err := configureExecution(cmd.Context(), execution, false)
+			if err != nil {
+				return err
+			}
+			defer runtime.close()
+			srv, err := mcp.NewServerWithLimits(cmd.InOrStdin(), cmd.OutOrStdout(), evidenceDir, runtime.broker, configuredArchiveLimits())
 			if err != nil {
 				return err
 			}
@@ -1821,14 +1088,15 @@ for Claude Code, Cursor, OpenCode, and AI developer environments over stdio.`,
 	)
 	cockpitCmd := &cobra.Command{
 		Use:   "cockpit",
-		Short: "Interactive ASCII continuous assurance monitoring dashboard",
-		Long: `Displays a live pure-ASCII terminal dashboard of workload vector states,
-Merkle roots, drift alerts, and reconciliation loops.`,
+		Short: "Read-only ASCII archive inventory with explicit unknown assurance",
+		Long: `Displays archived material counts without inferring current assurance,
+producer trust, freshness, drift, or live enforcement.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := cockpit.NewCockpit(cockpit.CockpitConfig{
 				RefreshInterval: cockpitRefresh,
 				Once:            cockpitOnce,
 				EvidenceDir:     evidenceDir,
+				ArchiveLimits:   configuredArchiveLimits(),
 				SubjectFilter:   cockpitSubject,
 				Writer:          os.Stdout,
 			})
@@ -1900,7 +1168,7 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 			if dir == "" {
 				dir = "evidence"
 			}
-			repo, err := storage.NewFilesystemEvidenceRepository(dir)
+			repo, err := openCLIArchive(dir)
 			if err != nil {
 				return fmt.Errorf("failed to open evidence repository at %s: %w", dir, err)
 			}
@@ -2010,7 +1278,7 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 			if len(args) > 0 {
 				q = args[0]
 			}
-			reg, err := utcp.NewRegistry(evidenceDir, nil)
+			reg, err := utcp.NewRegistryWithLimits(evidenceDir, nil, configuredArchiveLimits())
 			if err != nil {
 				return err
 			}
@@ -2031,7 +1299,7 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 	utcpSearchCmd.Flags().IntVar(&utcpSearchLimit, "limit", 10, "Maximum results")
 
 	runListTools := func(cmd *cobra.Command, _ []string) error {
-		reg, err := utcp.NewRegistry(evidenceDir, nil)
+		reg, err := utcp.NewRegistryWithLimits(evidenceDir, nil, configuredArchiveLimits())
 		if err != nil {
 			return err
 		}
@@ -2097,6 +1365,18 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 			switch key {
 			case "args":
 				explicitArgsJSON = val
+			case "archive-max-bytes":
+				value, err := strconv.ParseInt(val, 10, 64)
+				if err != nil {
+					return fmt.Errorf("invalid --archive-max-bytes: %w", err)
+				}
+				archiveMaxBytes = value
+			case "archive-max-entries":
+				value, err := strconv.Atoi(val)
+				if err != nil {
+					return fmt.Errorf("invalid --archive-max-entries: %w", err)
+				}
+				archiveMaxEntries = value
 			case "evidence-dir":
 				evidenceDir = val
 				explicitEvidenceDir = true
@@ -2108,6 +1388,39 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 				explicitConfig = true
 			case "tls-ca-file":
 				tlsCAFile = val
+			case "tls-server-name":
+				tlsServerName = val
+			case "tls-client-cert-file":
+				tlsClientCertFile = val
+			case "tls-client-key-file":
+				tlsClientKeyFile = val
+			case "projection-context":
+				if strings.HasPrefix(val, "UTCP_ARG_") && strings.HasSuffix(val, "_UTCP_END") {
+					continue
+				}
+				var raw []byte
+				if strings.HasPrefix(strings.TrimSpace(val), "{") {
+					raw = []byte(val)
+				} else {
+					var err error
+					raw, err = readBoundedFile(val, oscal.MaxProjectionContextBytes)
+					if err != nil {
+						return err
+					}
+				}
+				context, err := oscal.DecodeProjectionContext(raw)
+				if err != nil {
+					return err
+				}
+				flagArgs["projection_context"] = context
+			case "lease-kubeconfig":
+				execution.kubeconfig = val
+			case "workload-api":
+				execution.address = val
+			case "spiffe-id":
+				execution.ownID = val
+			case "allowed-peer-id":
+				return fmt.Errorf("--allowed-peer-id is only meaningful for an HTTP server")
 			case "lease-id", "lease_id":
 				leaseID = val
 			case "prev-receipt-hash", "prev_receipt_hash":
@@ -2133,6 +1446,9 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 			}
 		}
 
+		if err := configuredArchiveLimits().Validate(); err != nil {
+			return err
+		}
 		if explicitConfig && configFileFlag != "" {
 			cfg, _, err := config.LoadConfig(configFileFlag)
 			if err != nil {
@@ -2183,14 +1499,17 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 			parsedArgs[k] = v
 		}
 
-		reg, err := utcp.NewRegistry(evidenceDir, nil)
+		runtime, err := configureExecution(cmd.Context(), execution, false)
+		if err != nil {
+			return err
+		}
+		defer runtime.close()
+		reg, err := utcp.NewRegistryWithLimits(evidenceDir, runtime.broker, configuredArchiveLimits())
 		if err != nil {
 			return err
 		}
 		res, err := reg.CallTool(cmd.Context(), toolName, parsedArgs, leaseID, prevReceiptHash)
-		if err != nil && len(posArgs) == 2 {
-			res, err = reg.CallTool(cmd.Context(), posArgs[1], parsedArgs, leaseID, prevReceiptHash)
-		}
+
 		if err != nil {
 			return err
 		}
@@ -2225,7 +1544,12 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 		Use:   "serve",
 		Short: "Start native UTCP HTTP discovery (GET /utcp) and tool execution server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			reg, err := utcp.NewRegistry(evidenceDir, nil)
+			runtime, err := configureExecution(cmd.Context(), execution, true)
+			if err != nil {
+				return err
+			}
+			defer runtime.close()
+			reg, err := utcp.NewRegistryWithLimits(evidenceDir, runtime.broker, configuredArchiveLimits())
 			if err != nil {
 				return err
 			}
@@ -2239,15 +1563,39 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 				IdleTimeout:       60 * time.Second,
 				MaxHeaderBytes:    1 << 20,
 			}
+			if runtime.identity != nil {
+				tlsConfig, err := runtime.identity.TLSServerConfig(cmd.Context(), execution.allowedPeers)
+				if err != nil {
+					return err
+				}
+				srv.TLSConfig = tlsConfig
+			} else {
+				host, _, err := net.SplitHostPort(utcpServeAddr)
+				if err != nil || (host != "127.0.0.1" && host != "localhost" && host != "::1") {
+					return fmt.Errorf("plaintext read-only UTCP must bind a loopback address; non-loopback access requires SPIFFE mTLS")
+				}
+			}
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Starting OSKAL UTCP HTTP Server on %s (discovery: %s/utcp)\n", utcpServeAddr, strings.TrimRight(utcpServeBaseURL, "/"))
 
 			stopCh := make(chan os.Signal, 1)
 			signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
 			defer signal.Stop(stopCh)
 
+			listener, err := net.Listen("tcp", utcpServeAddr)
+			if err != nil {
+				return err
+			}
+			limited := newLimitedListener(listener, utcp.MaxHTTPConcurrentRequests)
+			defer func() { _ = limited.Close() }()
 			errCh := make(chan error, 1)
 			go func() {
-				if serveErr := srv.ListenAndServe(); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				var serveErr error
+				if srv.TLSConfig != nil {
+					serveErr = srv.ServeTLS(limited, "", "")
+				} else {
+					serveErr = srv.Serve(limited)
+				}
+				if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 					errCh <- serveErr
 				} else {
 					errCh <- nil
@@ -2266,7 +1614,7 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 			return srv.Shutdown(shutdownCtx)
 		},
 	}
-	utcpServeCmd.Flags().StringVar(&utcpServeAddr, "addr", ":8090", "Listen address for UTCP HTTP server")
+	utcpServeCmd.Flags().StringVar(&utcpServeAddr, "addr", "127.0.0.1:8090", "Listen address for UTCP HTTP server")
 	utcpServeCmd.Flags().StringVar(&utcpServeBaseURL, "base-url", "http://localhost:8090", "Public base URL advertised in /utcp manual")
 
 	var utcpSDKLang string
@@ -2295,8 +1643,9 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 
 	utcpCmd.AddCommand(utcpManualCmd, utcpValidateCmd, utcpSearchCmd, utcpListToolsCmd, utcpCallCmd, utcpServeCmd, utcpSDKConfigCmd)
 
-	assuranceCmd.AddCommand(stateCmd, explainCmd, evidenceCmd, driftCmd, receiptCmd)
+	assuranceCmd.AddCommand(newBindingEvaluationCommand(), stateCmd, explainCmd, evidenceCmd, driftCmd, receiptCmd)
 	rootCmd.AddCommand(
+		newIdentityCommand(), newVerifyCommand(),
 		assuranceCmd,
 		recordCmd,
 		exportCmd,

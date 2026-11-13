@@ -137,6 +137,28 @@ func (s *Session) End(reason string) error {
 	c.invalidate(current, SourceUnavailable, reason)
 	return nil
 }
+
+// SafeHold contains this generation, clears eligibility, and preserves the
+// first operational reason and all durable history. Superseded writers cannot
+// quarantine a newer generation. End never rewrites this governed state.
+func (s *Session) SafeHold(reason string) error {
+	c := s.owner
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current := c.sources[s.id]
+	if current.status.Generation != s.generation {
+		return ErrSessionClosed
+	}
+	if current.status.Lifecycle == SourceSafeHold {
+		return nil
+	}
+	if len(reason) > 1024 {
+		reason = reason[:1024]
+	}
+	c.invalidate(current, SourceSafeHold, reason)
+	return nil
+}
+
 func (c *Candidates) invalidate(s *source, lifecycle SourceLifecycle, reason string) {
 	s.status.Lifecycle = lifecycle
 	s.status.Reason = reason

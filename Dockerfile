@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.27 AS builder
+FROM golang:1.27.4 AS builder
 
 WORKDIR /workspace
 
@@ -8,7 +8,7 @@ RUN go mod download
 
 COPY . .
 
-ARG VERSION=v1.0.0
+ARG VERSION=v1.0.1
 ARG COMMIT=dev
 ARG BUILD_DATE=unknown
 

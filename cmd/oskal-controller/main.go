@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -33,7 +34,7 @@ import (
 )
 
 var (
-	version  = "v1.0.0"
+	version  = "v1.0.1"
 	commit   = "dev"
 	date     = "unknown"
 	scheme   = runtime.NewScheme()
@@ -60,6 +61,7 @@ func main() {
 	var showVersion bool
 	var sourcesPath, workloadAPI, expectedSPIFFEID, managedNamespace string
 	var evaluationInterval, sourceWindow, clockAhead time.Duration
+	archiveLimits := storage.DefaultArchiveLimits()
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -73,6 +75,8 @@ func main() {
 	flag.StringVar(&webhookTLSCertFile, "webhook-tls-cert-file", "", "Path to TLS certificate file for the admission webhook.")
 	flag.StringVar(&webhookTLSKeyFile, "webhook-tls-key-file", "", "Path to TLS private key file for the admission webhook.")
 	flag.StringVar(&evidenceDir, "evidence-dir", "/tmp/oskal/evidence", "Path to local directory for content-addressed evidence storage.")
+	flag.Int64Var(&archiveLimits.MaxBytes, "archive-max-bytes", storage.DefaultArchiveBytes, "Maximum accounted archive bytes (1..1099511627776)")
+	flag.IntVar(&archiveLimits.MaxEntries, "archive-max-entries", storage.DefaultArchiveEntries, "Maximum accounted archive objects (1..1000000)")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
 
 	flag.StringVar(&sourcesPath, "sources", "", "Authenticated evidence source JSON configuration")
@@ -95,29 +99,44 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if err := archiveLimits.Validate(); err != nil {
+		setupLog.Error(err, "correct archive budgets before files or external effects")
+		os.Exit(1)
+	}
 
 	ctx := ctrl.SetupSignalHandler()
 	if evaluationInterval < 500*time.Millisecond || evaluationInterval > 5*time.Minute {
 		setupLog.Error(fmt.Errorf("invalid interval"), "use --evaluation-interval in 500ms..5m")
 		os.Exit(1)
 	}
+	if sourceWindow < time.Second || sourceWindow > 5*time.Minute || clockAhead < 0 || clockAhead > time.Second {
+		setupLog.Error(fmt.Errorf("invalid source timing"), "source window must be 1s..5m and clock allowance 0..1s")
+		os.Exit(1)
+	}
+
 	sourceConfig, err := readSourceConfiguration(sourcesPath)
 	if err != nil {
 		setupLog.Error(err, "correct --sources configuration before starting")
 		os.Exit(1)
 	}
-	if enableWebhook && len(sourceConfig.Sources) == 0 {
-		setupLog.Error(fmt.Errorf("no authenticated evidence sources configured"), "provide --sources; explicitly disable webhook for a read-only UNKNOWN controller")
+	if err := validateAdmissionSources(sourceConfig, enableWebhook); err != nil {
+		setupLog.Error(err, "configure admission scope explicitly")
 		os.Exit(1)
 	}
 	for _, source := range sourceConfig.Sources {
-		if _, _, _, err := sourceTransport(source.TLS); err != nil {
-			setupLog.Error(err, "correct source TLS configuration", "source", source.ID)
+		if source.OPA != nil && source.OPA.TLSMode == "spiffe" && (workloadAPI == "" || expectedSPIFFEID == "") {
+			setupLog.Error(fmt.Errorf("SPIFFE policy listener requires explicit own Workload API and SPIFFE ID"), "correct source identity configuration", "source", source.ID)
 			os.Exit(1)
 		}
 	}
+	if err := validatePolicyWindow(sourceConfig, sourceWindow); err != nil {
+		setupLog.Error(err, "correct source timing before creating storage or keys")
+		os.Exit(1)
+	}
+
 	producer := assurance.AuthorityRef{Scheme: "local", Subject: "oskal-controller"}
 	var identity *spire.WorkloadClient
+	var bundleDigest string
 	if workloadAPI != "" || expectedSPIFFEID != "" {
 		identity, err = spire.NewWorkloadClient(ctx, workloadAPI, expectedSPIFFEID, 5*time.Second)
 		if err != nil {
@@ -130,6 +149,12 @@ func main() {
 			setupLog.Error(err, "SPIRE identity unavailable; refusing local identity fallback")
 			os.Exit(1)
 		}
+		bundleDigest, err = identity.TrustBundleDigest(ctx)
+		if err != nil {
+			setupLog.Error(err, "cannot pin fresh public SPIFFE trust before signing authority is initialized")
+			os.Exit(1)
+		}
+
 		producer = assurance.AuthorityRef{Scheme: "spiffe", Subject: strings.TrimPrefix(actual.SPIFFEID, "spiffe://"), TrustDomain: actual.TrustDomain}
 	}
 
@@ -153,20 +178,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	evidenceRepo, err := openEvidenceRepository(evidenceDir)
+	if err := validatePolicyAPIConfiguration(sourceConfig, mgr.GetConfig()); err != nil {
+		setupLog.Error(err, "correct policy API trust before creating storage or keys")
+		os.Exit(1)
+	}
+
+	evidenceRepo, err := openEvidenceRepositoryWithLimits(evidenceDir, archiveLimits)
 	if err != nil {
 		setupLog.Error(err, "cannot initialize durable evidence storage; inspect the path and permissions before restarting", "path", evidenceDir)
 		os.Exit(1)
 	}
-	setupLog.Info("Initialized durable content-addressed evidence repository", "path", evidenceDir)
+	setupLog.Info("Initialized durable content-addressed evidence repository", "path", evidenceDir, "archiveMaxBytes", archiveLimits.MaxBytes, "archiveMaxEntries", archiveLimits.MaxEntries)
 
 	receiptMgr, err := receipts.LoadOrCreateReceiptManager(producer, evidenceDir)
 	if err != nil {
 		setupLog.Error(err, "initialize explicit persistent signing identity")
 		os.Exit(1)
 	}
-	signer := &identitySigner{ReceiptManager: receiptMgr, workload: identity}
-	sourceGroup, verification, authorityDigest, err := prepareSources(sourceConfig, evidenceRepo, signer, producer, binding.NewResolver(mgr.GetAPIReader()), sourceWindow, clockAhead)
+	signer := &identitySigner{ReceiptManager: receiptMgr, workload: identity, bundleDigest: bundleDigest}
+	sourceGroup, verification, authorityDigest, err := prepareSources(sourceConfig, evidenceRepo, signer, producer, binding.NewResolver(mgr.GetAPIReader()), sourceWindow, clockAhead, mgr.GetConfig())
 	if err != nil {
 		setupLog.Error(err, "initialize bounded authenticated evidence sources")
 		os.Exit(1)
@@ -257,20 +287,19 @@ func main() {
 
 	if enableWebhook {
 		whCfg := webhook.ServerConfig{
-			ListenAddr: fmt.Sprintf(":%d", webhookPort),
-			Mode:       webhook.WebhookMode(webhookMode),
-			ObserverAuth: assurance.AuthorityRef{
-				Scheme:  "k8s:admission-controller",
-				Subject: fmt.Sprintf("%s/%s", webhookNamespace, webhookServiceName),
-			},
-			EvidenceSink: func(env assurance.EvidenceEnvelope) {
-				sinkCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if _, putErr := evidenceRepo.Put(sinkCtx, env, nil); putErr != nil {
-					setupLog.Error(putErr, "failed to persist in-flight evidence envelope", "envelopeID", env.ID)
-				} else {
-					setupLog.Info("Persisted in-flight admission evidence envelope", "envelopeID", env.ID, "subject", env.Subject.URI())
+			ListenAddr:   fmt.Sprintf(":%d", webhookPort),
+			Mode:         webhook.WebhookMode(webhookMode),
+			ObserverAuth: producer,
+			EvidenceSink: func(ctx context.Context, envelope assurance.EvidenceEnvelope, payload []byte) error {
+				signed, err := signer.SignEvidence(ctx, envelope)
+				if err != nil {
+					return fmt.Errorf("sign admission capture: %w", err)
 				}
+				if _, err := evidenceRepo.Put(ctx, signed, bytes.NewReader(payload)); err != nil {
+					return fmt.Errorf("persist admission capture: %w", err)
+				}
+				setupLog.Info("Persisted admission request capture", "envelopeID", signed.ID, "subject", signed.Subject.URI())
+				return nil
 			},
 		}
 
@@ -316,10 +345,16 @@ func main() {
 }
 
 func openEvidenceRepository(path string) (ports.EvidenceRepository, error) {
+	return openEvidenceRepositoryWithLimits(path, storage.DefaultArchiveLimits())
+}
+func openEvidenceRepositoryWithLimits(path string, limits storage.ArchiveLimits) (ports.EvidenceRepository, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("--evidence-dir must name a durable writable directory")
 	}
-	repo, err := storage.NewFilesystemEvidenceRepository(path)
+	repo, err := storage.NewFilesystemEvidenceRepositoryWithLimits(path, limits)
 	if err != nil {
 		return nil, fmt.Errorf("open durable evidence store: %w", err)
 	}

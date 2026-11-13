@@ -76,6 +76,7 @@ type EvaluationResponse struct {
 
 // ExplainResponse wraps claim explanation and Section 51 render tree.
 type ExplainResponse struct {
+	Evidence         []EvidenceRef  `json:"evidence,omitempty"`
 	Subject          SubjectRef     `json:"subject"`
 	Control          ControlRef     `json:"control"`
 	CanonicalControl string         `json:"canonicalControl"`

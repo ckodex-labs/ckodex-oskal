@@ -54,6 +54,12 @@ func TestRealWorkloadAPI(t *testing.T) {
 	if info.SPIFFEID != id || info.Fingerprint == "" {
 		t.Fatalf("invalid identity: %+v", info)
 	}
+	digest, err := c.TrustBundleDigest(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("fresh verified public SPIFFE bundle digest=%s", digest)
+
 	t.Logf("SPIRE identity %s serial=%s expires=%s fingerprint=%s", info.SPIFFEID, info.Serial, info.NotAfter, info.Fingerprint)
 	wrong, err := NewWorkloadClient(t.Context(), socket, id+"-wrong", 3*time.Second)
 	if err != nil {

@@ -1,11 +1,14 @@
 # Default values for ckodex-oskal.
 
 replicaCount: 1
+# Empty preserves cluster-wide reconciliation. Set an explicit namespace to
+# bound OSKAL resource reconciliation independently of source observation scope.
+reconcileNamespace: ""
 
 image:
   repository: ghcr.io/ckodex-labs/oskal-controller
   pullPolicy: IfNotPresent
-  tag: "v1.0.0"
+  tag: "v1.0.1"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -21,6 +24,7 @@ podLabels: {}
 
 podSecurityContext:
   runAsNonRoot: true
+  fsGroup: 65532
   seccompProfile:
     type: RuntimeDefault
 
@@ -84,6 +88,14 @@ evidenceStorage:
   mountPath: "/var/lib/oskal/evidence"
   sizeLimit: "1Gi"
 
+# Pre-created configuration and credentials, mounted read-only. The JSON file
+# names exact source endpoints, publisher identities, and mounted TLS paths.
+sources:
+  configMapName: ""
+  configMapKey: "sources.json"
+  tlsSecrets: []
+  publicCAConfigMaps: []
+
 persistence:
   enabled: false
   existingClaim: ""
@@ -92,3 +104,23 @@ persistence:
     - ReadWriteOnce
   size: "10Gi"
 
+
+# Grants for explicitly configured capture sources only. Empty lists grant none.
+policyCapture:
+  # Explicit ports matching opa.listen in the sources JSON; no default exposure.
+  opaListeners: []
+  reportSources: []
+  # - group: openreports.io
+  #   resource: reports
+  #   namespace: observed
+  # Cluster report resources must omit namespace.
+  gatekeeperResources: []
+  # - k8srequiredlabels
+  configMapMetadataNamespaces: []
+  # Kubernetes RBAC cannot restrict get to metadata fields. Enable only where
+  # the controller may read ConfigMaps; source code requests metadata only.
+
+# Accounted archive disk/resident objects; separate from PVC size and process RSS.
+archiveLimits:
+  maxBytes: 67108864
+  maxEntries: 8192

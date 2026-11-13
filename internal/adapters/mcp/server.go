@@ -14,10 +14,9 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/utcp"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/diagnostics"
-	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/evaluation"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	proj "github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
-	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	"github.com/ckodex-labs/ckodex-oskal/internal/scaffold"
 )
 
@@ -85,14 +84,13 @@ type mcpCallToolResult struct {
 
 // Server provides the Model Context Protocol stdio interface for OSKAL and the utcp-mcp bridge.
 type Server struct {
-	mu           sync.Mutex
-	in           io.Reader
-	out          io.Writer
-	evidenceDir  string
-	validator    *proj.Validator
-	projector    *proj.Projector
-	explainer    *explain.Explainer
-	utcpRegistry *utcp.Registry
+	mu            sync.Mutex
+	in            io.Reader
+	out           io.Writer
+	evidenceDir   string
+	archiveLimits storage.ArchiveLimits
+	validator     *proj.Validator
+	utcpRegistry  *utcp.Registry
 }
 
 // NewServer initializes an MCP Server instance with native UTCP bridge capabilities.
@@ -102,23 +100,30 @@ func NewServer(in io.Reader, out io.Writer, evidenceDir string) (*Server, error)
 
 // NewServerWithBroker initializes an MCP Server whose UTCP registry operations are governed by a durable execution broker.
 func NewServerWithBroker(in io.Reader, out io.Writer, evidenceDir string, broker ports.ExecutionBroker) (*Server, error) {
+	return NewServerWithLimits(in, out, evidenceDir, broker, storage.DefaultArchiveLimits())
+}
+
+// NewServerWithLimits shares an explicit archive budget with its native tools and UTCP bridge.
+func NewServerWithLimits(in io.Reader, out io.Writer, evidenceDir string, broker ports.ExecutionBroker, limits storage.ArchiveLimits) (*Server, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
 	val, err := proj.DefaultValidator()
 	if err != nil {
 		return nil, fmt.Errorf("failed to init validator for MCP: %w", err)
 	}
-	utcpReg, err := utcp.NewRegistry(evidenceDir, broker)
+	utcpReg, err := utcp.NewRegistryWithLimits(evidenceDir, broker, limits)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init UTCP registry for MCP: %w", err)
 	}
 
 	return &Server{
-		in:           in,
-		out:          out,
-		evidenceDir:  evidenceDir,
-		validator:    val,
-		projector:    proj.NewProjector(),
-		explainer:    explain.NewExplainer(),
-		utcpRegistry: utcpReg,
+		in:            in,
+		out:           out,
+		evidenceDir:   evidenceDir,
+		archiveLimits: limits,
+		validator:     val,
+		utcpRegistry:  utcpReg,
 	}, nil
 }
 
@@ -180,7 +185,7 @@ func (s *Server) handleRequest(ctx context.Context, req jsonRPCRequest) {
 			},
 			ServerInfo: mcpImplementation{
 				Name:    "oskal-mcp",
-				Version: "v1.0.0",
+				Version: "v1.0.1",
 			},
 		}
 		s.sendResult(req.ID, res)
@@ -271,10 +276,9 @@ func (s *Server) listTools() mcpToolsListResult {
 						"control": map[string]interface{}{
 							"type":        "string",
 							"description": "Control identifier (e.g. nist-sp-800-53:AC-6)",
-							"default":     "nist-sp-800-53:AC-6",
 						},
 					},
-					"required": []string{"subject"},
+					"required": []string{"subject", "control"},
 				},
 			},
 			{
@@ -337,20 +341,7 @@ func (s *Server) listTools() mcpToolsListResult {
 			{
 				Name:        "project_oscal",
 				Description: "Project continuous assurance state into a standard NIST OSCAL v1.2.3 document.",
-				InputSchema: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"subject": map[string]interface{}{
-							"type":        "string",
-							"description": "Subject URI",
-						},
-						"document_type": map[string]interface{}{
-							"type":        "string",
-							"description": "Document type: assessment-results, component-definition, ssp, assessment-plan, poam",
-						},
-					},
-					"required": []string{"subject", "document_type"},
-				},
+				InputSchema: proj.ProjectionRequestSchema(),
 			},
 			{
 				Name:        "run_doctor",
@@ -377,10 +368,9 @@ func (s *Server) listTools() mcpToolsListResult {
 						"control": map[string]interface{}{
 							"type":        "string",
 							"description": "Control identifier (e.g. nist-sp-800-53:AC-6)",
-							"default":     "nist-sp-800-53:AC-6",
 						},
 					},
-					"required": []string{"subject"},
+					"required": []string{"subject", "control"},
 				},
 			},
 			{
@@ -595,19 +585,19 @@ func (s *Server) listTools() mcpToolsListResult {
 	}
 }
 
-func (s *Server) loadSubjectEnvelopes(ctx context.Context, sub assurance.SubjectRef) []assurance.EvidenceEnvelope {
+func (s *Server) loadSubjectEnvelopes(ctx context.Context, sub assurance.SubjectRef) ([]assurance.EvidenceEnvelope, error) {
 	if s.evidenceDir == "" {
-		return nil
+		return nil, nil
 	}
-	repo, err := storage.NewFilesystemEvidenceRepository(s.evidenceDir)
+	repo, err := storage.OpenFilesystemEvidenceRepositoryWithLimits(s.evidenceDir, s.archiveLimits)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	envelopes, err := repo.ListBySubject(ctx, sub)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return envelopes
+	return envelopes, nil
 }
 
 func detectMCPEpochDrift(envelopes []assurance.EvidenceEnvelope) (bool, bool, bool) {
@@ -644,151 +634,28 @@ func detectMCPEpochDrift(envelopes []assurance.EvidenceEnvelope) (bool, bool, bo
 }
 
 func (s *Server) buildEvaluation(sub assurance.SubjectRef, ctrl assurance.ControlRef, envelopes []assurance.EvidenceEnvelope) assurance.ClaimEvaluation {
-	now := time.Now().UTC()
-	var validEnvelopes []assurance.EvidenceEnvelope
-	isStale := false
-	isViolation := false
-	for _, env := range envelopes {
-		if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
-			continue
-		}
-		if assurance.IsAdverseObservationType(env.ObservationType) {
-			isViolation = true
-		}
-		if now.Sub(env.CapturedAt) > utcp.DefaultFreshnessWindow {
-			isStale = true
-		}
-		validEnvelopes = append(validEnvelopes, env)
-	}
-	if len(validEnvelopes) == 0 {
-		return assurance.ClaimEvaluation{
-			ID:           fmt.Sprintf("eval-unknown-%s", ctrl.ID),
-			Subject:      sub,
-			Control:      ctrl,
-			State:        assurance.AssuranceStateUnknown,
-			Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(sub.URI())},
-			Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 0, Missing: 1},
-			EvaluatedAt:  now,
-		}
-	}
-	var evRefs []assurance.EvidenceRef
-	for _, env := range validEnvelopes {
-		evRefs = append(evRefs, env.Artifact)
-	}
-	evRoot := receipts.ComputeEvidenceRoot(evRefs)
-	state := assurance.AssuranceStateAssured
-	comp := assurance.EvidenceCompleteness{Required: len(evRefs), Present: len(evRefs), Verified: len(evRefs)}
-	if isViolation {
-		state = assurance.AssuranceStateFailed
-		comp = assurance.EvidenceCompleteness{Required: len(evRefs), Present: len(evRefs), Verified: 0, Missing: 1}
-	} else if isStale {
-		state = assurance.AssuranceStateStale
-		comp = assurance.EvidenceCompleteness{Required: len(evRefs), Present: len(evRefs), Verified: 0, Stale: len(evRefs)}
-	}
-	return assurance.ClaimEvaluation{
-		ID:      fmt.Sprintf("eval-%s", ctrl.ID),
-		Subject: sub,
-		Control: ctrl,
-		State:   state,
-		Epoch: assurance.AssuranceEpoch{
-			SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-			ImplementationDigest: assurance.ComputeStringDigest("kubernetes:admission-policy"),
-			PolicyDigest:         assurance.ComputeStringDigest(sub.URI() + ":" + evRoot),
-			AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/operator"),
-			EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
-		},
-		Evidence:     evRefs,
-		Completeness: comp,
-		EvidenceRoot: evRoot,
-		EvaluatedAt:  now,
-		ValidUntil:   now.Add(5 * time.Minute),
-	}
+	return evaluation.UnverifiedEvaluation(sub, ctrl, envelopes, time.Now().UTC())
 }
 
 func (s *Server) callTool(ctx context.Context, name string, args map[string]interface{}) (*mcpCallToolResult, error) {
 	switch name {
 	case "get_assurance_state":
-		subRaw, _ := args["subject"].(string)
-		if subRaw == "" {
+		raw, _ := args["subject"].(string)
+		if raw == "" {
 			return nil, fmt.Errorf("subject argument is required")
 		}
-		sub := parseSubjectRef(subRaw)
-		ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-		envelopes := s.loadSubjectEnvelopes(ctx, sub)
-		eval := s.buildEvaluation(sub, ctrl, envelopes)
-
-		var state map[string]interface{}
-		switch eval.State {
-		case assurance.AssuranceStateAssured:
-			state = map[string]interface{}{
-				"subject":       sub.URI(),
-				"state":         "ASSURED",
-				"status":        "Verified evidence present in CAS",
-				"evidence_root": eval.EvidenceRoot,
-				"freshness":     "current",
-				"vector_state": map[string]string{
-					"presence":  "PRESENT",
-					"valence":   "POSITIVE",
-					"coherence": "COHERENT",
-					"evidence":  "VERIFIED",
-					"lifecycle": "ACTIVE",
-				},
-				"last_evaluated": eval.EvaluatedAt.Format(time.RFC3339),
-			}
-		case assurance.AssuranceStateFailed:
-			state = map[string]interface{}{
-				"subject":       sub.URI(),
-				"state":         "FAILED",
-				"status":        "Adverse or violation evidence observed in CAS",
-				"evidence_root": eval.EvidenceRoot,
-				"freshness":     "current",
-				"vector_state": map[string]string{
-					"presence":  "PRESENT",
-					"valence":   "NEGATIVE",
-					"coherence": "DECOHERENT",
-					"evidence":  "VERIFIED",
-					"lifecycle": "DEGRADED",
-				},
-				"last_evaluated": eval.EvaluatedAt.Format(time.RFC3339),
-			}
-		case assurance.AssuranceStateStale:
-			state = map[string]interface{}{
-				"subject":       sub.URI(),
-				"state":         "STALE",
-				"status":        "Evidence in CAS exceeded maximum freshness window",
-				"evidence_root": eval.EvidenceRoot,
-				"freshness":     "stale",
-				"vector_state": map[string]string{
-					"presence":  "PRESENT",
-					"valence":   "MIXED",
-					"coherence": "COHERENT",
-					"evidence":  "STALE",
-					"lifecycle": "DEGRADED",
-				},
-				"last_evaluated": eval.EvaluatedAt.Format(time.RFC3339),
-			}
-		default:
-			// Invariant I-02: Absence of evidence is UNKNOWN
-			state = map[string]interface{}{
-				"subject":       sub.URI(),
-				"state":         "UNKNOWN",
-				"status":        "Absence of verified evidence (Section 15: EMPTY != NEGATIVE)",
-				"evidence_root": "none",
-				"freshness":     "unknown",
-				"vector_state": map[string]string{
-					"presence":  "EMPTY",
-					"valence":   "NEUTRAL",
-					"coherence": "COHERENT",
-					"evidence":  "UNKNOWN",
-					"lifecycle": "UNKNOWN",
-				},
-				"last_evaluated": eval.EvaluatedAt.Format(time.RFC3339),
-			}
+		sub := parseSubjectRef(raw)
+		envelopes, err := s.loadSubjectEnvelopes(ctx, sub)
+		if err != nil {
+			return nil, err
 		}
-		buf, _ := json.MarshalIndent(state, "", "  ")
-		return &mcpCallToolResult{
-			Content: []mcpToolContentItem{{Type: "text", Text: string(buf)}},
-		}, nil
+		eval := s.buildEvaluation(sub, assurance.ControlRef{}, envelopes)
+		state := map[string]any{"subject": sub.URI(), "state": "UNKNOWN", "status": "Supplied material is unverified; no authoritative contract, producer verification or current epoch was supplied", "evidence_root": "", "freshness": "UNKNOWN", "supplied_envelopes": eval.Completeness.Present, "verified_envelopes": 0, "vector_state": map[string]string{"presence": materialPresence(envelopes), "valence": "NEUTRAL", "coherence": "UNKNOWN", "evidence": "UNKNOWN", "lifecycle": "UNKNOWN"}}
+		data, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return &mcpCallToolResult{Content: []mcpToolContentItem{{Type: "text", Text: string(data)}}}, nil
 
 	case "explain_claim":
 		subRaw, _ := args["subject"].(string)
@@ -797,23 +664,19 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]inte
 		}
 		sub := parseSubjectRef(subRaw)
 
-		ctrlID := "AC-6"
-		ctrlNS := "nist-sp-800-53"
-		if rawCtrl, ok := args["control"].(string); ok && rawCtrl != "" {
-			parts := strings.SplitN(rawCtrl, ":", 2)
-			if len(parts) == 2 {
-				ctrlNS = parts[0]
-				ctrlID = parts[1]
-			} else {
-				ctrlID = rawCtrl
-			}
+		rawControl, _ := args["control"].(string)
+		ctrl, err := evaluation.ParseControlReference(rawControl)
+		if err != nil {
+			return nil, err
 		}
-		ctrl := assurance.ControlRef{Namespace: ctrlNS, ID: ctrlID}
-		envelopes := s.loadSubjectEnvelopes(ctx, sub)
+		envelopes, err := s.loadSubjectEnvelopes(ctx, sub)
+		if err != nil {
+			return nil, err
+		}
 		eval := s.buildEvaluation(sub, ctrl, envelopes)
-		graph := s.explainer.BuildExplainGraph(ctx, sub, ctrl, eval)
+		explanation := evaluation.UnverifiedExplanation(eval)
 		return &mcpCallToolResult{
-			Content: []mcpToolContentItem{{Type: "text", Text: graph.RenderText()}},
+			Content: []mcpToolContentItem{{Type: "text", Text: explanation}},
 		}, nil
 
 	case "validate_oscal":
@@ -832,92 +695,28 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]inte
 		}, nil
 
 	case "detect_drift":
-		subRaw, _ := args["subject"].(string)
-		if subRaw == "" {
+		raw, _ := args["subject"].(string)
+		if raw == "" {
 			return nil, fmt.Errorf("subject argument is required")
 		}
-		sub := parseSubjectRef(subRaw)
-		ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-		envelopes := s.loadSubjectEnvelopes(ctx, sub)
-		eval := s.buildEvaluation(sub, ctrl, envelopes)
-		polDrift, impDrift, authDrift := detectMCPEpochDrift(envelopes)
-		driftDims := 0
-		if polDrift {
-			driftDims++
+		sub := parseSubjectRef(raw)
+		envelopes, err := s.loadSubjectEnvelopes(ctx, sub)
+		if err != nil {
+			return nil, err
 		}
-		if impDrift {
-			driftDims++
-		}
-		if authDrift {
-			driftDims++
-		}
-		var res map[string]interface{}
-		if driftDims > 0 && eval.State == assurance.AssuranceStateAssured {
-			res = map[string]interface{}{
-				"subject":          sub.URI(),
-				"status":           "DECOHERENT",
-				"policy_drift":     polDrift,
-				"authority_drift":  authDrift,
-				"workload_drift":   impDrift,
-				"assurance_status": "FAILED",
-				"drift_dimensions": driftDims,
-				"reason":           "Epoch digest divergence detected across active evidence envelopes",
-			}
-		} else {
-			switch eval.State {
-			case assurance.AssuranceStateAssured:
-				res = map[string]interface{}{
-					"subject":          sub.URI(),
-					"status":           "IN_SYNC",
-					"policy_drift":     false,
-					"authority_drift":  false,
-					"workload_drift":   false,
-					"assurance_status": "ASSURED",
-					"drift_dimensions": 0,
-				}
-			case assurance.AssuranceStateFailed:
-				if driftDims == 0 {
-					driftDims = 1
-				}
-				res = map[string]interface{}{
-					"subject":          sub.URI(),
-					"status":           "DECOHERENT",
-					"policy_drift":     polDrift,
-					"authority_drift":  authDrift,
-					"workload_drift":   true,
-					"assurance_status": "FAILED",
-					"drift_dimensions": driftDims,
-					"reason":           "Adverse or violation evidence observed in CAS",
-				}
-			case assurance.AssuranceStateStale:
-				res = map[string]interface{}{
-					"subject":          sub.URI(),
-					"status":           "DRIFT_DETECTED",
-					"policy_drift":     false,
-					"authority_drift":  false,
-					"workload_drift":   true,
-					"assurance_status": "STALE",
-					"drift_dimensions": 1,
-					"reason":           "Evidence exceeded maximum freshness window",
-				}
-			default:
-				// Invariant I-02: Cannot claim IN_SYNC / ASSURED without baseline evidence
-				res = map[string]interface{}{
-					"subject":          sub.URI(),
-					"status":           "UNKNOWN",
-					"policy_drift":     false,
-					"authority_drift":  false,
-					"workload_drift":   false,
-					"assurance_status": "UNKNOWN",
-					"drift_dimensions": 0,
-					"reason":           "Absence of verified baseline evidence",
-				}
+		pol, imp, auth := detectMCPEpochDrift(envelopes)
+		dimensions := 0
+		for _, different := range []bool{pol, imp, auth} {
+			if different {
+				dimensions++
 			}
 		}
-		buf, _ := json.MarshalIndent(res, "", "  ")
-		return &mcpCallToolResult{
-			Content: []mcpToolContentItem{{Type: "text", Text: string(buf)}},
-		}, nil
+		result := map[string]any{"subject": sub.URI(), "status": "UNKNOWN", "assurance_status": "UNKNOWN", "raw_metadata_divergence_dimensions": dimensions, "reason": "Unverified material is not an authoritative current baseline"}
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return &mcpCallToolResult{Content: []mcpToolContentItem{{Type: "text", Text: string(data)}}}, nil
 
 	case "scaffold_compliance":
 		profile, _ := args["profile"].(string)
@@ -939,61 +738,35 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]inte
 		}, nil
 
 	case "project_oscal":
-		subRaw, _ := args["subject"].(string)
-		if subRaw == "" {
-			return nil, fmt.Errorf("subject argument is required")
-		}
-		docType, _ := args["document_type"].(string)
-		if docType == "" {
-			return nil, fmt.Errorf("document_type argument is required")
-		}
-		sub := parseSubjectRef(subRaw)
-		ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-		envelopes := s.loadSubjectEnvelopes(ctx, sub)
-		eval := s.buildEvaluation(sub, ctrl, envelopes)
-
-		var projected []byte
-		var err error
-		normDoc, _ := proj.NormalizeDocumentType(docType)
-		switch normDoc {
-		case proj.DocTypeAssessmentResults:
-			projected, err = s.projector.ProjectAssessmentResults(ctx, sub, []assurance.ClaimEvaluation{eval}, nil)
-		case proj.DocTypeComponentDefinition:
-			projected, err = s.projector.ProjectComponentDefinition(ctx, sub.ID, []assurance.ClaimEvaluation{eval})
-		case proj.DocTypeSSP:
-			projected, err = s.projector.ProjectSSP(ctx, sub.ID, []assurance.ClaimEvaluation{eval})
-		case proj.DocTypeAssessmentPlan:
-			contract := assurance.EvidenceContract{
-				ID: fmt.Sprintf("contract-%s", sub.ID),
-				Requirements: []assurance.EvidenceRequirement{
-					{ID: "req-1", EvidenceType: "admission", Required: true, MaxAge: utcp.DefaultFreshnessWindow},
-				},
-			}
-			projected, err = s.projector.ProjectAssessmentPlan(ctx, sub, contract, []assurance.ControlRef{ctrl})
-		case proj.DocTypePOAM:
-			var findings []assurance.Finding
-			if eval.State != assurance.AssuranceStateAssured {
-				findings = append(findings, assurance.Finding{
-					ID:           fmt.Sprintf("finding-%s-%s", ctrl.ID, strings.ToLower(eval.State.String())),
-					Subject:      sub,
-					Control:      ctrl,
-					Severity:     "HIGH",
-					Title:        fmt.Sprintf("Control %s Assurance State is %s", ctrl.Canonical(), eval.State),
-					Description:  fmt.Sprintf("Subject %s does not have current verified evidence for %s (state: %s).", sub.URI(), ctrl.Canonical(), eval.State),
-					DiscoveredAt: eval.EvaluatedAt,
-				})
-			}
-			projected, err = s.projector.ProjectPOAM(ctx, sub, findings)
-		default:
-			return nil, fmt.Errorf("unsupported OSCAL projection document type: %s", docType)
-		}
+		raw, err := json.Marshal(args)
 		if err != nil {
-			return nil, fmt.Errorf("projection error: %w", err)
+			return nil, err
 		}
-		return &mcpCallToolResult{
-			Content: []mcpToolContentItem{{Type: "text", Text: string(projected)}},
-		}, nil
-
+		request, err := proj.DecodeProjectionRequest(raw)
+		if err != nil {
+			return nil, err
+		}
+		sub, err := request.SubjectRef()
+		if err != nil {
+			return nil, err
+		}
+		controls, err := request.ControlRefs()
+		if err != nil {
+			return nil, err
+		}
+		envelopes, err := s.loadSubjectEnvelopes(ctx, sub)
+		if err != nil {
+			return nil, err
+		}
+		var evaluations []assurance.ClaimEvaluation
+		for _, control := range controls {
+			evaluations = append(evaluations, evaluation.UnverifiedEvaluation(sub, control, envelopes, time.Now().UTC()))
+		}
+		projected, err := request.Project(ctx, evaluations)
+		if err != nil {
+			return nil, err
+		}
+		return &mcpCallToolResult{Content: []mcpToolContentItem{{Type: "text", Text: string(projected)}}}, nil
 	case "run_doctor":
 		leaseID, _ := args["lease_id"].(string)
 		previous, _ := args["prev_receipt_hash"].(string)
@@ -1260,19 +1033,15 @@ func (s *Server) toolInspectSubject(ctx context.Context, args map[string]interfa
 		return nil, fmt.Errorf("subject argument is required")
 	}
 	sub := parseSubjectRef(subRaw)
-	ctrlID := "AC-6"
-	ctrlNS := "nist-sp-800-53"
-	if rawCtrl, ok := args["control"].(string); ok && rawCtrl != "" {
-		parts := strings.SplitN(rawCtrl, ":", 2)
-		if len(parts) == 2 {
-			ctrlNS = parts[0]
-			ctrlID = parts[1]
-		} else {
-			ctrlID = rawCtrl
-		}
+	rawControl, _ := args["control"].(string)
+	ctrl, err := evaluation.ParseControlReference(rawControl)
+	if err != nil {
+		return nil, err
 	}
-	ctrl := assurance.ControlRef{Namespace: ctrlNS, ID: ctrlID}
-	envelopes := s.loadSubjectEnvelopes(ctx, sub)
+	envelopes, err := s.loadSubjectEnvelopes(ctx, sub)
+	if err != nil {
+		return nil, err
+	}
 	eval := s.buildEvaluation(sub, ctrl, envelopes)
 	report := diagnostics.InspectSubject(ctx, sub, eval, envelopes)
 	buf, _ := json.MarshalIndent(report, "", "  ")
@@ -1289,5 +1058,9 @@ func parseSubjectRef(raw string) assurance.SubjectRef {
 	return assurance.SubjectRef{Scheme: "k8s", ID: raw}
 }
 
-// Ensure receipts package is linked
-var _ = receipts.ComputeEvidenceRoot
+func materialPresence(envelopes []assurance.EvidenceEnvelope) string {
+	if len(envelopes) > 0 {
+		return "PRESENT"
+	}
+	return "EMPTY"
+}

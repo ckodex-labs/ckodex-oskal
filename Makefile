@@ -10,12 +10,15 @@ GO := go
 all: fmt check-ascii lint test build
 
 .PHONY: demo
+DEMO_SOURCE ?= .
+DEMO_TETRAGON_CHART ?=
 demo:
-	$(GO) run ./cmd/demo
+	$(GO) run ./cmd/demo --source "$(DEMO_SOURCE)" --tetragon-chart "$(DEMO_TETRAGON_CHART)"
 
 help:
 	@echo "Available targets:"
 	@echo "  build            Compile oskal CLI and oskal-controller binaries"
+	@echo "  demo             Deploy a fresh Kind controller + Tetragon and verify signed source-loss receipts"
 	@echo "  test             Run all tests with race detector"
 	@echo "  schema-test      Run strict NIST OSCAL v1.2.3 JSON schema validation suite"
 	@echo "  check-ascii      Verify 100% pure ASCII across source and documentation"
@@ -30,7 +33,7 @@ help:
 	@echo "  clean            Remove compiled binaries and test artifacts"
 	@echo "  e2e              Run local Kind end-to-end testbed script"
 
-VERSION ?= v1.0.0
+VERSION ?= v1.0.1
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(BUILD_DATE)

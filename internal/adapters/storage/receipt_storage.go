@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 )
 
 // Receipt lookup keys are single bounded filename components on all platforms.
@@ -100,17 +101,20 @@ func readReceiptFile(root *os.Root, name string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("receipt must be a regular file")
 	}
+	if info.Size() > MaxMetadataBytes {
+		return nil, &CapacityError{Dimension: "receipt read bytes", Requested: info.Size(), Limit: MaxMetadataBytes}
+	}
 	file, err := root.Open(name)
 	if err != nil {
 		return nil, err
 	}
-	data, readErr := io.ReadAll(io.LimitReader(file, MaxPayloadBytes+1))
+	data, readErr := io.ReadAll(io.LimitReader(file, info.Size()+1))
 	closeErr := file.Close()
 	if err := errors.Join(readErr, closeErr); err != nil {
 		return nil, err
 	}
-	if len(data) > MaxPayloadBytes {
-		return nil, errors.New("receipt exceeds storage read bound")
+	if int64(len(data)) != info.Size() {
+		return nil, errors.New("receipt changed size during read")
 	}
 	return data, nil
 }
@@ -136,7 +140,12 @@ func (r *ContentAddressedEvidenceRepository) loadReceipts() error {
 		return &IntegrityError{Path: filepath.Join(r.baseDir, "receipts"), Reason: "cannot open confined receipt directory: " + err.Error()}
 	}
 	defer func() { _ = root.Close() }()
-	entries, err := fs.ReadDir(root.FS(), ".")
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = directory.Close() }()
+	entries, err := boundedDirectory(directory, r.limits.MaxEntries+16)
 	if err != nil {
 		return err
 	}
@@ -147,7 +156,10 @@ func (r *ContentAddressedEvidenceRepository) loadReceipts() error {
 		path := filepath.Join(r.baseDir, "receipts", entry.Name())
 		data, err := readReceiptFile(root, entry.Name())
 		if err != nil {
-			return &IntegrityError{Path: path, Reason: "cannot read confined receipt: " + err.Error()}
+			if errors.Is(err, ports.ErrEvidenceCapacity) {
+				return err
+			}
+			return &IntegrityError{Path: path, Reason: "cannot read confined receipt: " + err.Error(), Cause: err}
 		}
 		if err := r.restoreReceipt(path, data); err != nil {
 			return err

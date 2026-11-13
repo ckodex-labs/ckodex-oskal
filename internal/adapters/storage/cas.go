@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -75,54 +76,68 @@ func appendUniqueDigest(slice []string, digest string) []string {
 // ContentAddressedEvidenceRepository implements ports.EvidenceRepository
 // supporting both in-memory and durable content-addressed filesystem storage (ADR-002).
 type ContentAddressedEvidenceRepository struct {
-	baseDir      string
-	mu           sync.RWMutex
-	blobs        map[string][]byte
-	envelopes    map[string]assurance.EvidenceEnvelope
-	subjectIndex map[string][]string // subjectURI -> []envelopeDigest
-	receipts     map[string]assurance.ControlReceipt
+	baseDir         string
+	mu              sync.RWMutex
+	blobs           map[string][]byte
+	envelopes       map[string]assurance.EvidenceEnvelope
+	subjectIndex    map[string][]string // subjectURI -> []envelopeDigest
+	receipts        map[string]assurance.ControlReceipt
+	limits          ArchiveLimits
+	diskObjects     map[string]int64
+	residentObjects map[string]int64
+	diskBytes       int64
+	residentBytes   int64
 }
 
-// NewMemoryEvidenceRepository creates an in-memory evidence repository.
+func newRepository(baseDir string, limits ArchiveLimits) *ContentAddressedEvidenceRepository {
+	return &ContentAddressedEvidenceRepository{baseDir: baseDir, limits: limits, blobs: make(map[string][]byte), envelopes: make(map[string]assurance.EvidenceEnvelope), subjectIndex: make(map[string][]string), receipts: make(map[string]assurance.ControlReceipt), diskObjects: make(map[string]int64), residentObjects: make(map[string]int64)}
+}
+
+// NewMemoryEvidenceRepository uses the same conservative resident object limits.
 func NewMemoryEvidenceRepository() *ContentAddressedEvidenceRepository {
-	return &ContentAddressedEvidenceRepository{
-		baseDir:      "",
-		blobs:        make(map[string][]byte),
-		envelopes:    make(map[string]assurance.EvidenceEnvelope),
-		subjectIndex: make(map[string][]string),
-		receipts:     make(map[string]assurance.ControlReceipt),
+	return newRepository("", DefaultArchiveLimits())
+}
+func NewMemoryEvidenceRepositoryWithLimits(limits ArchiveLimits) (*ContentAddressedEvidenceRepository, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
 	}
+	return newRepository("", limits), nil
 }
 
-// NewFilesystemEvidenceRepository creates a durable filesystem-backed evidence repository.
 func NewFilesystemEvidenceRepository(baseDir string) (*ContentAddressedEvidenceRepository, error) {
+	return NewFilesystemEvidenceRepositoryWithLimits(baseDir, DefaultArchiveLimits())
+}
+func NewFilesystemEvidenceRepositoryWithLimits(baseDir string, limits ArchiveLimits) (*ContentAddressedEvidenceRepository, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(baseDir) == "" {
 		return nil, fmt.Errorf("evidence directory is required")
 	}
 	if err := os.MkdirAll(filepath.Join(baseDir, "blobs", "sha256"), 0755); err != nil {
-		return nil, fmt.Errorf("failed to initialize evidence storage directory: %w", err)
+		return nil, err
 	}
-	return OpenFilesystemEvidenceRepository(baseDir)
+	return OpenFilesystemEvidenceRepositoryWithLimits(baseDir, limits)
 }
 
-// OpenFilesystemEvidenceRepository opens an existing store without creating files
-// or directories. Callers handling read-only requests must use this constructor.
+// OpenFilesystemEvidenceRepository never creates or deletes historical files.
 func OpenFilesystemEvidenceRepository(baseDir string) (*ContentAddressedEvidenceRepository, error) {
+	return OpenFilesystemEvidenceRepositoryWithLimits(baseDir, DefaultArchiveLimits())
+}
+func OpenFilesystemEvidenceRepositoryWithLimits(baseDir string, limits ArchiveLimits) (*ContentAddressedEvidenceRepository, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(baseDir) == "" {
 		return nil, fmt.Errorf("evidence directory is required")
 	}
-	repo := &ContentAddressedEvidenceRepository{
-		baseDir:      baseDir,
-		blobs:        make(map[string][]byte),
-		envelopes:    make(map[string]assurance.EvidenceEnvelope),
-		subjectIndex: make(map[string][]string),
-		receipts:     make(map[string]assurance.ControlReceipt),
+	repo := newRepository(baseDir, limits)
+	if err := repo.preflightArchive(); err != nil {
+		return nil, fmt.Errorf("preflight evidence archive: %w", err)
 	}
-
 	if err := repo.loadFromDisk(); err != nil {
 		return nil, fmt.Errorf("failed to recover existing evidence index: %w", err)
 	}
-
 	return repo, nil
 }
 
@@ -146,45 +161,64 @@ func isValidHexDigest(hexHash string) bool {
 type IntegrityError struct {
 	Path   string
 	Reason string
+	Cause  error
 }
+
+func (e *IntegrityError) Unwrap() error { return e.Cause }
 
 func (e *IntegrityError) Error() string {
 	return fmt.Sprintf("evidence store integrity failure at %s: %s; preserve this file, inspect the store and restore verified bytes before reopening", e.Path, e.Reason)
 }
 
 func readEvidenceFile(path string) ([]byte, error) {
+	return readEvidenceFileBound(path, MaxPayloadBytes)
+}
+func readEvidenceFileBound(path string, bound int64) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, &IntegrityError{Path: path, Reason: "cannot inspect file: " + err.Error()}
+		return nil, &IntegrityError{Path: path, Reason: "cannot inspect file: " + err.Error(), Cause: err}
 	}
 	if !info.Mode().IsRegular() {
 		return nil, &IntegrityError{Path: path, Reason: "expected a regular evidence file"}
 	}
+	if info.Size() > bound {
+		return nil, &CapacityError{Dimension: "object read bytes", Requested: info.Size(), Limit: bound}
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, &IntegrityError{Path: path, Reason: "cannot read file: " + err.Error()}
+		return nil, &IntegrityError{Path: path, Reason: "cannot read file: " + err.Error(), Cause: err}
 	}
 	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.LimitReader(f, MaxPayloadBytes+1))
+	data, err := io.ReadAll(io.LimitReader(f, info.Size()+1))
 	if err != nil {
-		return nil, &IntegrityError{Path: path, Reason: "cannot read evidence bytes: " + err.Error()}
+		return nil, &IntegrityError{Path: path, Reason: "cannot read evidence bytes: " + err.Error(), Cause: err}
 	}
-	if len(data) > MaxPayloadBytes {
-		return nil, &IntegrityError{Path: path, Reason: fmt.Sprintf("file exceeds %d-byte restore bound", MaxPayloadBytes)}
+	if int64(len(data)) != info.Size() {
+		return nil, &IntegrityError{Path: path, Reason: "archive object changed size during read"}
 	}
 	return data, nil
 }
 
-func (r *ContentAddressedEvidenceRepository) indexEnvelope(env assurance.EvidenceEnvelope, data []byte) {
+func (r *ContentAddressedEvidenceRepository) indexEnvelope(env assurance.EvidenceEnvelope, data []byte) error {
+	if len(data) > MaxMetadataBytes {
+		return &CapacityError{Dimension: "envelope bytes", Requested: int64(len(data)), Limit: MaxMetadataBytes}
+	}
+	if err := envelopeBounds(env); err != nil {
+		return err
+	}
 	h := sha256.Sum256(data)
 	digest := "sha256:" + hex.EncodeToString(h[:])
 	if _, exists := r.envelopes[digest]; exists {
-		return
+		return nil
 	}
-	r.envelopes[digest] = env
+	if err := r.admit(nil, map[string]int64{"blob/" + digest: int64(len(data))}); err != nil {
+		return err
+	}
+	r.envelopes[digest] = cloneEnvelope(env)
 	r.blobs[digest] = data
 	uri := env.Subject.URI()
 	r.subjectIndex[uri] = appendUniqueDigest(r.subjectIndex[uri], digest)
+	return nil
 }
 
 func validStoredEnvelope(env assurance.EvidenceEnvelope) bool {
@@ -192,6 +226,12 @@ func validStoredEnvelope(env assurance.EvidenceEnvelope) bool {
 }
 
 func (r *ContentAddressedEvidenceRepository) restoreReceipt(path string, data []byte) error {
+	if err := r.accountRestoreFile(path, len(data)); err != nil {
+		return err
+	}
+	if len(data) > MaxMetadataBytes {
+		return &CapacityError{Dimension: "receipt bytes", Requested: int64(len(data)), Limit: MaxMetadataBytes}
+	}
 	var receipt assurance.ControlReceipt
 	if err := json.Unmarshal(data, &receipt); err != nil || !validReceiptEncoding(receipt) {
 		return &IntegrityError{Path: path, Reason: "invalid receipt JSON, identity, control or signature encoding"}
@@ -201,15 +241,21 @@ func (r *ContentAddressedEvidenceRepository) restoreReceipt(path string, data []
 	if err := validateStoredReceiptName(key, hash, receipt); err != nil {
 		return &IntegrityError{Path: path, Reason: err.Error()}
 	}
+	if err := receiptBounds(receipt); err != nil {
+		return err
+	}
+	if err := r.admit(nil, map[string]int64{"receipt/" + hash: int64(len(data))}); err != nil {
+		return err
+	}
 	r.indexReceipt(receipt, hash, key)
 	return nil
 }
 
 func (r *ContentAddressedEvidenceRepository) loadFromDisk() error {
 	blobsDir := filepath.Join(r.baseDir, "blobs", "sha256")
-	entries, err := os.ReadDir(blobsDir)
+	entries, err := boundedReadDir(blobsDir, r.limits.MaxEntries+16)
 	if err != nil {
-		return &IntegrityError{Path: blobsDir, Reason: "cannot enumerate CAS blobs: " + err.Error()}
+		return &IntegrityError{Path: blobsDir, Reason: "cannot enumerate CAS blobs: " + err.Error(), Cause: err}
 	}
 	for _, entry := range entries {
 		name := entry.Name()
@@ -222,8 +268,25 @@ func (r *ContentAddressedEvidenceRepository) loadFromDisk() error {
 		if !isValidHexDigest(expected) {
 			return &IntegrityError{Path: path, Reason: "invalid SHA-256 blob filename"}
 		}
-		data, err := readEvidenceFile(path)
+		bound := int64(MaxPayloadBytes)
+		if ext == ".json" {
+			bound = MaxMetadataBytes
+		}
+		info, err := os.Lstat(path)
 		if err != nil {
+			return err
+		}
+		if info.Size() > bound {
+			return &CapacityError{Dimension: "restore object bytes", Requested: info.Size(), Limit: bound}
+		}
+		if err := r.admit(nil, map[string]int64{"blob/sha256:" + expected: info.Size()}); err != nil {
+			return err
+		}
+		data, err := readEvidenceFileBound(path, bound)
+		if err != nil {
+			return err
+		}
+		if err := r.accountRestoreFile(path, len(data)); err != nil {
 			return err
 		}
 		h := sha256.Sum256(data)
@@ -231,20 +294,28 @@ func (r *ContentAddressedEvidenceRepository) loadFromDisk() error {
 			return &IntegrityError{Path: path, Reason: "SHA-256 digest does not match blob filename"}
 		}
 		if ext == ".bin" {
+			if err := r.admit(nil, map[string]int64{"blob/sha256:" + expected: int64(len(data))}); err != nil {
+				return err
+			}
 			r.blobs["sha256:"+expected] = data
 			continue
+		}
+		if len(data) > MaxMetadataBytes {
+			return &CapacityError{Dimension: "envelope restore bytes", Requested: int64(len(data)), Limit: MaxMetadataBytes}
 		}
 		var env assurance.EvidenceEnvelope
 		if err := json.Unmarshal(data, &env); err != nil || !validStoredEnvelope(env) {
 			return &IntegrityError{Path: path, Reason: "malformed evidence envelope"}
 		}
-		r.indexEnvelope(env, data)
+		if err := r.indexEnvelope(env, data); err != nil {
+			return err
+		}
 	}
 	// Legacy top-level envelopes remain supported. Unrelated valid export JSON is
 	// not evidence and must not be imported into the observation index.
-	entries, err = os.ReadDir(r.baseDir)
+	entries, err = boundedReadDir(r.baseDir, r.limits.MaxEntries+16)
 	if err != nil {
-		return &IntegrityError{Path: r.baseDir, Reason: "cannot enumerate legacy evidence: " + err.Error()}
+		return &IntegrityError{Path: r.baseDir, Reason: "cannot enumerate legacy evidence: " + err.Error(), Cause: err}
 	}
 	for _, entry := range entries {
 		name := entry.Name()
@@ -255,7 +326,10 @@ func (r *ContentAddressedEvidenceRepository) loadFromDisk() error {
 		if strings.HasPrefix(name, "rcpt-") {
 			data, err := readLegacyReceipt(r.baseDir, name)
 			if err != nil {
-				return &IntegrityError{Path: path, Reason: err.Error()}
+				if errors.Is(err, ports.ErrEvidenceCapacity) {
+					return err
+				}
+				return &IntegrityError{Path: path, Reason: err.Error(), Cause: err}
 			}
 			if err := r.restoreReceipt(path, data); err != nil {
 				return err
@@ -266,41 +340,12 @@ func (r *ContentAddressedEvidenceRepository) loadFromDisk() error {
 		if err != nil {
 			return err
 		}
-		var list []assurance.EvidenceEnvelope
-		if err := json.Unmarshal(data, &list); err == nil {
-			hasEnvelope := false
-			for _, env := range list {
-				if env.ID != "" {
-					hasEnvelope = true
-					break
-				}
-			}
-			if !hasEnvelope {
-				continue
-			}
-			for _, env := range list {
-				if !validStoredEnvelope(env) {
-					return &IntegrityError{Path: path, Reason: "malformed legacy evidence envelope"}
-				}
-				raw, err := json.Marshal(env)
-				if err != nil {
-					return &IntegrityError{Path: path, Reason: "cannot encode legacy envelope"}
-				}
-				r.indexEnvelope(env, raw)
-			}
-			continue
+		if err := r.accountRestoreFile(path, len(data)); err != nil {
+			return err
 		}
-		var env assurance.EvidenceEnvelope
-		if err := json.Unmarshal(data, &env); err != nil {
-			return &IntegrityError{Path: path, Reason: "invalid legacy JSON; unable to establish store contents"}
+		if err := r.restoreLegacy(path, data); err != nil {
+			return err
 		}
-		if env.ID == "" {
-			continue
-		}
-		if !validStoredEnvelope(env) {
-			return &IntegrityError{Path: path, Reason: "malformed legacy evidence envelope"}
-		}
-		r.indexEnvelope(env, data)
 	}
 	return r.loadReceipts()
 }
@@ -314,25 +359,37 @@ func (r *ContentAddressedEvidenceRepository) Put(
 	if ctx != nil && ctx.Err() != nil {
 		return assurance.EvidenceRef{}, ctx.Err()
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ctx != nil && ctx.Err() != nil {
+		return assurance.EvidenceRef{}, ctx.Err()
+	}
+	if err := envelopeBounds(envelope); err != nil {
+		return assurance.EvidenceRef{}, err
+	}
+	// Freeze bounded caller-owned maps/slices before serialization or invoking
+	// the payload reader. The indexed object must be this exact admitted copy.
+	envelope = cloneEnvelope(envelope)
 	envelopeData, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
 		return assurance.EvidenceRef{}, fmt.Errorf("failed to serialize evidence envelope: %w", err)
 	}
 
-	if len(envelopeData) > MaxPayloadBytes {
-		return assurance.EvidenceRef{}, fmt.Errorf("evidence envelope exceeds %d-byte storage bound", MaxPayloadBytes)
+	if len(envelopeData) > MaxMetadataBytes {
+		return assurance.EvidenceRef{}, &CapacityError{Dimension: "envelope bytes", Requested: int64(len(envelopeData)), Limit: MaxMetadataBytes}
 	}
 
 	var rawPayload []byte
 	var rawHexHash string
 	if payload != nil {
-		limited := io.LimitReader(payload, MaxPayloadBytes+1)
+		readLimit := min(int64(MaxPayloadBytes), r.limits.MaxBytes)
+		limited := io.LimitReader(payload, readLimit+1)
 		rawPayload, err = io.ReadAll(limited)
 		if err != nil {
 			return assurance.EvidenceRef{}, fmt.Errorf("failed to read raw evidence payload: %w", err)
 		}
-		if len(rawPayload) > MaxPayloadBytes {
-			return assurance.EvidenceRef{}, fmt.Errorf("raw evidence payload exceeds maximum bound (%d bytes)", MaxPayloadBytes)
+		if int64(len(rawPayload)) > readLimit {
+			return assurance.EvidenceRef{}, &CapacityError{Dimension: "payload bytes", Requested: int64(len(rawPayload)), Limit: readLimit}
 		}
 		rawHash := sha256.Sum256(rawPayload)
 		rawHexHash = hex.EncodeToString(rawHash[:])
@@ -342,20 +399,35 @@ func (r *ContentAddressedEvidenceRepository) Put(
 	hexHash := hex.EncodeToString(h[:])
 	digest := "sha256:" + hexHash
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Persist to disk atomically BEFORE mutating in-memory index so disk failures never leave decoherent memory state.
+	resident := map[string]int64{"blob/" + digest: int64(len(envelopeData))}
+	disk := map[string]int64{}
 	if r.baseDir != "" {
-		filePath := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.json", hexHash))
-		if err := writeFileAtomic(filePath, envelopeData, 0644); err != nil {
-			return assurance.EvidenceRef{}, fmt.Errorf("failed to write evidence blob to disk: %w", err)
+		disk[filepath.Join("blobs", "sha256", hexHash+".json")] = int64(len(envelopeData))
+	}
+	if payload != nil {
+		resident["blob/sha256:"+rawHexHash] = int64(len(rawPayload))
+		if r.baseDir != "" {
+			disk[filepath.Join("blobs", "sha256", rawHexHash+".bin")] = int64(len(rawPayload))
 		}
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return assurance.EvidenceRef{}, ctx.Err()
+	}
+	if err := r.admit(disk, resident); err != nil {
+		return assurance.EvidenceRef{}, err
+	}
+	// Publish the artifact before its referring envelope. A failed second write
+	// can leave an orphan artifact, but never a discoverable incomplete envelope.
+	if r.baseDir != "" {
 		if payload != nil {
-			rawPath := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.bin", rawHexHash))
-			if err := writeFileAtomic(rawPath, rawPayload, 0644); err != nil {
-				return assurance.EvidenceRef{}, fmt.Errorf("failed to write secondary evidence payload to disk: %w", err)
+			path := filepath.Join(r.baseDir, "blobs", "sha256", rawHexHash+".bin")
+			if err := publishBlob(path, rawPayload); err != nil {
+				return assurance.EvidenceRef{}, err
 			}
+		}
+		path := filepath.Join(r.baseDir, "blobs", "sha256", hexHash+".json")
+		if err := publishBlob(path, envelopeData); err != nil {
+			return assurance.EvidenceRef{}, err
 		}
 	}
 
@@ -397,10 +469,16 @@ func (r *ContentAddressedEvidenceRepository) Get(ctx context.Context, ref assura
 		// Attempt reading from disk
 		if r.baseDir != "" {
 			path := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.json", hexHash))
-			diskData, err := os.ReadFile(path)
+			diskData, err := readEvidenceFileBound(path, MaxMetadataBytes)
 			if err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					return nil, err
+				}
 				binPath := filepath.Join(r.baseDir, "blobs", "sha256", fmt.Sprintf("%s.bin", hexHash))
-				diskData, err = os.ReadFile(binPath)
+				diskData, err = readEvidenceFile(binPath)
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					return nil, err
+				}
 			}
 			if err == nil {
 				h := sha256.Sum256(diskData)
@@ -458,7 +536,7 @@ func (r *ContentAddressedEvidenceRepository) ListBySubject(
 	if digests, ok := r.subjectIndex[subject.URI()]; ok {
 		for _, d := range digests {
 			if env, found := r.envelopes[d]; found && !seen[env.ID] {
-				results = append(results, env)
+				results = append(results, cloneEnvelope(env))
 				seen[env.ID] = true
 			}
 		}
@@ -474,7 +552,7 @@ func (r *ContentAddressedEvidenceRepository) ListBySubject(
 			continue
 		}
 		if matchSubject(env.Subject, subject, targetLeaf) {
-			results = append(results, env)
+			results = append(results, cloneEnvelope(env))
 			seen[env.ID] = true
 		}
 	}
@@ -725,7 +803,7 @@ func (r *ContentAddressedEvidenceRepository) ListAll(ctx context.Context) ([]ass
 			continue
 		}
 		seen[env.ID] = true
-		results = append(results, env)
+		results = append(results, cloneEnvelope(env))
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].ID < results[j].ID
@@ -739,6 +817,14 @@ func (r *ContentAddressedEvidenceRepository) PutReceipt(ctx context.Context, rec
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := receiptBounds(receipt); err != nil {
+		return "", err
+	}
 	if !validReceiptEncoding(receipt) {
 		return "", errors.New("receipt identity, control and signature encoding are required")
 	}
@@ -750,24 +836,36 @@ func (r *ContentAddressedEvidenceRepository) PutReceipt(ctx context.Context, rec
 	if err != nil {
 		return "", fmt.Errorf("serialize receipt: %w", err)
 	}
-	if len(data) > MaxPayloadBytes {
-		return "", fmt.Errorf("receipt exceeds %d-byte storage bound", MaxPayloadBytes)
+	if len(data) > MaxMetadataBytes {
+		return "", &CapacityError{Dimension: "receipt bytes", Requested: int64(len(data)), Limit: MaxMetadataBytes}
 	}
 	hash := strings.TrimPrefix(assurance.ComputeDigest(data), "sha256:")
 	id := "rcpt-" + hash
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	updates := make([]string, 0, len(aliases))
 	for _, alias := range aliases {
 		if previous, exists := r.receipts[alias]; !exists || latestReceipt(receipt, previous) {
 			updates = append(updates, alias)
 		}
 	}
+	disk := map[string]int64{}
+	if r.baseDir != "" {
+		disk[filepath.Join("receipts", id+".json")] = int64(len(data))
+		for _, alias := range updates {
+			if strings.HasPrefix(alias, "rcpt-") {
+				disk[filepath.Join("receipts", alias+".json")] = int64(len(data))
+				disk[alias+".json"] = int64(len(data))
+			}
+		}
+	}
+	if err := r.admit(disk, map[string]int64{"receipt/" + hash: int64(len(data))}); err != nil {
+		return "", err
+	}
 	if r.baseDir != "" {
 		if err := r.persistReceipt(id, data, updates); err != nil {
 			return "", err
 		}
 	}
+	receipt.Subject.Attributes = maps.Clone(receipt.Subject.Attributes)
 	r.indexReceipt(receipt, hash, id)
 	return id, nil
 }
@@ -794,9 +892,9 @@ func (r *ContentAddressedEvidenceRepository) VerifyIntegrity(ctx context.Context
 		return verified, nil
 	}
 	blobsDir := filepath.Join(r.baseDir, "blobs", "sha256")
-	entries, err := os.ReadDir(blobsDir)
+	entries, err := boundedReadDir(blobsDir, r.limits.MaxEntries+16)
 	if err != nil {
-		return verified, &IntegrityError{Path: blobsDir, Reason: "cannot enumerate CAS blobs: " + err.Error()}
+		return verified, &IntegrityError{Path: blobsDir, Reason: "cannot enumerate CAS blobs: " + err.Error(), Cause: err}
 	}
 	for _, entry := range entries {
 		if ctx != nil && ctx.Err() != nil {
@@ -836,12 +934,20 @@ func (r *ContentAddressedEvidenceRepository) GetReceipt(ctx context.Context, idO
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if receipt, ok := r.receipts[key]; ok {
+		receipt.Subject.Attributes = maps.Clone(receipt.Subject.Attributes)
 		return receipt, nil
 	}
 	if !strings.HasPrefix(key, "rcpt-") {
 		if receipt, ok := r.receipts["rcpt-"+key]; ok {
+			receipt.Subject.Attributes = maps.Clone(receipt.Subject.Attributes)
 			return receipt, nil
 		}
 	}
 	return assurance.ControlReceipt{}, fmt.Errorf("receipt not found: %s", idOrDigest)
+}
+
+func cloneEnvelope(envelope assurance.EvidenceEnvelope) assurance.EvidenceEnvelope {
+	envelope.Subject.Attributes = maps.Clone(envelope.Subject.Attributes)
+	envelope.ControlRefs = append([]assurance.ControlRef(nil), envelope.ControlRefs...)
+	return envelope
 }

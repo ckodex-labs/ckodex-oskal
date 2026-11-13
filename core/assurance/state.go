@@ -167,6 +167,7 @@ const (
 type Coherence string
 
 const (
+	CoherenceUnknown           Coherence = "UNKNOWN"
 	CoherenceCoherent          Coherence = "COHERENT"
 	CoherencePartiallyCoherent Coherence = "PARTIALLY_COHERENT"
 	CoherenceDecoherent        Coherence = "DECOHERENT"

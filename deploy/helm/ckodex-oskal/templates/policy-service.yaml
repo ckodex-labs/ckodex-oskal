@@ -1,0 +1,20 @@
+{{- if .Values.policyCapture.opaListeners }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ckodex-oskal.fullname" . }}-policy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ckodex-oskal.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "ckodex-oskal.selectorLabels" . | nindent 4 }}
+  ports:
+    {{- range .Values.policyCapture.opaListeners }}
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .name }}
+      protocol: TCP
+    {{- end }}
+{{- end }}
