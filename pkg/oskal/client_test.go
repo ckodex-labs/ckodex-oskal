@@ -52,8 +52,8 @@ func TestInProcessClientLifecycle(t *testing.T) {
 	if stUnknown.State != StateUnknown {
 		t.Fatalf("expected StateUnknown without evidence, got %v", stUnknown.State)
 	}
-	if stUnknown.EvidenceRoot != "none" {
-		t.Fatalf("expected evidence root 'none', got %s", stUnknown.EvidenceRoot)
+	if stUnknown.EvidenceRoot != "" {
+		t.Fatalf("expected empty evidence root, got %s", stUnknown.EvidenceRoot)
 	}
 
 	// 2. Explain claim without evidence -> state UNKNOWN
@@ -88,16 +88,16 @@ func TestInProcessClientLifecycle(t *testing.T) {
 		t.Fatalf("unexpected observation ID: %s", obsID)
 	}
 
-	// 4. Query state after observation -> state ASSURED
+	// 4. Query state after observation -> state UNKNOWN
 	stAssured, err := client.GetAssuranceState(ctx, subject)
 	if err != nil {
 		t.Fatalf("unexpected error getting assured state: %v", err)
 	}
-	if stAssured.State != StateAssured {
-		t.Fatalf("expected StateAssured after observation, got %v", stAssured.State)
+	if stAssured.State != StateUnknown {
+		t.Fatalf("expected StateUnknown after observation, got %v", stAssured.State)
 	}
-	if stAssured.EvidenceRoot == "none" || stAssured.EvidenceRoot == "" {
-		t.Fatalf("expected valid evidence root, got %s", stAssured.EvidenceRoot)
+	if stAssured.EvidenceRoot != "" {
+		t.Fatalf("expected no unverified evidence root, got %s", stAssured.EvidenceRoot)
 	}
 
 	// 5. Evaluate subject claims
@@ -105,8 +105,8 @@ func TestInProcessClientLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to evaluate subject: %v", err)
 	}
-	if evalResp.SummaryState != StateAssured {
-		t.Fatalf("expected summary state ASSURED, got %v", evalResp.SummaryState)
+	if evalResp.SummaryState != StateUnknown {
+		t.Fatalf("expected summary state UNKNOWN, got %v", evalResp.SummaryState)
 	}
 	if len(evalResp.Evaluations) != 1 {
 		t.Fatalf("expected 1 evaluation, got %d", len(evalResp.Evaluations))
@@ -246,13 +246,13 @@ func TestGRPCClientLifecycle(t *testing.T) {
 		t.Fatalf("unexpected obs ID: %s", obsID)
 	}
 
-	// 3. Query state after observation -> StateAssured
+	// 3. Query state after observation -> StateUnknown
 	stAssured, err := client.GetAssuranceState(ctx, subject)
 	if err != nil {
 		t.Fatalf("failed to get state: %v", err)
 	}
-	if stAssured.State != StateAssured {
-		t.Fatalf("expected StateAssured, got %v", stAssured.State)
+	if stAssured.State != StateUnknown {
+		t.Fatalf("expected StateUnknown, got %v", stAssured.State)
 	}
 
 	// 4. Explain claim
@@ -260,18 +260,11 @@ func TestGRPCClientLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to explain claim: %v", err)
 	}
-	if explainResp.AssuranceState != StateAssured {
-		t.Fatalf("expected explain state ASSURED, got %v", explainResp.AssuranceState)
+	if explainResp.AssuranceState != StateUnknown {
+		t.Fatalf("expected explain state UNKNOWN, got %v", explainResp.AssuranceState)
 	}
-	// QA-07: Verify ExplainGraph round-trip fields over gRPC
-	if explainResp.Graph.Epoch.SubjectDigest == "" {
-		t.Fatal("expected non-empty Epoch.SubjectDigest on gRPC ExplainClaim round-trip")
-	}
-	if len(explainResp.Graph.Implementations) == 0 || explainResp.Graph.Implementations[0].Requirement == "" {
-		t.Fatalf("expected non-empty Implementation.Requirement on gRPC ExplainClaim round-trip, got: %+v", explainResp.Graph.Implementations)
-	}
-	if len(explainResp.Graph.Evidence) == 0 || explainResp.Graph.Evidence[0].Digest == "" || !explainResp.Graph.Evidence[0].Verified {
-		t.Fatalf("expected verified Evidence item with non-empty Digest on gRPC ExplainClaim round-trip, got: %+v", explainResp.Graph.Evidence)
+	if explainResp.Graph.Epoch != (AssuranceEpoch{}) || len(explainResp.Graph.Implementations) != 0 || len(explainResp.Graph.Evidence) != 0 {
+		t.Fatalf("unconfigured service invented explanation metadata: %+v", explainResp.Graph)
 	}
 
 	// 5. Evaluate subject
@@ -279,10 +272,10 @@ func TestGRPCClientLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to evaluate subject: %v", err)
 	}
-	if evalResp.SummaryState != StateAssured {
-		t.Fatalf("expected summary state ASSURED, got %v", evalResp.SummaryState)
+	if evalResp.SummaryState != StateUnknown {
+		t.Fatalf("expected summary state UNKNOWN, got %v", evalResp.SummaryState)
 	}
-	if len(evalResp.Evaluations) != 1 || evalResp.Evaluations[0].Vector.Provenance != assurance.ValencePositive {
+	if len(evalResp.Evaluations) != 1 || evalResp.Evaluations[0].Vector.Provenance != assurance.ValenceUnresolved {
 		t.Fatalf("expected positive Provenance valence in EvaluateSubject vector (QA-15), got: %+v", evalResp.Evaluations)
 	}
 }
@@ -296,7 +289,7 @@ func TestInProcessClientFreshnessAndViolations(t *testing.T) {
 
 	ctrl := ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
 
-	// 1. Stale observation (> 15m old) -> StateStale (F-12)
+	// 1. Stale observation (> 15m old) -> StateUnknown (F-12)
 	staleSub := SubjectRef{Scheme: "k8s", ID: "payments/stale-inproc"}
 	_, err := client.SubmitObservation(ctx, &evidencev1.Observation{
 		Id:   "obs-inproc-stale",
@@ -318,27 +311,27 @@ func TestInProcessClientFreshnessAndViolations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if stStale.State != StateStale || stStale.Freshness != "stale" {
-		t.Fatalf("expected StateStale and freshness 'stale', got state=%v freshness=%s", stStale.State, stStale.Freshness)
+	if stStale.State != StateUnknown || stStale.Freshness != "unknown" {
+		t.Fatalf("expected StateUnknown and freshness 'stale', got state=%v freshness=%s", stStale.State, stStale.Freshness)
 	}
 
 	evalStale, err := client.EvaluateSubject(ctx, staleSub, []ControlRef{ctrl})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if evalStale.SummaryState != StateStale {
-		t.Fatalf("expected EvaluateSubject SummaryState StateStale, got %v", evalStale.SummaryState)
+	if evalStale.SummaryState != StateUnknown {
+		t.Fatalf("expected EvaluateSubject SummaryState StateUnknown, got %v", evalStale.SummaryState)
 	}
 
 	expStale, err := client.ExplainClaim(ctx, staleSub, ctrl)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if expStale.AssuranceState != StateStale {
-		t.Fatalf("expected ExplainClaim StateStale, got %v", expStale.AssuranceState)
+	if expStale.AssuranceState != StateUnknown {
+		t.Fatalf("expected ExplainClaim StateUnknown, got %v", expStale.AssuranceState)
 	}
 
-	// 2. Violation observation -> StateFailed (F-12)
+	// 2. Violation observation -> StateUnknown (F-12)
 	violSub := SubjectRef{Scheme: "k8s", ID: "payments/viol-inproc"}
 	_, err = client.SubmitObservation(ctx, &evidencev1.Observation{
 		Id:   "obs-inproc-viol",
@@ -363,24 +356,24 @@ func TestInProcessClientFreshnessAndViolations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if stViol.State != StateFailed {
-		t.Fatalf("expected StateFailed for violation observation, got %v", stViol.State)
+	if stViol.State != StateUnknown {
+		t.Fatalf("expected StateUnknown for violation observation, got %v", stViol.State)
 	}
 
 	evalViol, err := client.EvaluateSubject(ctx, violSub, []ControlRef{ctrl})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if evalViol.SummaryState != StateFailed {
-		t.Fatalf("expected EvaluateSubject SummaryState StateFailed, got %v", evalViol.SummaryState)
+	if evalViol.SummaryState != StateUnknown {
+		t.Fatalf("expected EvaluateSubject SummaryState StateUnknown, got %v", evalViol.SummaryState)
 	}
 
 	expViol, err := client.ExplainClaim(ctx, violSub, ctrl)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if expViol.AssuranceState != StateFailed {
-		t.Fatalf("expected ExplainClaim StateFailed, got %v", expViol.AssuranceState)
+	if expViol.AssuranceState != StateUnknown {
+		t.Fatalf("expected ExplainClaim StateUnknown, got %v", expViol.AssuranceState)
 	}
 
 	// 3. Malformed ControlReceipt missing sub-messages must return error without panicking

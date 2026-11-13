@@ -9,6 +9,7 @@ import (
 	api "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/binding"
+	evaluationpolicy "github.com/ckodex-labs/ckodex-oskal/internal/application/evaluation"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -68,7 +69,7 @@ func (r *LiveControlReconciler) Reconcile(parent context.Context, req ctrl.Reque
 			}
 			return ctrl.Result{RequeueAfter: r.Interval}, nil
 		}
-		evaluation.State = policyStanding(evaluation, resolved.Policies, time.Now().UTC())
+		evaluation.State = evaluationpolicy.ApplyPolicies(evaluation, resolved.Policies, time.Now().UTC())
 		state = combineLiveStates(state, evaluation.State)
 		summaryEvidence = append(summaryEvidence, evaluation.Evidence...)
 		receipt := assurance.ControlReceipt{Subject: resolved.Subject, Control: control, State: evaluation.State, Epoch: evaluation.Epoch, EvidenceRoot: evaluation.EvidenceRoot, EvaluatedAt: evaluation.EvaluatedAt}
@@ -278,30 +279,4 @@ func (r *LiveControlReconciler) current(ctx context.Context, object *api.Control
 
 func (r *LiveControlReconciler) invalidate(ctx context.Context, object *api.ControlBinding, cause error) error {
 	return errors.Join(cause, r.publishUnknown(ctx, object, cause.Error()))
-}
-
-func policyStanding(e assurance.ClaimEvaluation, policies []assurance.AssurancePolicy, now time.Time) assurance.AssuranceState {
-	if e.State != assurance.AssuranceStateVerified {
-		return e.State
-	}
-	authorized := false
-	for _, policy := range policies {
-		if policy.RequiredState == assurance.AssuranceStateAssured {
-			authorized = true
-		}
-		if policy.RequireFresh && (e.ValidUntil.IsZero() || !now.Before(e.ValidUntil)) {
-			return assurance.AssuranceStateStale
-		}
-		if policy.MaxEvaluationAge > 0 && (e.EvaluatedAt.IsZero() || now.Sub(e.EvaluatedAt) > policy.MaxEvaluationAge) {
-			return assurance.AssuranceStateStale
-		}
-	}
-	if !authorized {
-		return e.State
-	}
-	state, err := assurance.Transition(e.State, assurance.EventPolicyAssured)
-	if err != nil {
-		return assurance.AssuranceStateUnknown
-	}
-	return state
 }
