@@ -329,3 +329,100 @@ func TestArchiveImmutableWritesPreserveCorruptHistory(t *testing.T) {
 		t.Fatal("retry destroyed forensic bytes")
 	}
 }
+
+// metadataMutationReader exercises the supported io.Reader callback boundary.
+// It reads real file bytes and deliberately mutates caller-owned metadata once,
+// synchronously, so this is an ownership conformance fault rather than a race.
+type metadataMutationReader struct {
+	io.Reader
+	mutate  func()
+	mutated bool
+}
+
+func (r *metadataMutationReader) Read(p []byte) (int, error) {
+	if !r.mutated {
+		r.mutated = true
+		r.mutate()
+	}
+	return r.Reader.Read(p)
+}
+
+func TestPayloadReadCannotChangeAdmittedMetadata(t *testing.T) {
+	payload := []byte("actual file bytes across the reader callback boundary")
+	sourcePath := filepath.Join(t.TempDir(), "payload")
+	if err := os.WriteFile(sourcePath, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := source.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	envelope := capacityEnvelope("reader-callback", payload)
+	envelope.ControlRefs = []assurance.ControlRef{{Namespace: "example", ID: "original-control", Version: "v1"}}
+	expected, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := ArchiveLimits{MaxBytes: 4096, MaxEntries: 8}
+	directory := t.TempDir()
+	repo, err := NewFilesystemEvidenceRepositoryWithLimits(directory, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &metadataMutationReader{Reader: source, mutate: func() {
+		envelope.Subject.Attributes["late"] = strings.Repeat("x", MaxMetadataBytes+1)
+		envelope.ControlRefs[0].ID = "changed-by-payload-reader"
+	}}
+	reference, err := repo.Put(t.Context(), envelope, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reader.mutated || len(envelope.Subject.Attributes["late"]) != MaxMetadataBytes+1 {
+		t.Fatal("reader mutation did not execute")
+	}
+	if stored := readArchiveBytes(t, repo, reference); !bytes.Equal(stored, expected) {
+		t.Fatal("serialized envelope differs from pre-callback metadata")
+	}
+	indexed, err := repo.ListAll(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(indexed) != 1 {
+		t.Fatalf("unexpected index size: %d", len(indexed))
+	}
+	if late := len(indexed[0].Subject.Attributes["late"]); late != 0 {
+		t.Fatalf("payload callback retained %d unchecked attribute bytes under %d-byte archive quota", late, limits.MaxBytes)
+	}
+	indexedBytes, err := json.MarshalIndent(indexed[0], "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(indexedBytes, expected) || assurance.ComputeDigest(indexedBytes) != reference.Digest {
+		t.Fatal("resident index does not match admitted canonical envelope bytes/digest")
+	}
+	usage := repo.Usage()
+	if usage.ResidentBytes != int64(len(expected)+len(payload)) || usage.DiskBytes != usage.ResidentBytes || usage.ResidentEntries != 2 || usage.DiskEntries != 2 {
+		t.Fatalf("metadata callback changed quota accounting: %+v", usage)
+	}
+	reopened, err := OpenFilesystemEvidenceRepositoryWithLimits(directory, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := reopened.ListAll(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredBytes, err := json.MarshalIndent(restored[0], "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(restoredBytes, indexedBytes) {
+		t.Fatal("reopened metadata differs from resident snapshot")
+	}
+	t.Logf("callback mutation excluded; canonical index/digest match, %d admitted bytes under %d-byte quota; reopen preserved snapshot", usage.ResidentBytes, limits.MaxBytes)
+}
