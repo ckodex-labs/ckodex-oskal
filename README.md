@@ -1,4 +1,4 @@
-OSKAL checks Kubernetes evidence and reports UNKNOWN when required evidence is missing.
+OSKAL checks Kubernetes evidence and reports UNKNOWN by default when required evidence is missing.
 
 [![CI](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml/badge.svg)](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml)
 
@@ -38,10 +38,10 @@ Go race detector. These local checks do not prove every external integration.
 
 | Capability | Implementation and limits |
 | --- | --- |
-| Evaluation | Pure Go control evaluation with required evidence, freshness, producer and epoch checks. An epoch identifies the subject and policy versions to which evidence applies. Missing evidence is UNKNOWN; expired or mismatched evidence can be STALE. |
+| Evaluation | Pure Go control evaluation with required evidence, freshness, producer and epoch checks. An epoch identifies the subject and policy versions to which evidence applies. Missing evidence is UNKNOWN by default; policy can escalate it to FAILED. Expired or mismatched evidence can be STALE. |
 | Kubernetes | Six custom resource definitions (CRDs) and reconciliation, plus an HTTPS admission webhook with enforcing, warning and audit modes. The demo verifies real CRD status updates. |
 | Evidence storage | SHA-256 content-addressed storage (CAS): content is located by its digest. Atomic filesystem writes and offline export/import exist. Startup recovery can skip unreadable or corrupt blobs. |
-| Receipts | Ed25519 signatures over evaluation receipts. The evidence root is a digest of sorted unique evidence digests, not a Merkle inclusion-proof tree. A signed receipt does not authenticate unsigned observations. |
+| Receipts | Ed25519 signatures over evaluation receipts. The evidence root is a digest of sorted evidence digests, not a Merkle inclusion-proof tree. A signed receipt does not authenticate unsigned observations. |
 | Runtime adapters | Tetragon and Cilium event normalization exists. Live event subscriptions are not wired into the controller. |
 | Identity | X.509 SPIFFE identity validation exists. A live SPIRE Workload API integration is not wired. SPIFFE identifies workloads; SPIRE supplies those identities. |
 | Supply chain | The adapter named Sigstore uses a custom signature payload, not cosign/Fulcio/Rekor verification. The committed baseline can accept a trusted signer without a pinned verification key. Do not use it as a production signature admission control. |
