@@ -96,7 +96,7 @@ jobs:
           cosign verify-blob --bundle dist/checksums.sigstore.json --certificate-identity "$RELEASE_IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com dist/checksums.txt
           (cd dist && sha256sum --check checksums.txt)
           for ARTIFACT in dist/*.tar.gz; do
-            gh attestation verify "$ARTIFACT" --repo "$GITHUB_REPOSITORY" --bundle dist/provenance.sigstore.json --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --cert-identity "$RELEASE_IDENTITY" --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
+            gh attestation verify "$ARTIFACT" --repo "$GITHUB_REPOSITORY" --bundle dist/provenance.sigstore.json --cert-identity "$RELEASE_IDENTITY" --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
           done
           cp dist/checksums.txt "$RUNNER_TEMP/tampered-checksums.txt"
           echo 'tamper' >> "$RUNNER_TEMP/tampered-checksums.txt"
