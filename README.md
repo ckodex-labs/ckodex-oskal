@@ -33,8 +33,8 @@ failed run and the earlier image-identity failures remain recorded.
 The stopped cluster and protected artifacts are retained for inspection.
 Local signing keys are not hardware-backed, and no TEE assurance is claimed.
 
-[![CI](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml/badge.svg?branch=p1/controller)](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml)
-[![Scorecard PR scan](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/scorecard.yml/badge.svg?branch=p1/controller&event=pull_request)](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/scorecard.yml)
+[![CI](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ckodex-labs/ckodex-oskal/badge)](https://scorecard.dev/viewer/?uri=github.com/ckodex-labs/ckodex-oskal)
 
 ## Implemented and verified
 
@@ -94,11 +94,9 @@ immutable history. Detailed evidence and boundaries are recorded in the
   Colima VM. Cross-compilation does not establish native support on other targets.
   Resource contention caused earlier control-plane delays; unrelated workloads
   were preserved. No performance or scale claim is made.
-- Scorecard publishing runs on the default branch. The PR scan is read-only; the
-  badge above shows its actual workflow status. The
-  [published score](https://scorecard.dev/viewer/?uri=github.com/ckodex-labs/ckodex-oskal)
-  awaits an approved merge and publishing run. Code-Review and Contributors may
-  score low for a solo maintainer.
+- Scorecard publishing runs on the default branch; PR scans remain read-only.
+  The published result on 2026-11-13 was 4.3/10, including Code-Review 0/10 and
+  Contributors 3/10. These solo-maintainer limits are not security certification.
 
 ## Development
 
