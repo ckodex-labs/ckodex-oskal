@@ -49,10 +49,6 @@ type CapabilityLeaseList struct {
 	Items           []CapabilityLease `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&CapabilityLease{}, &CapabilityLeaseList{})
-}
-
 // DeepCopyInto is a deepcopy function, copying the receiver, writing into out.
 func (in *CapabilityLeaseSpec) DeepCopyInto(out *CapabilityLeaseSpec) {
 	*out = *in
