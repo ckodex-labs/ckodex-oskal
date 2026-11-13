@@ -30,6 +30,7 @@ type ClaimEvaluation struct {
 	EvaluatedAt  time.Time            `json:"evaluatedAt"`
 	ValidUntil   time.Time            `json:"validUntil"`
 	Trace        []string             `json:"trace,omitempty"`
+	Telemetry    *TelemetryEvidence   `json:"telemetry,omitempty"`
 }
 
 // Digest computes a deterministic cryptographic hash of the claim evaluation.
