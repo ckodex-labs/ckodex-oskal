@@ -92,3 +92,16 @@ persistence:
     - ReadWriteOnce
   size: "10Gi"
 
+
+# Grants for explicitly configured capture sources only. Empty lists grant none.
+policyCapture:
+  reportSources: []
+  # - group: openreports.io
+  #   resource: reports
+  #   namespace: observed
+  # Cluster report resources must omit namespace.
+  gatekeeperResources: []
+  # - k8srequiredlabels
+  configMapMetadataNamespaces: []
+  # Kubernetes RBAC cannot restrict get to metadata fields. Enable only where
+  # the controller may read ConfigMaps; source code requests metadata only.
