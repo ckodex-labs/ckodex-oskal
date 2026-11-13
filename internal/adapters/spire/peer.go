@@ -8,6 +8,7 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
+	"github.com/spiffe/go-spiffe/v2/workloadapi"
 )
 
 // TLSStateExtractor must return transport-owned state, never request claims.
@@ -60,21 +61,42 @@ func validatePeerIDs(ids []string) error {
 // API bundle and exact allowlist. It also requires a fresh valid own SVID.
 // It never derives the caller from a header, request argument, or server account.
 func (c *WorkloadClient) AuthenticatedPeer(ctx context.Context, state tls.ConnectionState, allowed []string) (string, error) {
+	principal, _, err := c.authenticatedPeerSnapshot(ctx, state, allowed)
+	return principal, err
+}
+
+// AuthenticatedPeerWithTrustBundleDigest returns the peer and canonical public
+// bundle digest from the SAME fresh snapshot that verified the own SVID and peer
+// chain. Callers compare this digest with their admitted authority pin; a later
+// fetch cannot prove which trust roots admitted an earlier peer.
+func (c *WorkloadClient) AuthenticatedPeerWithTrustBundleDigest(ctx context.Context, state tls.ConnectionState, allowed []string) (string, string, error) {
+	principal, current, err := c.authenticatedPeerSnapshot(ctx, state, allowed)
+	if err != nil {
+		return "", "", err
+	}
+	digest, err := publicBundleDigest(current)
+	if err != nil {
+		return "", "", err
+	}
+	return principal, digest, nil
+}
+
+func (c *WorkloadClient) authenticatedPeerSnapshot(ctx context.Context, state tls.ConnectionState, allowed []string) (string, *workloadapi.X509Context, error) {
 	if c == nil || c.client == nil {
-		return "", fmt.Errorf("workload API client is required")
+		return "", nil, fmt.Errorf("workload API client is required")
 	}
 	if err := validatePeerIDs(allowed); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !state.HandshakeComplete || state.Version != tls.VersionTLS13 || len(state.PeerCertificates) == 0 {
-		return "", fmt.Errorf("completed TLS 1.3 mutual authentication is required")
+		return "", nil, fmt.Errorf("completed TLS 1.3 mutual authentication is required")
 	}
 	if err := validateTLSExporter(state); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	current, err := (workloadSource{client: c, ctx: ctx}).fetch()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	ownPresent := false
 	for _, svid := range current.SVIDs {
@@ -83,23 +105,23 @@ func (c *WorkloadClient) AuthenticatedPeer(ctx context.Context, state tls.Connec
 		}
 		id, _, err := x509svid.Verify(svid.Certificates, current.Bundles)
 		if err != nil || id != c.expected {
-			return "", fmt.Errorf("fresh own workload identity could not be verified")
+			return "", nil, fmt.Errorf("fresh own workload identity could not be verified")
 		}
 		ownPresent = true
 	}
 	if !ownPresent {
-		return "", fmt.Errorf("fresh own workload identity is unavailable")
+		return "", nil, fmt.Errorf("fresh own workload identity is unavailable")
 	}
 	peer, _, err := x509svid.Verify(state.PeerCertificates, current.Bundles)
 	if err != nil {
-		return "", fmt.Errorf("verify peer against fresh SPIRE bundle: %w", err)
+		return "", nil, fmt.Errorf("verify peer against fresh SPIRE bundle: %w", err)
 	}
 	for _, id := range allowed {
 		if peer.String() == id {
-			return peer.String(), nil
+			return peer.String(), current, nil
 		}
 	}
-	return "", fmt.Errorf("authenticated peer %s is outside the exact allowlist", peer.String())
+	return "", nil, fmt.Errorf("authenticated peer %s is outside the exact allowlist", peer.String())
 }
 
 // Go's exporter calls an unexported callback and panics for a manually assembled

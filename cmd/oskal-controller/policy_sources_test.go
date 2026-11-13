@@ -106,12 +106,18 @@ func TestPolicySourceConfigurationRejectsAmbiguousAuthority(t *testing.T) {
 	if err := validateSourceSpec(policy); err != nil {
 		t.Fatal(err)
 	}
-	for _, mutation := range []string{"mode", "implicit-tls", "publisher-wildcard", "allow-default", "pki-missing-key", "policy-runtime-config", "report-namespace", "secret-resource", "implicit-interval"} {
+	for _, mutation := range []string{"mode", "implicit-tls", "publisher-wildcard", "allow-default", "pki-missing-key", "policy-runtime-config", "report-namespace", "secret-resource", "implicit-interval", "noncanonical-spiffe"} {
 		t.Run(mutation, func(t *testing.T) {
 			candidate := policy
 			config := opaSpec
 			candidate.OPA = &config
 			switch mutation {
+			case "noncanonical-spiffe":
+				config.TLSMode = "spiffe"
+				config.ServerCertFile = ""
+				config.ServerKeyFile = ""
+				config.ClientCAFile = ""
+				config.ExpectedPublisher = "spiffe://policy.test/a//b"
 			case "mode":
 				candidate.PolicyMode = ""
 			case "implicit-tls":
@@ -256,7 +262,18 @@ func TestPolicyBatchSafeHoldCannotBeResetByAnotherDelivery(t *testing.T) {
 	if _, _, err := batches.begin(t.Context()); !errors.Is(err, policycollection.ErrSafeHold) {
 		t.Fatalf("new delivery bypassed SAFE_HOLD: %v", err)
 	}
-	if candidates.Snapshot()[0].Lifecycle == collection.SourceRunning {
-		t.Fatal("failed empty source acquired live eligibility")
+	before := candidates.Snapshot()[0]
+	if before.Lifecycle != collection.SourceSafeHold || before.Reason == "" {
+		t.Fatalf("SAFE_HOLD hidden from operational state: %+v", before)
 	}
+	batches.end("source stopped")
+	batches.mu.Lock()
+	batches.expires = time.Now().Add(-time.Second)
+	batches.mu.Unlock()
+	batches.expire()
+	after := candidates.Snapshot()[0]
+	if after.Lifecycle != collection.SourceSafeHold || after.Reason != before.Reason {
+		t.Fatalf("source shutdown/expiry erased hold: %+v", after)
+	}
+
 }

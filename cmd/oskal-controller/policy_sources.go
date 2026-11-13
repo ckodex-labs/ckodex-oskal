@@ -23,6 +23,7 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/ingestion"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/policycollection"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -163,6 +164,10 @@ func validateSourceSpec(s sourceSpec) error {
 			_, _, _, err := policyServerTLS(*o)
 			return err
 		case "spiffe":
+			id, err := spiffeid.FromString(o.ExpectedPublisher)
+			if err != nil || id.Path() == "" || id.String() != o.ExpectedPublisher {
+				return fmt.Errorf("OPA publisher requires canonical exact SPIFFE ID")
+			}
 			if o.ServerCertFile != "" || o.ServerKeyFile != "" || o.ClientCAFile != "" || uri.Scheme != "spiffe" {
 				return fmt.Errorf("SPIFFE mode requires exact SPIFFE publisher and forbids PKI fallback")
 			}
@@ -331,11 +336,7 @@ func preparePolicySource(spec sourceSpec, signer *identitySigner, producer assur
 		if err != nil {
 			return nil, nil, err
 		}
-		peer, peerErr := spire.NewPeerPrincipal(signer.workload, []string{o.ExpectedPublisher}, policycollection.PeerTLSState)
-		err = peerErr
-		if err == nil {
-			prepared.principals = policyPinnedPrincipal{principal: peer, signer: signer}
-		}
+		prepared.principals = policyPinnedPrincipal{workload: signer.workload, publisher: o.ExpectedPublisher, bundleDigest: signer.bundleDigest}
 		public["SPIFFEBundleDigest"] = signer.bundleDigest
 	} else {
 		var roots *x509.CertPool
@@ -400,17 +401,22 @@ func policyServerTLS(o opaSourceSpec) (*tls.Config, *x509.CertPool, map[string]s
 }
 
 type policyPinnedPrincipal struct {
-	principal policycollection.PrincipalResolver
-	signer    *identitySigner
+	workload     *spire.WorkloadClient
+	publisher    string
+	bundleDigest string
 }
 
 func (p policyPinnedPrincipal) AuthenticatedPrincipal(ctx context.Context) (string, error) {
-	principal, err := p.principal.AuthenticatedPrincipal(ctx)
+	state, ok := policycollection.PeerTLSState(ctx)
+	if !ok {
+		return "", fmt.Errorf("authenticated policy TLS state missing")
+	}
+	principal, digest, err := p.workload.AuthenticatedPeerWithTrustBundleDigest(ctx, state, []string{p.publisher})
 	if err != nil {
 		return "", err
 	}
-	if err := p.signer.check(ctx); err != nil {
-		return "", err
+	if p.bundleDigest == "" || digest != p.bundleDigest {
+		return "", fmt.Errorf("peer trust bundle differs from authority snapshot; operator review and restart required")
 	}
 	return principal, nil
 }
@@ -559,12 +565,11 @@ func (w policyCaptureWriter) WriteCapturedEvent(ctx context.Context, event ports
 }
 
 type policyBatches struct {
-	group    *sourceGroup
-	source   preparedSource
-	mu       sync.Mutex
-	session  *collection.Session
-	expires  time.Time
-	safeHold bool
+	group   *sourceGroup
+	source  preparedSource
+	mu      sync.Mutex
+	session *collection.Session
+	expires time.Time
 }
 
 func (b *policyBatches) begin(ctx context.Context) (ports.CapturedEventWriter, func(error), error) {
@@ -573,8 +578,10 @@ func (b *policyBatches) begin(ctx context.Context) (ports.CapturedEventWriter, f
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.safeHold {
-		return nil, nil, fmt.Errorf("%w: capture capacity/decoder bound requires operator review and restart", policycollection.ErrSafeHold)
+	for _, status := range b.group.captureCandidates.Snapshot() {
+		if status.ID == b.source.spec.ID && status.Lifecycle == collection.SourceSafeHold {
+			return nil, nil, fmt.Errorf("%w: %s", policycollection.ErrSafeHold, status.Reason)
+		}
 	}
 
 	session, err := b.group.captureCandidates.BeginSession(b.source.spec.ID)
@@ -587,11 +594,11 @@ func (b *policyBatches) begin(ctx context.Context) (ports.CapturedEventWriter, f
 	return policyCaptureWriter{writer}, func(err error) {
 		if err != nil {
 			reason := "policy batch failed; signed history retained but eligibility invalidated"
-			if errors.Is(err, collection.ErrSaturated) || errors.Is(err, policycollection.ErrSafeHold) {
+			if errors.Is(err, collection.ErrSaturated) || errors.Is(err, policycollection.ErrSafeHold) || errors.Is(err, ports.ErrEvidenceCapacity) {
 				b.mu.Lock()
-				b.safeHold = true
+				_ = session.SafeHold("policy source bound exceeded; operator review and restart required")
 				b.mu.Unlock()
-				reason = "SAFE_HOLD: policy source bound exceeded; operator review and restart required"
+				return
 			}
 			_ = session.End(reason)
 		}
@@ -623,7 +630,7 @@ func (g *sourceGroup) followPolicy(ctx context.Context, source preparedSource) {
 			return
 		}
 		setupLog.Error(err, "policy source unavailable; no control standing was inferred", "source", source.spec.ID, "failedRuns", failures+1)
-		if errors.Is(err, collection.ErrSaturated) || errors.Is(err, policycollection.ErrSafeHold) {
+		if errors.Is(err, collection.ErrSaturated) || errors.Is(err, policycollection.ErrSafeHold) || errors.Is(err, ports.ErrEvidenceCapacity) {
 			return
 		}
 		if failures == 2 {
