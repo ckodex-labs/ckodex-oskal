@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -133,9 +134,16 @@ func (s *AdmissionWebhookServer) Start(ctx context.Context) error {
 		return fmt.Errorf("load webhook TLS identity: %w", err)
 	}
 	s.server.TLSConfig = &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13}
+	listener, err := net.Listen("tcp", s.config.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("listen for admission requests: %w", err)
+	}
+	limited := newConnectionListener(listener, MaxWebhookConnections)
+	defer func() { _ = limited.Close() }()
 	finished := make(chan struct{})
-	defer close(finished)
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		select {
 		case <-finished:
 			return
@@ -147,7 +155,12 @@ func (s *AdmissionWebhookServer) Start(ctx context.Context) error {
 			_ = s.server.Close()
 		}
 	}()
-	err = s.server.ListenAndServeTLS("", "")
+	err = s.server.ServeTLS(limited, "", "")
+	close(finished)
+	// A context-triggered shutdown owns its bounded drain/forced close. Do not
+	// let the manager return while that work is still running in a goroutine.
+	<-shutdownDone
+
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
