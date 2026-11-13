@@ -270,13 +270,28 @@ func (m *ReceiptManager) SignReceipt(ctx context.Context, receipt assurance.Cont
 	return receipt, nil
 }
 
-// VerifyReceipt verifies a ControlReceipt signature using the manager's public key (implements ports.ReceiptSigner).
+// VerifyReceipt requires the configured full evaluator reference as well as a
+// valid legacy-format signature. It does not verify observations or live standing.
 func (m *ReceiptManager) VerifyReceipt(ctx context.Context, receipt assurance.ControlReceipt) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if m == nil || len(m.publicKey) != ed25519.PublicKeySize || m.evaluator.Validate() != nil {
+		return false, fmt.Errorf("explicit receipt verification authority and public key are required")
+	}
+	if receipt.Evaluator != m.evaluator {
+		return false, fmt.Errorf("receipt evaluator differs from configured verification authority")
+	}
 	return VerifyIndependentReceipt(receipt, hex.EncodeToString(m.publicKey))
 }
 
-// VerifyIndependentReceipt allows any independent process to verify the signature of a receipt.
+// VerifyIndependentReceipt validates evaluator semantics and verifies the legacy
+// canonical tuple under a supplied key. Supplemental metadata is not signed;
+// a trusted full-JSON archive reference is required to bind those exact bytes.
 func VerifyIndependentReceipt(receipt assurance.ControlReceipt, publicKeyHex string) (bool, error) {
+	if err := receipt.Evaluator.Validate(); err != nil {
+		return false, fmt.Errorf("invalid receipt evaluator: %w", err)
+	}
 	pubBytes, err := hex.DecodeString(publicKeyHex)
 	if err != nil {
 		return false, fmt.Errorf("invalid public key hex: %w", err)

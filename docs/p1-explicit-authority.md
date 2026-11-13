@@ -112,3 +112,8 @@ follows from them. Logs are retained under
 `/private/tmp/oskal-explicit-authority-{focused,full-race-final,build,lint-final}.log`.
 The checks used the installed Go 1.27.3 darwin/arm64 toolchain. Verification
 under the final release toolchain and the final deployed assembly is separate.
+
+The subsequent [receipt verification boundary](p1-receipt-verification-scope.md)
+extends the exact configured-authority check to manager verification, rejects
+contradictory domain metadata in independent verification, and documents the
+unchanged legacy signature tuple versus full JSON CAS identity.

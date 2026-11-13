@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -102,13 +103,41 @@ func (a AuthorityRef) Canonical() string {
 	return fmt.Sprintf("%s://%s", a.Scheme, a.Subject)
 }
 
-// Validate checks that AuthorityRef contains non-empty scheme and subject.
+// Validate checks authority label structure and trust-domain consistency. It
+// does not authenticate the identity or establish ownership of a signing key.
 func (a AuthorityRef) Validate() error {
 	if strings.TrimSpace(a.Scheme) == "" {
 		return fmt.Errorf("authority scheme cannot be empty")
 	}
 	if strings.TrimSpace(a.Subject) == "" {
 		return fmt.Errorf("authority subject cannot be empty")
+	}
+	for _, value := range []string{a.Scheme, a.Subject, a.TrustDomain} {
+		if strings.TrimSpace(value) != value || strings.ContainsAny(value, "\r\n\x00") {
+			return fmt.Errorf("authority labels must not contain surrounding whitespace or control delimiters")
+		}
+	}
+	if strings.EqualFold(a.Scheme, "spiffe") && a.Scheme != "spiffe" {
+		return fmt.Errorf("SPIFFE authority scheme must use its canonical lowercase spelling")
+	}
+	if a.Scheme != "spiffe" {
+		if a.TrustDomain != "" {
+			return fmt.Errorf("trustDomain is only defined for SPIFFE authority references")
+		}
+		return nil
+	}
+	uri, err := url.Parse(a.Canonical())
+	if err != nil || uri.Scheme != "spiffe" || uri.Host == "" || uri.Hostname() != uri.Host || uri.User != nil || uri.Opaque != "" || uri.ForceQuery || uri.RawQuery != "" || uri.Fragment != "" || uri.RawPath != "" || uri.String() != a.Canonical() {
+		return fmt.Errorf("SPIFFE authority requires an unambiguous identity URI without user info, port, query or fragment")
+	}
+	for _, character := range uri.Host {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '.' || character == '-' || character == '_' {
+			continue
+		}
+		return fmt.Errorf("SPIFFE trust domain must be a canonical lowercase authority name")
+	}
+	if a.TrustDomain != "" && a.TrustDomain != uri.Host {
+		return fmt.Errorf("authority trustDomain contradicts its SPIFFE URI host")
 	}
 	return nil
 }
