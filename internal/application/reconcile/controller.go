@@ -323,10 +323,13 @@ func (r *ControlBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	metaCondition := metav1.Condition{
 		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
+		Status:             metav1.ConditionFalse,
 		LastTransitionTime: metav1.Now(),
 		Reason:             targetState.String(),
 		Message:            statusMsg,
+	}
+	if targetState == assurance.AssuranceStateAssured {
+		metaCondition.Status = metav1.ConditionTrue
 	}
 
 	var derogCond *metav1.Condition
@@ -714,83 +717,49 @@ type CapabilityLeaseReconciler struct {
 }
 
 func (r *CapabilityLeaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var lease assurancev1alpha1.CapabilityLease
-	if err := r.Get(ctx, req.NamespacedName, &lease); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, nil
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var lease assurancev1alpha1.CapabilityLease
+		if err := r.Get(ctx, req.NamespacedName, &lease); err != nil {
+			return client.IgnoreNotFound(err)
 		}
-		return ctrl.Result{}, err
-	}
-
-	now := metav1.Now()
-	issuedAt := lease.Status.IssuedAt
-	if issuedAt == nil {
-		issuedAt = &now
-	}
-	expiresAt := lease.Status.ExpiresAt
-	if expiresAt == nil && lease.Spec.TTL.Duration > 0 {
-		exp := metav1.NewTime(issuedAt.Add(lease.Spec.TTL.Duration))
-		expiresAt = &exp
-	}
-
-	phase := "Active"
-	if lease.Status.RevocationReason != "" {
-		phase = "Revoked"
-	} else if expiresAt != nil && now.After(expiresAt.Time) {
-		phase = "Expired"
-	} else if lease.Spec.MaxTurns > 0 && lease.Status.CurrentTurn >= lease.Spec.MaxTurns {
-		phase = "Exhausted"
-	}
-
-	lastReceiptHash := lease.Status.LastReceiptHash
-	if phase == "Active" && r.ReceiptSigner != nil {
-		sub := assurance.SubjectRef{
-			Scheme: "k8s",
-			ID:     fmt.Sprintf("%s/CapabilityLease/%s", lease.Namespace, lease.Name),
+		now := time.Now().UTC()
+		phase, reason := "Active", "GrantValidated"
+		initial := lease.Status.ObservedGeneration == 0 && lease.Status.IssuedAt == nil && lease.Status.ExpiresAt == nil && lease.Status.CurrentTurn == 0 && lease.Status.PendingExecution == nil && len(lease.Status.ExecutionHistory) == 0 && lease.Status.LastAdmissionHash == "" && lease.Status.LastExecutionHash == ""
+		if initial {
+			issued := metav1.NewTime(now.Truncate(time.Second))
+			expires := metav1.NewTime(issued.Add(lease.Spec.TTL.Duration))
+			lease.Status.IssuedAt, lease.Status.ExpiresAt = &issued, &expires
+			lease.Status.ObservedGeneration = lease.Generation
 		}
-		rcpt := assurance.ControlReceipt{
-			Subject:      sub,
-			Control:      assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-			State:        assurance.AssuranceStateAssured,
-			Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(fmt.Sprintf("%s|%d|%d", sub.URI(), lease.Generation, lease.Status.CurrentTurn))},
-			EvidenceRoot: assurance.ComputeStringDigest(strings.Join(lease.Spec.AllowedCapabilities, ",")),
-			EvaluatedAt:  now.UTC(),
-		}
-		if signed, err := r.ReceiptSigner.SignReceipt(ctx, rcpt); err == nil {
-			lastReceiptHash = signed.Digest()
-			if casRepo, ok := r.EvidenceRepo.(*storage.ContentAddressedEvidenceRepository); ok && casRepo != nil {
-				_, _ = casRepo.PutReceipt(ctx, signed)
+		if lease.Status.RevocationReason != "" || lease.Status.Phase == "Revoked" || !lease.DeletionTimestamp.IsZero() {
+			phase, reason = "Revoked", "GrantRevoked"
+		} else if lease.Status.ObservedGeneration != lease.Generation || lease.Status.IssuedAt == nil || lease.Status.ExpiresAt == nil {
+			phase, reason = "SafeHold", "GrantRequiresReview"
+		} else if !now.Before(lease.Status.ExpiresAt.Time) {
+			phase, reason = "Expired", "GrantExpired"
+		} else {
+			snapshot := assurance.ExecutionLease{Namespace: lease.Namespace, Name: lease.Name, UID: string(lease.UID), Generation: lease.Generation, ObservedGeneration: lease.Status.ObservedGeneration, Principal: lease.Spec.Principal, Scope: lease.Spec.Scope, AllowedCapabilities: lease.Spec.AllowedCapabilities, MaxTurns: lease.Spec.MaxTurns, CurrentTurn: lease.Status.CurrentTurn, IssuedAt: lease.Status.IssuedAt.Time, ExpiresAt: lease.Status.ExpiresAt.Time, TTL: lease.Spec.TTL.Duration}
+			if err := assurance.ValidateExecutionGrant(snapshot, now); err != nil {
+				phase, reason = "SafeHold", "InvalidGrant"
+			} else if lease.Status.PendingExecution != nil {
+				reason = "ExecutionPending"
+			} else if err := assurance.ValidateExecutionLineage(lease.Status.ExecutionHistory, lease.Status.LastAdmissionHash, lease.Status.LastExecutionHash, lease.Status.CurrentTurn); err != nil {
+				phase, reason = "SafeHold", "LineageRequiresReview"
+			} else if lease.Status.CurrentTurn >= lease.Spec.MaxTurns {
+				phase, reason = "Exhausted", "GrantExhausted"
 			}
 		}
-	}
-
-	leaseCond := metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		LastTransitionTime: now,
-		Reason:             phase,
-		Message:            fmt.Sprintf("CapabilityLease for %s in phase %s (turn %d/%d)", lease.Spec.Principal, phase, lease.Status.CurrentTurn, lease.Spec.MaxTurns),
-	}
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var latest assurancev1alpha1.CapabilityLease
-		if getErr := r.Get(ctx, req.NamespacedName, &latest); getErr != nil {
-			return getErr
+		ready := metav1.ConditionFalse
+		if phase == "Active" && lease.Status.PendingExecution == nil {
+			ready = metav1.ConditionTrue
 		}
-		if latest.Status.IssuedAt == nil {
-			latest.Status.IssuedAt = issuedAt
-		}
-		if latest.Status.ExpiresAt == nil && expiresAt != nil {
-			latest.Status.ExpiresAt = expiresAt
-		}
-		latest.Status.LastReceiptHash = lastReceiptHash
-		latest.Status.Phase = phase
-		latest.Status.ObservedGeneration = latest.Generation
-		latest.Status.Conditions = upsertCondition(latest.Status.Conditions, leaseCond)
-		return r.Status().Update(ctx, &latest)
-	}); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+		lease.Status.Phase = phase
+		lease.Status.Conditions = upsertCondition(lease.Status.Conditions, metav1.Condition{Type: "Ready", Status: ready, Reason: reason, Message: "Grant state only; execution outcomes are recorded by the durable broker", ObservedGeneration: lease.Generation, LastTransitionTime: metav1.NewTime(now)})
+		// Admission/completion hashes, pending reservations and completed history belong
+		// exclusively to the broker. A reconciliation is never execution evidence.
+		return r.Status().Update(ctx, &lease)
+	})
+	return ctrl.Result{RequeueAfter: time.Minute}, err
 }
 
 func (r *CapabilityLeaseReconciler) SetupWithManager(mgr ctrl.Manager) error {

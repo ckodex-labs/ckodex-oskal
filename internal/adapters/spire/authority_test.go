@@ -2,81 +2,74 @@ package spire
 
 import (
 	"context"
-	"strings"
+	"errors"
 	"testing"
-	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
-func TestSpireAuthorityAuthenticationAndAuthorization(t *testing.T) {
-	resolver := NewSpireAuthorityResolver(nil)
-	ctx := context.Background()
+func TestAuthorityPolicyRequiresExplicitGrants(t *testing.T) {
+	producer := assurance.AuthorityRef{Scheme: "spiffe", Subject: "example.test/ns/observed/sa/collector", TrustDomain: "example.test"}
+	for _, policy := range []*AuthorityPolicy{nil, NewDefaultAuthorityPolicy(), {}} {
+		resolver := NewSpireAuthorityResolver(policy)
+		if allowed, err := resolver.IsAuthorizedProducer(t.Context(), producer, "workload.runtime.process"); allowed || err == nil {
+			t.Fatal("an empty policy granted a producer authority")
+		}
+		formerDefault := assurance.AuthorityRef{Scheme: "spiffe", Subject: "prod/ns/ckodex-evidence/sa/tetragon-collector", TrustDomain: "prod"}
+		if allowed, err := resolver.IsAuthorizedProducer(t.Context(), formerDefault, "workload.runtime.process"); allowed || err == nil {
+			t.Fatal("a former production example retained implicit authority")
+		}
+		if err := resolver.ValidateIdentity(assurance.AuthorityRef{Scheme: "spiffe", Subject: "ckodex.local/workload"}); err == nil {
+			t.Fatal("a former example trust domain retained implicit trust")
+		}
+	}
+	policy := &AuthorityPolicy{AllowedTrustDomains: []string{"example.test"}, ProducerPermissions: map[string][]string{producer.Canonical(): {"workload.runtime.process"}}}
+	resolver := NewSpireAuthorityResolver(policy)
+	// These are authorization labels, not authenticated peer/SVID evidence.
+	if allowed, err := resolver.IsAuthorizedProducer(t.Context(), producer, "workload.runtime.process"); !allowed || err != nil {
+		t.Fatalf("explicit grant was refused: %v", err)
+	}
+	for _, test := range []struct {
+		producer assurance.AuthorityRef
+		evidence string
+	}{
+		{producer, "supply-chain.signature"},
+		{producer, ""},
+		{assurance.AuthorityRef{Scheme: "spiffe", Subject: "example.test/ns/other/sa/collector"}, "workload.runtime.process"},
+		{assurance.AuthorityRef{Scheme: "spiffe", Subject: "foreign.test/ns/observed/sa/collector"}, "workload.runtime.process"},
+	} {
+		if allowed, err := resolver.IsAuthorizedProducer(t.Context(), test.producer, test.evidence); allowed || err == nil {
+			t.Fatalf("unconfigured authority was admitted: %+v", test)
+		}
+	}
+	policy.AllowedTrustDomains[0] = "foreign.test"
+	policy.ProducerPermissions[producer.Canonical()][0] = "supply-chain.signature"
+	policy.ProducerPermissions["spiffe://example.test/ns/other/sa/collector"] = []string{"*"}
+	if allowed, err := resolver.IsAuthorizedProducer(t.Context(), producer, "workload.runtime.process"); !allowed || err != nil {
+		t.Fatal("caller mutation changed the configured policy snapshot")
+	}
+	if allowed, _ := resolver.IsAuthorizedProducer(t.Context(), producer, "supply-chain.signature"); allowed {
+		t.Fatal("caller mutation expanded the configured grant")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if allowed, err := resolver.IsAuthorizedProducer(ctx, producer, "workload.runtime.process"); allowed || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled authorization continued: %v", err)
+	}
+}
 
-	// 1. Valid producer with valid evidence type -> Accepted
-	validTetragon := assurance.AuthorityRef{
-		Scheme:      "spiffe",
-		Subject:     "prod/ns/ckodex-evidence/sa/tetragon-collector",
-		TrustDomain: "prod",
-	}
-	authorized, err := resolver.IsAuthorizedProducer(ctx, validTetragon, "workload.runtime.process")
-	if err != nil || !authorized {
-		t.Fatalf("expected valid tetragon collector to be authorized for runtime process: %v", err)
-	}
-
-	// 2. Valid producer with wrong evidence authority -> Rejected (Exit criteria 2)
-	// Tetragon cannot assert supply-chain signatures!
-	authorizedWrongType, err := resolver.IsAuthorizedProducer(ctx, validTetragon, "supply-chain.signature")
-	if authorizedWrongType || err == nil {
-		t.Fatalf("M6 Exit Failure: Tetragon collector incorrectly authorized to assert supply-chain.signature")
-	}
-
-	// 3. Unauthorized producer identity -> Rejected (Exit criteria 1)
-	unauthorizedProducer := assurance.AuthorityRef{
-		Scheme:      "spiffe",
-		Subject:     "prod/ns/compromised/sa/malicious-agent",
-		TrustDomain: "prod",
-	}
-	authorizedMalicious, err := resolver.IsAuthorizedProducer(ctx, unauthorizedProducer, "workload.runtime.process")
-	if authorizedMalicious || err == nil {
-		t.Fatalf("M6 Exit Failure: Malicious producer unexpectedly authorized")
-	}
-
-	// 4. Untrusted trust domain -> Rejected
-	foreignTrustDomain := assurance.AuthorityRef{
-		Scheme:      "spiffe",
-		Subject:     "external-corp/ns/attacker/sa/pwn",
-		TrustDomain: "external-corp",
-	}
-	authorizedForeign, err := resolver.IsAuthorizedProducer(ctx, foreignTrustDomain, "workload.runtime.process")
-	if authorizedForeign || err == nil {
-		t.Fatalf("M6 Exit Failure: Foreign untrusted trust domain authorized")
-	}
-
-	// 5. Identity appears in Explain Graph (Exit criteria 4)
-	graph := assurance.ExplainGraph{
-		Subject:          assurance.SubjectRef{Scheme: "k8s", ID: "payments/payments-api"},
-		Control:          assurance.ControlRef{Namespace: "ckodex", ID: "container.least-privilege"},
-		CanonicalControl: "ckodex:least-privilege",
-		Applicability:    "applicable",
-		Evidence: []assurance.ExplainEvidenceItem{
-			{
-				Type:       "workload.runtime.process",
-				CapturedAt: time.Now(),
-				Producer:   validTetragon.Canonical(),
-				Digest:     assurance.ComputeStringDigest("tetragon-event"),
-				Verified:   true,
-			},
-		},
-		Completeness:   assurance.EvidenceCompleteness{Required: 1, Verified: 1},
-		Freshness:      "current",
-		Authority:      "verified (" + validTetragon.Canonical() + ")",
-		AssuranceState: assurance.AssuranceStateAssured,
-		EvidenceRoot:   assurance.ComputeStringDigest("spire-root"),
-	}
-
-	rendered := graph.RenderText()
-	if !strings.Contains(rendered, validTetragon.Canonical()) {
-		t.Fatalf("M6 Exit Failure: Producer SPIFFE identity does not appear in Explain Graph render:\n%s", rendered)
+func TestMalformedAuthorityPolicyDeniesAll(t *testing.T) {
+	producer := assurance.AuthorityRef{Scheme: "spiffe", Subject: "example.test/workload"}
+	for _, policy := range []*AuthorityPolicy{
+		{AllowedTrustDomains: []string{"spiffe://example.test/workload"}, ProducerPermissions: map[string][]string{producer.Canonical(): {"*"}}},
+		{AllowedTrustDomains: []string{"example.test", "example.test"}, ProducerPermissions: map[string][]string{producer.Canonical(): {"*"}}},
+		{AllowedTrustDomains: []string{"example.test"}, ProducerPermissions: map[string][]string{producer.Canonical(): {"*"}, "spiffe://foreign.test/workload": {"*"}}},
+		{AllowedTrustDomains: []string{"example.test"}, ProducerPermissions: map[string][]string{producer.Canonical(): {"*"}, "spiffe://example.test/ns/*": {"*"}}},
+		{AllowedTrustDomains: []string{"example.test"}, ProducerPermissions: map[string][]string{producer.Canonical(): {""}}},
+	} {
+		resolver := NewSpireAuthorityResolver(policy)
+		if allowed, err := resolver.IsAuthorizedProducer(t.Context(), producer, "workload.runtime.process"); allowed || err == nil {
+			t.Fatalf("malformed policy partially granted authority: %+v", policy)
+		}
 	}
 }

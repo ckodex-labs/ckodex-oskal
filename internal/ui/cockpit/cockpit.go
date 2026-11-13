@@ -1,6 +1,7 @@
 package cockpit
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -13,7 +14,6 @@ import (
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
-	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ui/format"
 )
 
@@ -27,6 +27,8 @@ type WorkloadStatusSummary struct {
 	EvidenceRoot string
 	Freshness    string
 	Controls     string
+	Archived     int
+	Verified     int
 }
 
 // CockpitConfig holds display options for the cockpit dashboard.
@@ -34,8 +36,10 @@ type CockpitConfig struct {
 	RefreshInterval time.Duration
 	Once            bool
 	EvidenceDir     string
-	SubjectFilter   string
-	Writer          io.Writer
+	// A zero ArchiveLimits value selects conservative storage defaults.
+	ArchiveLimits storage.ArchiveLimits
+	SubjectFilter string
+	Writer        io.Writer
 }
 
 // Cockpit renders an interactive live ASCII terminal dashboard.
@@ -45,6 +49,9 @@ type Cockpit struct {
 
 // NewCockpit creates a new Cockpit instance.
 func NewCockpit(cfg CockpitConfig) *Cockpit {
+	if cfg.ArchiveLimits == (storage.ArchiveLimits{}) {
+		cfg.ArchiveLimits = storage.DefaultArchiveLimits()
+	}
 	if cfg.RefreshInterval <= 0 {
 		cfg.RefreshInterval = 2 * time.Second
 	}
@@ -56,8 +63,11 @@ func NewCockpit(cfg CockpitConfig) *Cockpit {
 
 // Run executes the cockpit rendering loop.
 func (c *Cockpit) Run(ctx context.Context) error {
+	if err := c.cfg.ArchiveLimits.Validate(); err != nil {
+		return err
+	}
 	if c.cfg.Once {
-		return c.RenderSnapshot()
+		return c.renderSnapshot(ctx)
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -68,7 +78,7 @@ func (c *Cockpit) Run(ctx context.Context) error {
 	defer ticker.Stop()
 
 	// Initial render
-	if err := c.RenderSnapshot(); err != nil {
+	if err := c.renderSnapshot(ctx); err != nil {
 		return err
 	}
 
@@ -82,69 +92,56 @@ func (c *Cockpit) Run(ctx context.Context) error {
 		case <-ticker.C:
 			// Clear screen using pure ASCII escape sequence
 			_, _ = fmt.Fprint(c.cfg.Writer, "\033[H\033[2J")
-			if err := c.RenderSnapshot(); err != nil {
+			if err := c.renderSnapshot(ctx); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-// RenderSnapshot writes a single complete ASCII dashboard frame.
-func (c *Cockpit) RenderSnapshot() error {
-	w := c.cfg.Writer
-	now := time.Now().UTC()
+// RenderSnapshot writes an archive inventory, without inferring current assurance.
+func (c *Cockpit) RenderSnapshot() error { return c.renderSnapshot(context.Background()) }
 
-	divider := strings.Repeat("=", 78)
-	thinDivider := strings.Repeat("-", 78)
-
-	_, _ = fmt.Fprintln(w, divider)
-	_, _ = fmt.Fprintf(w, "  OSKAL ASSURANCE COCKPIT -- CONTINUOUS KUBERNETES ASSURANCE\n")
-	_, _ = fmt.Fprintf(w, "  Time: %s | Mode: NORMAL | OSCAL: v1.2.3 | Spec: NIST SP 800-53\n", now.Format(time.RFC3339))
-	_, _ = fmt.Fprintln(w, divider)
-
-	// Gather workloads
-	workloads := c.gatherWorkloads()
-
-	headers := []string{"SUBJECT", "STATE", "PRESENCE", "VALENCE", "COHERENCE", "EVIDENCE ROOT", "FRESHNESS"}
-	var rows [][]string
-	for _, wl := range workloads {
-		evRootShort := wl.EvidenceRoot
-		if len(evRootShort) > 12 {
-			evRootShort = evRootShort[:12] + "..."
-		}
-		rows = append(rows, []string{
-			wl.Subject,
-			wl.State,
-			wl.Presence,
-			wl.Valence,
-			wl.Coherence,
-			evRootShort,
-			wl.Freshness,
-		})
+func (c *Cockpit) renderSnapshot(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	workloads, err := c.gatherWorkloads(ctx)
+	if err != nil {
+		return err
 	}
-
+	var output bytes.Buffer
+	w := &output
+	divider := strings.Repeat("=", 78)
+	fmt.Fprintln(w, divider)
+	fmt.Fprintln(w, "  OSKAL ASSURANCE COCKPIT -- READ-ONLY ARCHIVE INVENTORY")
+	fmt.Fprintf(w, "  Observed at: %s | Live assessment: NOT CONFIGURED\n", time.Now().UTC().Format(time.RFC3339))
+	fmt.Fprintln(w, divider)
+	headers := []string{"SUBJECT", "STATE", "MATERIAL", "ARCHIVED", "VERIFIED", "COHERENCE", "FRESHNESS"}
+	var rows [][]string
+	for _, workload := range workloads {
+		rows = append(rows, []string{workload.Subject, workload.State, workload.Presence, fmt.Sprint(workload.Archived), fmt.Sprint(workload.Verified), workload.Coherence, workload.Freshness})
+	}
 	if err := format.RenderTable(w, headers, rows); err != nil {
 		return err
 	}
-
-	_, _ = fmt.Fprintln(w, thinDivider)
-	_, _ = fmt.Fprintf(w, "  CRYPTOGRAPHIC MERKLE LINEAGE & RECONCILIATION:\n")
-	if len(workloads) > 0 && workloads[0].State == "ASSURED" {
-		_, _ = fmt.Fprintf(w, "  * Active Root:     %s\n", workloads[0].EvidenceRoot)
-		_, _ = fmt.Fprintf(w, "  * Authority Trust: spiffe://assurance.ckodex.io/server (SPIRE verified)\n")
-		_, _ = fmt.Fprintf(w, "  * Semantic Drift:  0 dimensions drifted (In Sync)\n")
-	} else if len(workloads) > 0 {
-		_, _ = fmt.Fprintf(w, "  * Active Root:     %s\n", workloads[0].EvidenceRoot)
-		_, _ = fmt.Fprintf(w, "  * Authority Trust: unverified (absence of evidence -> UNKNOWN)\n")
-		_, _ = fmt.Fprintf(w, "  * Semantic Drift:  UNKNOWN (record evidence via oskal record admission)\n")
-	} else {
-		_, _ = fmt.Fprintf(w, "  * Active Root:     none (no workloads observed)\n")
+	if len(workloads) == 0 {
+		fmt.Fprintln(w, "  No archived subjects; assurance UNKNOWN.")
 	}
-	_, _ = fmt.Fprintln(w, thinDivider)
-	_, _ = fmt.Fprintf(w, "  [Press Ctrl+C to exit cockpit]\n")
-	_, _ = fmt.Fprintln(w, divider)
-
-	return nil
+	fmt.Fprintln(w, strings.Repeat("-", 78))
+	fmt.Fprintln(w, "  Authority: UNKNOWN | Current evidence root: UNKNOWN | Semantic drift: UNKNOWN")
+	fmt.Fprintln(w, "  Material counts describe stored envelopes, not verified live evidence.")
+	if !c.cfg.Once {
+		fmt.Fprintln(w, "  [Press Ctrl+C to exit cockpit]")
+	}
+	fmt.Fprintln(w, divider)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	n, err := c.cfg.Writer.Write(output.Bytes())
+	if err == nil && n != output.Len() {
+		return io.ErrShortWrite
+	}
+	return err
 }
 
 func parseCockpitSubject(raw string) assurance.SubjectRef {
@@ -155,113 +152,70 @@ func parseCockpitSubject(raw string) assurance.SubjectRef {
 	return assurance.SubjectRef{Scheme: "k8s", ID: raw}
 }
 
-func (c *Cockpit) gatherWorkloads() []WorkloadStatusSummary {
-	var results []WorkloadStatusSummary
-
-	subject := c.cfg.SubjectFilter
-	if subject == "" {
-		subject = "k8s://prod/payments/Deployment/payments-api"
+func (c *Cockpit) gatherWorkloads(ctx context.Context) ([]WorkloadStatusSummary, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-
+	var selected assurance.SubjectRef
+	if c.cfg.SubjectFilter != "" {
+		selected = parseCockpitSubject(c.cfg.SubjectFilter)
+		if err := selected.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	dir := c.cfg.EvidenceDir
 	if dir == "" {
-		if info, err := os.Stat("evidence"); err == nil && info.IsDir() {
+		info, err := os.Stat("evidence")
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		if err == nil {
+			if !info.IsDir() {
+				return nil, fmt.Errorf("evidence path is not a directory")
+			}
 			dir = "evidence"
 		}
 	}
-
+	bySubject := make(map[string]int)
+	if selected.ID != "" {
+		bySubject[selected.URI()] = 0
+	}
 	if dir != "" {
-		if repo, err := storage.NewFilesystemEvidenceRepository(dir); err == nil {
-			var envelopes []assurance.EvidenceEnvelope
-			if c.cfg.SubjectFilter != "" {
-				envelopes, _ = repo.ListBySubject(context.Background(), parseCockpitSubject(c.cfg.SubjectFilter))
-			} else {
-				envelopes, _ = repo.ListAll(context.Background())
-			}
-
-			if len(envelopes) > 0 {
-				bySubject := make(map[string][]assurance.EvidenceEnvelope)
-				for _, env := range envelopes {
-					uri := env.Subject.URI()
-					if c.cfg.SubjectFilter != "" {
-						uri = subject
-					}
-					bySubject[uri] = append(bySubject[uri], env)
-				}
-
-				var uris []string
-				for u := range bySubject {
-					uris = append(uris, u)
-				}
-				sort.Strings(uris)
-
-				now := time.Now().UTC()
-				for _, uri := range uris {
-					subEnvs := bySubject[uri]
-					var evRefs []assurance.EvidenceRef
-					isStale := false
-					isViolation := false
-					for _, env := range subEnvs {
-						if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
-							continue
-						}
-						if assurance.IsAdverseObservationType(env.ObservationType) {
-							isViolation = true
-						}
-						if now.Sub(env.CapturedAt) > 15*time.Minute {
-							isStale = true
-						}
-						evRefs = append(evRefs, env.Artifact)
-					}
-					if len(evRefs) == 0 && !isViolation {
-						continue
-					}
-					evRoot := "none"
-					if len(evRefs) > 0 {
-						evRoot = receipts.ComputeEvidenceRoot(evRefs)
-					}
-					state := "ASSURED"
-					valence := "POSITIVE"
-					coherence := "COHERENT"
-					freshness := "FRESH (<15m)"
-					if isViolation {
-						state = "FAILED"
-						valence = "NEGATIVE"
-						coherence = "DECOHERENT"
-					} else if isStale {
-						state = "STALE"
-						valence = "MIXED"
-						freshness = "STALE (>15m)"
-					}
-					results = append(results, WorkloadStatusSummary{
-						Subject:      uri,
-						State:        state,
-						Presence:     "PRESENT",
-						Valence:      valence,
-						Coherence:    coherence,
-						EvidenceRoot: evRoot,
-						Freshness:    freshness,
-						Controls:     "AC-6",
-					})
-				}
-				if len(results) > 0 {
-					return results
-				}
+		repo, err := storage.OpenFilesystemEvidenceRepositoryWithLimits(dir, c.cfg.ArchiveLimits)
+		if err != nil {
+			return nil, fmt.Errorf("open cockpit archive: %w", err)
+		}
+		var envelopes []assurance.EvidenceEnvelope
+		if selected.ID != "" {
+			envelopes, err = repo.ListBySubject(ctx, selected)
+		} else {
+			envelopes, err = repo.ListAll(ctx)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read cockpit archive: %w", err)
+		}
+		for _, envelope := range envelopes {
+			bySubject[envelope.Subject.URI()]++
+			if len(bySubject) > 4096 {
+				return nil, fmt.Errorf("cockpit inventory exceeds 4096 subjects; select an explicit subject")
 			}
 		}
 	}
-
-	// Invariant I-02: Absence of verified evidence must report UNKNOWN, never ASSURED.
-	results = append(results, WorkloadStatusSummary{
-		Subject:      subject,
-		State:        "UNKNOWN",
-		Presence:     "EMPTY",
-		Valence:      "UNRESOLVED",
-		Coherence:    "COHERENT",
-		EvidenceRoot: "none",
-		Freshness:    "UNKNOWN",
-		Controls:     "AC-6",
-	})
-
-	return results
+	var subjects []string
+	for subject := range bySubject {
+		subjects = append(subjects, subject)
+	}
+	sort.Strings(subjects)
+	var results []WorkloadStatusSummary
+	for _, subject := range subjects {
+		presence := "EMPTY"
+		if bySubject[subject] > 0 {
+			presence = "PRESENT"
+		}
+		results = append(results, WorkloadStatusSummary{Subject: subject, State: "UNKNOWN", Presence: presence, Valence: "UNRESOLVED", Coherence: "UNKNOWN", EvidenceRoot: "", Freshness: "UNKNOWN", Archived: bySubject[subject], Verified: 0})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
 }

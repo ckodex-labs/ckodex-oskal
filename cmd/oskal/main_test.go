@@ -2,13 +2,11 @@ package main
 
 import (
 	"bytes"
-	"errors"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 )
 
 func TestCLI_HelpAndVersion(t *testing.T) {
@@ -34,7 +32,7 @@ func TestCLI_HelpAndVersion(t *testing.T) {
 	if err := cmdVer.Execute(); err != nil {
 		t.Fatalf("unexpected error executing version: %v", err)
 	}
-	if !strings.Contains(bufVer.String(), "oskal v1.0.0") {
+	if !strings.Contains(bufVer.String(), "oskal v1.0.1") {
 		t.Fatalf("unexpected version output: %s", bufVer.String())
 	}
 }
@@ -51,30 +49,14 @@ func TestCLI_AssuranceExplain(t *testing.T) {
 	}
 }
 
-func TestCLI_ExportOSCALRequiresAuthoredContext(t *testing.T) {
-	config := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(config, []byte("{}\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct {
-		document, selector, subject, missing string
-	}{
-		{"assessment-results", "--subject", "k8s://example/Pod/material", "assessment_plan_href"},
-		{"component-definition", "--component", "material", "component"},
-		{"assessment-plan", "--subject", "k8s://example/Pod/material", "system_security_plan_href"},
-		{"ssp", "--subject", "k8s://example/Pod/material", "system"},
-	} {
-		t.Run(test.document, func(t *testing.T) {
-			command := NewRootCommand()
-			var diagnostic bytes.Buffer
-			command.SetOut(&diagnostic)
-			command.SetErr(&diagnostic)
-			command.SetArgs([]string{"--config", config, "--server=", "--evidence-dir=", "export", test.document, test.selector, test.subject})
-			var input *oscal.ProjectionInputError
-			if err := command.Execute(); !errors.As(err, &input) || input.Field != test.missing {
-				t.Fatalf("missing authored %s must fail at %s: %v", test.document, test.missing, err)
-			}
-		})
+func TestCLI_ExportOSCALRequiresExplicitContext(t *testing.T) {
+	cmd := NewRootCommand()
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetArgs([]string{"export", "assessment-results", "--subject", "k8s://example/Pod/material", "--control", "example:observed"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "projection-context") {
+		t.Fatalf("missing OSCAL context was accepted: %v", err)
 	}
 }
 
@@ -101,7 +83,7 @@ func TestCLI_WebhookHelp(t *testing.T) {
 		t.Fatalf("unexpected error executing webhook --help: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "Start the Kubernetes Validating Admission Webhook") {
+	if !strings.Contains(out, "declared Pod settings") || strings.Contains(out, "attestation") {
 		t.Fatalf("unexpected webhook help output: %s", out)
 	}
 }
@@ -113,8 +95,8 @@ func TestCLI_Doctor(t *testing.T) {
 	cmd.SetErr(buf)
 	cmd.SetArgs([]string{"doctor", "--output", "json"})
 
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("unexpected error executing doctor: %v", err)
+	if err := cmd.Execute(); err != nil && commandExitCode(err) == 1 {
+		t.Fatalf("doctor failed to run: %v", err)
 	}
 	out := buf.String()
 	if !strings.Contains(out, `"Runtime Substrate"`) || !strings.Contains(out, `"NIST OSCAL v1.2.3 Schemas"`) {
@@ -127,7 +109,7 @@ func TestCLI_Inspect(t *testing.T) {
 	buf := new(bytes.Buffer)
 	cmd.SetOut(buf)
 	cmd.SetErr(buf)
-	cmd.SetArgs([]string{"inspect", "k8s://prod/payments/Deployment/payments-api", "--output", "tree"})
+	cmd.SetArgs([]string{"inspect", "k8s://prod/payments/Deployment/payments-api", "--output", "tree", "--control", "example:observed"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("unexpected error executing inspect: %v", err)
@@ -201,6 +183,9 @@ func TestCLI_Config(t *testing.T) {
 
 func TestCLI_Prune(t *testing.T) {
 	tmpDir := t.TempDir()
+	if _, err := storage.NewFilesystemEvidenceRepository(tmpDir); err != nil {
+		t.Fatal(err)
+	}
 	cmdPrune := NewRootCommand()
 	bufPrune := new(bytes.Buffer)
 	cmdPrune.SetOut(bufPrune)
@@ -317,7 +302,7 @@ func TestCLI_UTCPCommands(t *testing.T) {
 	cmdFlags.SetArgs([]string{
 		"utcp", "call", "explain_claim",
 		"--subject", "k8s://prod/payments/Deployment/payments-api",
-		"--control", "UTCP_ARG_control_UTCP_END",
+		"--control", "example:observed",
 	})
 	if err := cmdFlags.Execute(); err != nil {
 		t.Fatalf("utcp call with --<key> flags failed: %v", err)

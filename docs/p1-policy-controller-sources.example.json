@@ -1,0 +1,53 @@
+{
+  "sources": [
+    {
+      "id": "kyverno-reports",
+      "kind": "policy-report",
+      "policy_mode": "CAPTURE",
+      "namespace": "observed",
+      "report": {
+        "group": "openreports.io",
+        "version": "v1alpha1",
+        "resource": "reports",
+        "kind": "Report",
+        "poll_interval": "5s",
+        "request_timeout": "5s",
+        "max_objects": 64,
+        "max_batch_bytes": 8388608
+      }
+    },
+    {
+      "id": "gatekeeper-audits",
+      "kind": "gatekeeper",
+      "policy_mode": "CAPTURE",
+      "report": {
+        "group": "constraints.gatekeeper.sh",
+        "version": "v1beta1",
+        "resource": "k8srequiredlabels",
+        "kind": "K8sRequiredLabels",
+        "poll_interval": "5s",
+        "request_timeout": "5s",
+        "max_objects": 64,
+        "max_batch_bytes": 8388608
+      }
+    },
+    {
+      "id": "opa-decisions",
+      "kind": "opa",
+      "policy_mode": "CAPTURE",
+      "opa": {
+        "listen": "0.0.0.0:9443",
+        "tls_mode": "pki",
+        "expected_publisher": "spiffe://operator.example/opa",
+        "decision_path": "authored/allow",
+        "bundle_name": "authored",
+        "allow_result": true,
+        "deny_result": false,
+        "request_timeout": "5s",
+        "server_cert_file": "/var/run/oskal/opa/server.crt",
+        "server_key_file": "/var/run/oskal/opa/server.key",
+        "client_ca_file": "/var/run/oskal/opa/client-ca.crt"
+      }
+    }
+  ]
+}

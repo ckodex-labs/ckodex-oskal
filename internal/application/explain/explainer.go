@@ -3,217 +3,63 @@ package explain
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
-// Explainer coordinates multi-dimensional evidence to construct an ExplainGraph (Section 49).
+// Explainer projects supplied evaluations. It is not an evidence verifier and
+// cannot infer enforcement, applicability, producers or capture time from a URI.
 type Explainer struct{}
 
-func NewExplainer() *Explainer {
-	return &Explainer{}
+func NewExplainer() *Explainer { return &Explainer{} }
+
+func (e *Explainer) BuildExplainGraph(ctx context.Context, subject assurance.SubjectRef, control assurance.ControlRef, eval assurance.ClaimEvaluation) assurance.ExplainGraph {
+	graph := assurance.ExplainGraph{Subject: subject, Control: control, CanonicalControl: control.Canonical(), Applicability: "unknown", Freshness: "unknown", Authority: "unverified", AssuranceState: assurance.AssuranceStateUnknown}
+	if ctx.Err() != nil || eval.Subject.URI() != subject.URI() || !maps.Equal(eval.Subject.Attributes, subject.Attributes) || eval.Control != control {
+		return graph
+	}
+	graph.AssuranceState = eval.State
+	graph.Epoch = eval.Epoch
+	graph.Completeness = eval.Completeness
+	graph.EvidenceRoot = eval.EvidenceRoot
+	if eval.Vector.Applicability == assurance.ValencePositive {
+		graph.Applicability = "applicable"
+	}
+	if eval.Vector.Authority == assurance.ValencePositive {
+		graph.Authority = "verified"
+	}
+	if eval.Vector.Freshness == assurance.ValencePositive {
+		graph.Freshness = "current at evaluation"
+	}
+	if eval.State == assurance.AssuranceStateStale {
+		graph.Freshness = "stale"
+	}
+	// References do not contain producer identity or capture timestamps. Leave
+	// those fields absent, and never infer per-reference verification from state.
+	for _, ref := range eval.Evidence {
+		graph.Evidence = append(graph.Evidence, assurance.ExplainEvidenceItem{Type: ref.MediaType, Digest: ref.Digest})
+	}
+	return graph
 }
 
-// BuildExplainGraph constructs a fully reverse-traceable graph for a subject and control (Section 49 & 51).
-func (e *Explainer) BuildExplainGraph(
-	ctx context.Context,
-	subject assurance.SubjectRef,
-	control assurance.ControlRef,
-	eval assurance.ClaimEvaluation,
-) assurance.ExplainGraph {
-	canonicalControl := "ckodex:least-privilege"
-	if control.Namespace == "ckodex" {
-		canonicalControl = control.Canonical()
+// RenderText preserves unknowns rather than the legacy graph renderer's binary
+// PASS/FAIL labels or hash of an empty epoch. References remain actual references.
+func RenderText(graph assurance.ExplainGraph, refs []assurance.EvidenceRef) string {
+	var text strings.Builder
+	fmt.Fprintf(&text, "SUBJECT\n%s\n\nCONTROL\n%s\n\nAPPLICABILITY\n%s\n\nASSURANCE\n%s\n\n", graph.Subject.URI(), graph.CanonicalControl, graph.Applicability, graph.AssuranceState)
+	fmt.Fprintf(&text, "COMPLETENESS\n%d verified / %d required\n\nAUTHORITY\n%s\n\nFRESHNESS\n%s\n\n", graph.Completeness.Verified, graph.Completeness.Required, graph.Authority, graph.Freshness)
+	text.WriteString("EPOCH\n")
+	if graph.Epoch == (assurance.AssuranceEpoch{}) {
+		text.WriteString("UNKNOWN\n")
+	} else {
+		fmt.Fprintf(&text, "%s\n", graph.Epoch.CompositeDigest())
 	}
-
-	isAssured := eval.State == assurance.AssuranceStateAssured
-	isStale := eval.State == assurance.AssuranceStateStale
-	isFailed := eval.State == assurance.AssuranceStateFailed
-
-	// If the evaluation has specific evidence references, reflect them proportionally
-	hasAdmission := isAssured || isStale
-	hasArtifact := isAssured || isStale
-	hasIdentity := isAssured || isStale
-	hasNetwork := isAssured || isStale
-	hasProcess := isAssured || isStale
-	hasCap := isAssured || isStale
-
-	var admDigest, artDigest, idDigest, netDigest, procDigest, capDigest string
-
-	if len(eval.Evidence) > 0 && (isAssured || isStale) {
-		hasAdmission = false
-		hasArtifact = false
-		hasIdentity = false
-		hasNetwork = false
-		hasProcess = false
-		hasCap = false
-
-		for _, ev := range eval.Evidence {
-			u := strings.ToLower(ev.URI)
-			mt := strings.ToLower(ev.MediaType)
-			matched := false
-			if strings.Contains(u, "sigstore") || strings.Contains(u, "cosign") || strings.Contains(u, "oci") {
-				hasArtifact = true
-				artDigest = ev.Digest
-				matched = true
-			}
-			if strings.Contains(u, "spiffe") || strings.Contains(u, "svid") || strings.Contains(u, "spire") {
-				hasIdentity = true
-				idDigest = ev.Digest
-				matched = true
-			}
-			if strings.Contains(u, "cilium") || strings.Contains(u, "network") || strings.Contains(u, "netpol") {
-				hasNetwork = true
-				netDigest = ev.Digest
-				matched = true
-			}
-			if strings.Contains(u, "tetragon") || strings.Contains(u, "ebpf") || strings.Contains(u, "process") {
-				hasProcess = true
-				procDigest = ev.Digest
-				matched = true
-			}
-			if strings.Contains(u, "capability") || strings.Contains(u, "cap") {
-				hasCap = true
-				capDigest = ev.Digest
-				matched = true
-			}
-			if !matched || strings.Contains(u, "admission") || strings.Contains(u, "cel") || strings.Contains(u, "webhook") || strings.Contains(mt, "yaml") {
-				hasAdmission = true
-				admDigest = ev.Digest
-			}
-		}
+	text.WriteString("\nEVIDENCE REFERENCES (producer and capture time unavailable)\n")
+	for _, ref := range refs {
+		fmt.Fprintf(&text, "%s %s %s\n", ref.URI, ref.Digest, ref.MediaType)
 	}
-
-	if isFailed {
-		// In a failed state, non-root execution was violated
-		hasAdmission = false
-	} else if eval.State == assurance.AssuranceStateUnknown || eval.State == assurance.AssuranceStateUnspecified {
-		hasAdmission = false
-		hasArtifact = false
-		hasIdentity = false
-		hasNetwork = false
-		hasProcess = false
-		hasCap = false
-	}
-
-	atoms := []assurance.ExplainAtomicRequirement{
-		{ID: "non-root execution", Satisfied: hasAdmission, Details: mapDetails(hasAdmission, "runAsNonRoot=true verified via CEL", "missing or violated non-root admission")},
-		{ID: "capability restriction", Satisfied: hasCap, Details: mapDetails(hasCap, "capabilities dropped via CEL and Tetragon observer", "missing capability dropped evidence")},
-		{ID: "bounded ServiceAccount", Satisfied: hasIdentity, Details: mapDetails(hasIdentity, "least-privilege RBAC role binding", "unbounded ServiceAccount")},
-		{ID: "network isolation", Satisfied: hasNetwork, Details: mapDetails(hasNetwork, "Cilium default-deny egress policy", "unrestricted network egress")},
-		{ID: "workload identity", Satisfied: hasIdentity, Details: mapDetails(hasIdentity, "SPIFFE X509-SVID verified", "missing workload SPIFFE identity")},
-		{ID: "approved artifact", Satisfied: hasArtifact, Details: mapDetails(hasArtifact, "Sigstore cosign signature verified", "unapproved or unsigned image digest")},
-	}
-
-	baseImplDigest := eval.Epoch.ImplementationDigest
-	if baseImplDigest == "" {
-		baseImplDigest = assurance.ComputeStringDigest("kubernetes:implementation:v1")
-	}
-	basePolDigest := eval.Epoch.PolicyDigest
-	if basePolDigest == "" {
-		basePolDigest = assurance.ComputeStringDigest("policy:default:v1")
-	}
-	baseAuthDigest := eval.Epoch.AuthorityDigest
-	if baseAuthDigest == "" {
-		baseAuthDigest = assurance.ComputeStringDigest("authority:spiffe:v1")
-	}
-
-	implementations := []assurance.ExplainImplementation{
-		{
-			Requirement: "non-root",
-			Provider:    "kubernetes ValidatingAdmissionPolicy",
-			Digest:      assurance.ComputeStringDigest(basePolDigest + ":non-root"),
-			Purpose:     "preventive",
-		},
-		{
-			Requirement: "capabilities",
-			Provider:    "Kubernetes CEL\n  Tetragon runtime observer",
-			Digest:      assurance.ComputeStringDigest(baseImplDigest + ":capabilities"),
-			Purpose:     "detective",
-		},
-		{
-			Requirement: "identity",
-			Provider:    "SPIFFE/SPIRE",
-			Digest:      assurance.ComputeStringDigest(baseAuthDigest + ":identity"),
-			Purpose:     "preventive",
-		},
-		{
-			Requirement: "network",
-			Provider:    "Cilium",
-			Digest:      assurance.ComputeStringDigest(baseImplDigest + ":network"),
-			Purpose:     "preventive",
-		},
-		{
-			Requirement: "artifact",
-			Provider:    "Sigstore",
-			Digest:      assurance.ComputeStringDigest(baseAuthDigest + ":artifact"),
-			Purpose:     "preventive",
-		},
-	}
-
-	evidenceItems := []assurance.ExplainEvidenceItem{
-		{Type: "admission decision", Verified: hasAdmission, Digest: admDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasAdmission, "spiffe://prod/ns/ckodex-assurance/sa/cel-admission-observer")},
-		{Type: "signed OCI artifact", Verified: hasArtifact, Digest: artDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasArtifact, "spiffe://prod/ns/ckodex-evidence/sa/sigstore-verifier")},
-		{Type: "workload identity", Verified: hasIdentity, Digest: idDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasIdentity, "spiffe://prod/ns/ckodex-assurance/sa/spire-server")},
-		{Type: "network configuration", Verified: hasNetwork, Digest: netDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasNetwork, "spiffe://prod/ns/ckodex-evidence/sa/cilium-collector")},
-		{Type: "runtime process observation", Verified: hasProcess, Digest: procDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasProcess, "spiffe://prod/ns/ckodex-evidence/sa/tetragon-collector")},
-		{Type: "capability observation", Verified: hasCap, Digest: capDigest, CapturedAt: eval.EvaluatedAt, Producer: mapProducer(hasCap, "spiffe://prod/ns/ckodex-evidence/sa/tetragon-collector")},
-	}
-
-	verifiedCount := 0
-	for _, ev := range evidenceItems {
-		if ev.Verified {
-			verifiedCount++
-		}
-	}
-
-	freshness := "current"
-	authority := "verified"
-	if isStale {
-		freshness = "stale"
-		authority = "expired"
-	} else if !isAssured {
-		freshness = "unknown"
-		authority = "unverified"
-	}
-
-	return assurance.ExplainGraph{
-		Subject:            subject,
-		Control:            control,
-		CanonicalControl:   canonicalControl,
-		Applicability:      "applicable",
-		AtomicRequirements: atoms,
-		Implementations:    implementations,
-		Evidence:           evidenceItems,
-		Completeness: assurance.EvidenceCompleteness{
-			Required: 6,
-			Present:  verifiedCount,
-			Verified: verifiedCount,
-			Missing:  6 - verifiedCount,
-		},
-		Freshness:      freshness,
-		Authority:      authority,
-		Epoch:          eval.Epoch,
-		AssuranceState: eval.State,
-		EvidenceRoot:   eval.EvidenceRoot,
-		Projections: map[string]string{
-			"Component Definition": fmt.Sprintf("%s implemented-requirement", control.ID),
-			"Assessment Results":   fmt.Sprintf("%d observations\n  0 findings", verifiedCount),
-		},
-	}
-}
-
-func mapDetails(ok bool, passDetails, failDetails string) string {
-	if ok {
-		return passDetails
-	}
-	return failDetails
-}
-
-func mapProducer(ok bool, producer string) string {
-	if ok {
-		return producer
-	}
-	return "none"
+	fmt.Fprintf(&text, "\nEVIDENCE ROOT\n%s\n", graph.EvidenceRoot)
+	return text.String()
 }

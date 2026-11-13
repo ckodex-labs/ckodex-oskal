@@ -108,7 +108,7 @@ func WithLease(ctx context.Context, leaseID, prevReceiptHash string) context.Con
 
 ```go
 func NewClient(evidenceDir string) (*Client, error)
-func NewGovernedClient(evidenceDir string, broker *workcell.EffectBroker) (*Client, error)
+func NewGovernedClient(evidenceDir string, broker ExecutionBroker) (*Client, error)
 
 func (c *Client) ListTools() []Tool
 func (c *Client) SearchTools(query string, tags []string, limit int) []Tool
@@ -120,6 +120,12 @@ func (c *Client) RegisterManual(name string, manual UTCPManual) error
 func (c *Client) RegisterManualGoverned(ctx context.Context, name string, manual UTCPManual, leaseID, prevReceiptHash string) error
 func (c *Client) DeregisterManual(ctx context.Context, name, leaseID, prevReceiptHash string) error
 func (c *Client) RegisterToolProvider(ctx context.Context, cfg ProviderConfig) error
-func (c *Client) DeregisterToolProvider(name string)
+func (c *Client) DeregisterToolProvider(name string) error
 func (c *Client) HTTPHandler(baseURL string) http.Handler
 ```
+
+Execution authority uses an immutable Kubernetes CapabilityLease. `lease_id` is
+`namespace/name/UID`; the compatibility field `prev_receipt_hash` carries the
+previous **admission** hash. Registry mutations, external tools, and doctor probes
+fail closed without a broker. Receipts bind completed effects and are unsigned
+hash chains. See `docs/capability-lease-execution.md` in the source repository.

@@ -65,7 +65,3 @@ type ControlExceptionList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []ControlException `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&ControlException{}, &ControlExceptionList{})
-}

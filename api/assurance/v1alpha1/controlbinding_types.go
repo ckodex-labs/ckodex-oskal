@@ -85,7 +85,3 @@ type ControlBindingList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []ControlBinding `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&ControlBinding{}, &ControlBindingList{})
-}

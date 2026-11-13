@@ -1,3 +1,23 @@
+{{- if and .Values.webhook.enabled (not .Values.sources.configMapName) }}
+{{- fail "enforcing admission requires sources.configMapName containing bound runtime sources; capture-only/read-only deployments must explicitly set webhook.enabled=false" }}
+{{- end }}
+{{- if and .Values.policyCapture.opaListeners (not .Values.sources.configMapName) }}
+{{- fail "OPA listeners require sources.configMapName with matching authenticated OPA capture configuration" }}
+{{- end }}
+{{- $names := dict }}
+{{- $ports := dict }}
+{{- $_ := set $ports (toString .Values.metrics.port) true }}
+{{- $_ := set $ports (toString .Values.probes.port) true }}
+{{- if .Values.webhook.enabled }}
+{{- $_ := set $ports (toString .Values.webhook.port) true }}
+{{- end }}
+{{- range .Values.policyCapture.opaListeners }}
+{{- if or (hasKey $names .name) (hasKey $ports (toString .port)) }}
+{{- fail "OPA listener names and ports must be unique and must not collide with controller ports" }}
+{{- end }}
+{{- $_ := set $names .name true }}
+{{- $_ := set $ports (toString .port) true }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -41,8 +61,16 @@ spec:
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             - --health-probe-bind-address=:{{ .Values.probes.port }}
             - --evidence-dir={{ .Values.evidenceStorage.mountPath | default "/var/lib/oskal/evidence" }}
+            - --archive-max-bytes={{ .Values.archiveLimits.maxBytes | int64 }}
+            - --archive-max-entries={{ .Values.archiveLimits.maxEntries | int }}
+            - --enable-webhook={{ .Values.webhook.enabled }}
+            {{- if .Values.reconcileNamespace }}
+            - --namespace={{ .Values.reconcileNamespace }}
+            {{- end }}
+            {{- if .Values.sources.configMapName }}
+            - --sources=/etc/oskal/sources/sources.json
+            {{- end }}
             {{- if .Values.webhook.enabled }}
-            - --enable-webhook=true
             - --webhook-port={{ .Values.webhook.port }}
             - --webhook-service-name={{ include "ckodex-oskal.fullname" . }}-webhook
             - --webhook-namespace={{ .Release.Namespace }}
@@ -59,6 +87,21 @@ spec:
               mountPath: {{ .Values.evidenceStorage.mountPath | default "/var/lib/oskal/evidence" }}
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.sources.configMapName }}
+            - name: sources
+              mountPath: /etc/oskal/sources
+              readOnly: true
+            {{- end }}
+            {{- range $index, $secret := .Values.sources.tlsSecrets }}
+            - name: source-tls-{{ $index }}
+              mountPath: /etc/oskal/source-tls/{{ . }}
+              readOnly: true
+            {{- end }}
+            {{- range $index, $configMap := .Values.sources.publicCAConfigMaps }}
+            - name: source-ca-{{ $index }}
+              mountPath: /etc/oskal/source-ca/{{ . }}
+              readOnly: true
+            {{- end }}
             {{- if and .Values.webhook.enabled (or .Values.webhook.tlsSecretName .Values.webhook.certManager.enabled) }}
             - name: webhook-tls
               mountPath: /var/run/oskal-webhook/tls
@@ -71,6 +114,11 @@ spec:
             - name: probes
               containerPort: {{ .Values.probes.port }}
               protocol: TCP
+            {{- range .Values.policyCapture.opaListeners }}
+            - name: {{ .name }}
+              containerPort: {{ .port }}
+              protocol: TCP
+            {{- end }}
             {{- if .Values.webhook.enabled }}
             - name: webhook
               containerPort: {{ .Values.webhook.port }}
@@ -102,6 +150,25 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: "64Mi"
+        {{- if .Values.sources.configMapName }}
+        - name: sources
+          configMap:
+            name: {{ .Values.sources.configMapName | quote }}
+            items:
+              - key: {{ .Values.sources.configMapKey | quote }}
+                path: sources.json
+        {{- end }}
+        {{- range $index, $secret := .Values.sources.tlsSecrets }}
+        - name: source-tls-{{ $index }}
+          secret:
+            secretName: {{ . | quote }}
+            defaultMode: 0440
+        {{- end }}
+        {{- range $index, $configMap := .Values.sources.publicCAConfigMaps }}
+        - name: source-ca-{{ $index }}
+          configMap:
+            name: {{ . | quote }}
+        {{- end }}
         {{- if and .Values.webhook.enabled (or .Values.webhook.tlsSecretName .Values.webhook.certManager.enabled) }}
         - name: webhook-tls
           secret:

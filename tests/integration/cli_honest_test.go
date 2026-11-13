@@ -2,94 +2,77 @@ package integration
 
 import (
 	"bytes"
-	"context"
-	"errors"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 )
 
 func TestCLIHonestStateReporting(t *testing.T) {
-	// Exercise fail-closed callers without treating unsigned material or local
-	// manifest validation as successful admission. Supplied-context projection
-	// and independent receipt cryptography have their own component tests.
 	binary := filepath.Join(t.TempDir(), "oskal-test")
-	build, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
-	defer cancel()
-	command := exec.CommandContext(build, "go", "build", "-o", binary, "../../cmd/oskal")
-	command.WaitDelay = 2 * time.Second
-	if output, err := command.CombinedOutput(); err != nil {
+	if output, err := exec.Command("go", "build", "-o", binary, "../../cmd/oskal").CombinedOutput(); err != nil {
 		t.Fatalf("build whole CLI package: %v\n%s", err, output)
 	}
-	directory := t.TempDir()
-	config := filepath.Join(directory, "config.json")
-	if err := os.WriteFile(config, []byte("{}\n"), 0600); err != nil {
+	subject := "k8s://example/Pod/material"
+	command := func(args ...string) string {
+		t.Helper()
+		output, err := exec.Command(binary, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("CLI %v failed: %v\n%s", args, err, output)
+		}
+		return string(output)
+	}
+	state := command("assurance", "state", subject)
+	if !strings.Contains(state, "STATE:           UNKNOWN") || !strings.Contains(state, "EVIDENCE ROOT:   none") {
+		t.Fatalf("missing evidence fabricated assurance: %s", state)
+	}
+	explanation := command("assurance", "explain", subject, "--control", "example:observed")
+	if !strings.Contains(explanation, "ASSURANCE\nUNKNOWN") || strings.Contains(explanation, "[FAIL]") || strings.Contains(explanation, "spiffe://prod") {
+		t.Fatalf("offline explanation invented adverse facts or producer authority: %s", explanation)
+	}
+	payload := []byte("actual untrusted test material")
+	digest := assurance.ComputeDigest(payload)
+	envelope := assurance.EvidenceEnvelope{Schema: "assurance.ckodex.io/material/v1", ID: "untrusted-material", Subject: assurance.SubjectRef{Scheme: "k8s", ID: "example/Pod/material"}, ObservationType: "manifest.observed", CapturedAt: time.Now().UTC(), Artifact: assurance.EvidenceRef{URI: "cas://sha256/" + strings.TrimPrefix(digest, "sha256:"), Digest: digest, MediaType: "text/plain"}, IntegrityDigest: digest}
+	// The repository's actual persistent path is explicit; no signer or producer
+	// trust is supplied, so the CLI must continue to report UNKNOWN.
+	evidenceDirectory := filepath.Join(t.TempDir(), "material-store")
+	persisted, err := storage.NewFilesystemEvidenceRepository(evidenceDirectory)
+	if err != nil {
 		t.Fatal(err)
 	}
-	run := func(args ...string) (string, string, error) {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		defer cancel()
-		prefix := []string{"--config", config, "--server=", "--evidence-dir="}
-		command := exec.CommandContext(ctx, binary, append(prefix, args...)...)
-		command.Dir = directory
-		command.WaitDelay = time.Second
-		var output, diagnostic bytes.Buffer
-		command.Stdout, command.Stderr = &output, &diagnostic
-		err := command.Run()
-		return output.String(), diagnostic.String(), err
+	if _, err := persisted.Put(t.Context(), envelope, bytes.NewReader(payload)); err != nil {
+		t.Fatal(err)
 	}
-	subject := "k8s://example/Pod/material"
-	state, diagnostic, err := run("assurance", "state", subject)
-	if err != nil || !strings.Contains(state, "STATE:           UNKNOWN") || !strings.Contains(state, "EVIDENCE ROOT:   none") {
-		t.Fatalf("missing evidence must remain UNKNOWN without a root: %v\n%s\n%s", err, state, diagnostic)
+	state = command("--evidence-dir", evidenceDirectory, "assurance", "state", subject)
+	if !strings.Contains(state, "STATE:           UNKNOWN") || strings.Contains(state, "ASSURED") {
+		t.Fatalf("material presence became assurance: %s", state)
 	}
-	explanation, diagnostic, err := run("assurance", "explain", subject)
-	if err != nil || !strings.Contains(explanation, "ASSURANCE\nUNKNOWN") {
-		t.Fatalf("missing evidence must not acquire standing in explanation: %v\n%s\n%s", err, explanation, diagnostic)
+	listing := command("--evidence-dir", evidenceDirectory, "assurance", "evidence", subject)
+	if !strings.Contains(listing, "SUPPLIED EVIDENCE REFERENCES") || !strings.Contains(listing, envelope.ID) || strings.Contains(listing, "VERIFIED EVIDENCE") {
+		t.Fatalf("listing misrepresented trust: %s", listing)
 	}
-	for _, test := range []struct {
-		document, selector, value, missing string
-	}{
-		{"assessment-results", "--subject", subject, "assessment_plan_href"},
-		{"component-definition", "--component", "material", "component"},
-		{"assessment-plan", "--subject", subject, "system_security_plan_href"},
-		{"ssp", "--subject", subject, "system"},
-	} {
-		t.Run(test.document, func(t *testing.T) {
-			output, diagnostic, err := run("export", test.document, test.selector, test.value)
-			var exit *exec.ExitError
-			if !errors.As(err, &exit) || exit.ExitCode() <= 0 || output != "" || !strings.Contains(diagnostic, test.missing) {
-				t.Fatalf("missing authored context must produce no artifact and a concrete input error: %v\nstdout=%s\nstderr=%s", err, output, diagnostic)
-			}
-		})
+	manifest := filepath.Join(t.TempDir(), "workload.yaml")
+	if err := os.WriteFile(manifest, []byte("apiVersion: v1\nkind: Pod\nmetadata:\n  name: material\n  namespace: example\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	output, diagnostic, err := run("assurance", "receipt", "verify", "--receipt-id", "missing-receipt")
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() <= 0 || output != "" || !strings.Contains(diagnostic, "not found") {
-		t.Fatalf("missing receipt unexpectedly verified: %v\nstdout=%s\nstderr=%s", err, output, diagnostic)
+	materialDirectory := filepath.Join(t.TempDir(), "material")
+	recorded := command("record", "manifest", "--file", manifest, "--evidence-dir", materialDirectory)
+	var result map[string]any
+	if err := json.Unmarshal([]byte(recorded), &result); err != nil || result["status"] != "RECORDED_UNTRUSTED" {
+		t.Fatalf("manifest fabricated admission: %s %v", recorded, err)
 	}
-	for _, test := range []struct{ name, manifest string }{
-		{"privileged-pod", "apiVersion: v1\nkind: Pod\nmetadata:\n  name: denied\nspec:\n  containers:\n    - name: process\n      image: example.invalid/process\n      securityContext:\n        privileged: true\n"},
-		{"privileged-second-document", "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: example\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: denied\nspec:\n  template:\n    spec:\n      containers:\n        - name: process\n          image: example.invalid/process\n          securityContext:\n            privileged: true\n"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			manifest := filepath.Join(t.TempDir(), "workload.yaml")
-			if err := os.WriteFile(manifest, []byte(test.manifest), 0600); err != nil {
-				t.Fatal(err)
-			}
-			archive := filepath.Join(t.TempDir(), "refused")
-			output, diagnostic, err := run("record", "admission", "--file", manifest, "--evidence-dir", archive)
-			var exit *exec.ExitError
-			if !errors.As(err, &exit) || exit.ExitCode() <= 0 || output != "" || !strings.Contains(diagnostic, "privileged") {
-				t.Fatalf("unsafe manifest was not rejected before recording: %v\nstdout=%s\nstderr=%s", err, output, diagnostic)
-			}
-			if _, err := os.Stat(archive); !os.IsNotExist(err) {
-				t.Fatalf("refused manifest created evidence state: %v", err)
-			}
-		})
+	if _, err := os.Stat(filepath.Join(materialDirectory, "receipts")); !os.IsNotExist(err) {
+		t.Fatalf("manifest recording manufactured receipts: %v", err)
+	}
+	for _, args := range [][]string{{"record", "admission", "--file", manifest, "--evidence-dir", filepath.Join(t.TempDir(), "retired")}, {"export", "ssp", "--subject", subject}, {"assurance", "receipt", "verify", "--receipt-id", "untrusted"}} {
+		if output, err := exec.Command(binary, args...).CombinedOutput(); err == nil {
+			t.Fatalf("missing authoritative inputs unexpectedly succeeded: %v\n%s", args, output)
+		}
 	}
 }

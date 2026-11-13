@@ -2,21 +2,18 @@ package kubernetes
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/binding"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 )
 
@@ -32,195 +29,63 @@ func NewSubjectResolver(client client.Reader) *SubjectResolver {
 	return &SubjectResolver{client: client}
 }
 
-func parseK8sURI(uri string) (cluster, ns, kind, name string) {
-	trimmed := strings.TrimPrefix(uri, "k8s://")
-	parts := strings.Split(trimmed, "/")
-	switch len(parts) {
-	case 1:
-		return "local", "default", "Deployment", parts[0]
-	case 2:
-		return "local", parts[0], "Deployment", parts[1]
-	case 3:
-		return "local", parts[0], parts[1], parts[2]
-	default:
-		return parts[0], parts[1], parts[2], parts[3]
-	}
-}
-
-// ResolveSubject resolves a Kubernetes workload subject from a URI (implements ports.SubjectResolver).
+// ResolveSubject requires a successful authoritative API lookup.
 func (r *SubjectResolver) ResolveSubject(ctx context.Context, uri string) (assurance.SubjectRef, error) {
-	cluster, ns, kind, name := parseK8sURI(uri)
-	if r.client != nil {
-		switch kind {
-		case "Deployment", "deploy":
-			var deploy appsv1.Deployment
-			if err := r.client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &deploy); err == nil {
-				return BuildDeploymentSubjectRef(&deploy), nil
-			}
-		case "Pod", "pod":
-			var pod corev1.Pod
-			if err := r.client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &pod); err == nil {
-				return BuildPodSubjectRef(&pod), nil
-			}
-		}
+	ctx, cancel := context.WithTimeout(ctx, binding.ResolutionTimeout)
+	defer cancel()
+	if !strings.HasPrefix(uri, "k8s://") {
+		return assurance.SubjectRef{}, fmt.Errorf("subject must use k8s URI scheme")
 	}
-
-	return assurance.SubjectRef{
-		Scheme: "k8s",
-		ID:     fmt.Sprintf("%s/%s/%s/%s", cluster, ns, kind, name),
-		Attributes: map[string]string{
-			"cluster":   cluster,
-			"namespace": ns,
-			"kind":      kind,
-			"name":      name,
-		},
-	}, nil
+	w, err := binding.ResolveWorkload(ctx, r.client, assurance.SubjectRef{Scheme: "k8s", ID: strings.TrimPrefix(uri, "k8s://")})
+	if err != nil {
+		return assurance.SubjectRef{}, err
+	}
+	return w.Subject, nil
 }
 
-// ComputeSubjectDigest computes a deterministic cryptographic digest for a subject (implements ports.SubjectResolver).
+// ComputeSubjectDigest rejects missing resources and stale expected UIDs.
 func (r *SubjectResolver) ComputeSubjectDigest(ctx context.Context, subject assurance.SubjectRef) (string, error) {
-	ns := subject.Attributes["namespace"]
-	kind := subject.Attributes["kind"]
-	name := subject.Attributes["name"]
-
-	if ns == "" || name == "" {
-		_, parsedNs, parsedKind, parsedName := parseK8sURI(subject.URI())
-		if ns == "" {
-			ns = parsedNs
-		}
-		if kind == "" {
-			kind = parsedKind
-		}
-		if name == "" {
-			name = parsedName
-		}
+	ctx, cancel := context.WithTimeout(ctx, binding.ResolutionTimeout)
+	defer cancel()
+	w, err := binding.ResolveWorkload(ctx, r.client, subject)
+	if err != nil {
+		return "", err
 	}
-
-	if r.client != nil && ns != "" && name != "" {
-		switch kind {
-		case "Deployment", "deploy":
-			var deploy appsv1.Deployment
-			if err := r.client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &deploy); err == nil {
-				return ComputeDeploymentDigest(&deploy), nil
-			}
-		case "Pod", "pod":
-			var pod corev1.Pod
-			if err := r.client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &pod); err == nil {
-				return ComputePodDigest(&pod), nil
-			}
-		}
-	}
-
-	keys := make([]string, 0, len(subject.Attributes))
-	for k := range subject.Attributes {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var sb strings.Builder
-	sb.WriteString(subject.Scheme)
-	sb.WriteString(":")
-	sb.WriteString(subject.ID)
-	for _, k := range keys {
-		sb.WriteString("|")
-		sb.WriteString(k)
-		sb.WriteString("=")
-		sb.WriteString(subject.Attributes[k])
-	}
-	h := sha256.Sum256([]byte(sb.String()))
-	return "sha256:" + hex.EncodeToString(h[:]), nil
+	return w.Digest, nil
 }
 
-// extractPodImages collects and sorts all container images from Containers, InitContainers, and EphemeralContainers.
-func extractPodImages(spec *corev1.PodSpec) []string {
-	if spec == nil {
-		return nil
-	}
-	images := make([]string, 0, len(spec.Containers)+len(spec.InitContainers)+len(spec.EphemeralContainers))
-	for _, c := range spec.Containers {
-		images = append(images, c.Image)
-	}
-	for _, c := range spec.InitContainers {
-		images = append(images, c.Image)
-	}
-	for _, c := range spec.EphemeralContainers {
-		images = append(images, c.Image)
-	}
-	sort.Strings(images)
-	return images
-}
+// BuildPodSubjectRef creates a canonical subject from a supplied Kubernetes Pod.
+func BuildPodSubjectRef(pod *corev1.Pod) assurance.SubjectRef { return binding.PodSubject(pod) }
 
-// BuildPodSubjectRef creates a canonical SubjectRef for a Kubernetes Pod.
-func BuildPodSubjectRef(pod *corev1.Pod) assurance.SubjectRef {
-	images := extractPodImages(&pod.Spec)
+// ComputePodDigest includes UID, full spec, labels, and ownership.
+func ComputePodDigest(pod *corev1.Pod) string { return binding.PodDigest(pod) }
 
-	return assurance.SubjectRef{
-		Scheme: "k8s",
-		ID:     fmt.Sprintf("%s/Pod/%s", pod.Namespace, pod.Name),
-		Attributes: map[string]string{
-			"cluster":         "local",
-			"namespace":       pod.Namespace,
-			"kind":            "Pod",
-			"name":            pod.Name,
-			"uid":             string(pod.UID),
-			"resourceVersion": pod.ResourceVersion,
-			"images":          strings.Join(images, ","),
-			"serviceAccount":  pod.Spec.ServiceAccountName,
-		},
-	}
-}
-
-// ComputePodDigest computes the cryptographic digest for a Pod across namespace, name, UID, and container images.
-func ComputePodDigest(pod *corev1.Pod) string {
-	images := extractPodImages(&pod.Spec)
-
-	raw := fmt.Sprintf("pod|%s|%s|%s|%s",
-		pod.Namespace,
-		pod.Name,
-		pod.UID,
-		strings.Join(images, ";"),
-	)
-	h := sha256.Sum256([]byte(raw))
-	return "sha256:" + hex.EncodeToString(h[:])
-}
-
-// BuildSubjectRef creates a canonical SubjectRef for a Kubernetes Deployment.
+// BuildDeploymentSubjectRef creates a canonical subject from a supplied Deployment.
 func BuildDeploymentSubjectRef(deploy *appsv1.Deployment) assurance.SubjectRef {
-	images := extractPodImages(&deploy.Spec.Template.Spec)
-
-	return assurance.SubjectRef{
-		Scheme: "k8s",
-		ID:     fmt.Sprintf("%s/Deployment/%s", deploy.Namespace, deploy.Name),
-		Attributes: map[string]string{
-			"cluster":         "local",
-			"namespace":       deploy.Namespace,
-			"kind":            "Deployment",
-			"name":            deploy.Name,
-			"uid":             string(deploy.UID),
-			"generation":      fmt.Sprintf("%d", deploy.Generation),
-			"resourceVersion": deploy.ResourceVersion,
-			"images":          strings.Join(images, ","),
-		},
-	}
+	return binding.DeploymentSubject(deploy)
 }
 
-// ComputeSubjectDigest computes the cryptographic digest across spec, generation, UID, and container images.
+// ComputeDeploymentDigest includes UID, full spec, labels, and generation.
 func ComputeDeploymentDigest(deploy *appsv1.Deployment) string {
-	images := extractPodImages(&deploy.Spec.Template.Spec)
-
-	raw := fmt.Sprintf("deploy|%s|%s|%s|%d|%s",
-		deploy.Namespace,
-		deploy.Name,
-		deploy.UID,
-		deploy.Generation,
-		strings.Join(images, ";"),
-	)
-	h := sha256.Sum256([]byte(raw))
-	return "sha256:" + hex.EncodeToString(h[:])
+	return binding.DeploymentDigest(deploy)
 }
 
 // MatchesSelector checks if a deployment matches the SubjectSelector.
 func MatchesSelector(deploy *appsv1.Deployment, sel assurancev1alpha1.SubjectSelector) bool {
+	if sel.NamespaceSelector != nil {
+		return false
+	} // Namespace labels require an authoritative namespace lookup.
+	if len(sel.APIGroups) > 0 {
+		matched := false
+		for _, group := range sel.APIGroups {
+			if group == "apps" || group == "*" {
+				matched = true
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
 	matchedKind := false
 	for _, k := range sel.Kinds {
 		if k == "Deployment" || k == "*" {
@@ -242,7 +107,7 @@ func MatchesSelector(deploy *appsv1.Deployment, sel assurancev1alpha1.SubjectSel
 	return true
 }
 
-// CalculateEpoch computes the composite AssuranceEpoch for a subject and its effective rules.
+// CalculateEpoch assembles supplied epoch dimensions; missing dimensions stay empty.
 func CalculateEpoch(
 	subjectDigest string,
 	implementationDigest string,
@@ -250,19 +115,6 @@ func CalculateEpoch(
 	authorityDigest string,
 	environmentDigest string,
 ) assurance.AssuranceEpoch {
-	if implementationDigest == "" {
-		implementationDigest = assurance.ComputeStringDigest("provider:cel:v1")
-	}
-	if policyDigest == "" {
-		policyDigest = assurance.ComputeStringDigest("policy:default:v1")
-	}
-	if authorityDigest == "" {
-		authorityDigest = assurance.ComputeStringDigest("spiffe://local/ns/ckodex-assurance")
-	}
-	if environmentDigest == "" {
-		environmentDigest = assurance.ComputeStringDigest("k8s:v1.31:oskal:v1.0.0")
-	}
-
 	return assurance.AssuranceEpoch{
 		SubjectDigest:        subjectDigest,
 		ImplementationDigest: implementationDigest,

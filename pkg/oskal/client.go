@@ -3,6 +3,7 @@ package oskal
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/rand"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	commonv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/common/v1"
 	controlv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/control/v1"
+	evidencev1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/evidence/v1"
 	servicesv1 "github.com/ckodex-labs/ckodex-oskal/proto/assurance/services/v1"
 )
 
@@ -56,7 +58,7 @@ type clientOptions struct {
 	baseBackoff time.Duration
 }
 
-// WithInsecure specifies insecure gRPC transport (useful for internal or local dev).
+// WithInsecure explicitly selects plaintext gRPC for local development.
 func WithInsecure() ClientOption {
 	return func(o *clientOptions) {
 		o.dialOptions = append(o.dialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -103,7 +105,7 @@ func NewClient(ctx context.Context, target string, opts ...ClientOption) (Client
 	}
 
 	if len(options.dialOptions) == 0 {
-		options.dialOptions = append(options.dialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		return nil, fmt.Errorf("explicit transport credentials are required; configure TLS with WithDialOptions or explicitly opt into WithInsecure")
 	}
 
 	conn, err := grpc.NewClient(target, options.dialOptions...)
@@ -192,8 +194,9 @@ func (c *grpcClient) GetAssuranceState(ctx context.Context, subject SubjectRef) 
 		var callErr error
 		resp, callErr = c.grpcClient.GetAssuranceState(rpcCtx, &servicesv1.GetAssuranceStateRequest{
 			Subject: &commonv1.SubjectRef{
-				Scheme: subject.Scheme,
-				Id:     subject.ID,
+				Scheme:     subject.Scheme,
+				Id:         subject.ID,
+				Attributes: maps.Clone(subject.Attributes),
 			},
 		})
 		return callErr
@@ -203,12 +206,29 @@ func (c *grpcClient) GetAssuranceState(ctx context.Context, subject SubjectRef) 
 	}
 
 	state := mapProtoState(resp.State)
-	freshness := "current"
-	switch state {
-	case StateUnknown:
-		freshness = "unknown"
-	case StateStale:
+	freshness := "unknown"
+	var lastEvaluated time.Time
+	if state == StateStale {
 		freshness = "stale"
+	}
+	if len(resp.Evaluations) > 0 {
+		current := true
+		for _, e := range resp.Evaluations {
+			if e == nil || e.EvaluatedAt == nil || e.ValidUntil == nil {
+				current = false
+				continue
+			}
+			observed := e.EvaluatedAt.AsTime()
+			if lastEvaluated.IsZero() || observed.Before(lastEvaluated) {
+				lastEvaluated = observed
+			}
+			if !time.Now().Before(e.ValidUntil.AsTime()) {
+				current = false
+			}
+		}
+		if current {
+			freshness = "current"
+		}
 	}
 
 	var epoch *AssuranceEpoch
@@ -223,11 +243,11 @@ func (c *grpcClient) GetAssuranceState(ctx context.Context, subject SubjectRef) 
 	}
 
 	return &StateResponse{
-		Subject:       subject,
+		Subject:       subjectFromProto(resp.Subject),
 		State:         state,
 		EvidenceRoot:  resp.EvidenceRoot,
 		Epoch:         epoch,
-		LastEvaluated: time.Now().UTC(),
+		LastEvaluated: lastEvaluated,
 		Freshness:     freshness,
 		RawResponse:   resp.State,
 	}, nil
@@ -239,6 +259,7 @@ func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, co
 		protoCtrls = append(protoCtrls, &controlv1.ControlRef{
 			Namespace: ctrl.Namespace,
 			Id:        ctrl.ID,
+			Version:   ctrl.Version,
 		})
 	}
 
@@ -247,8 +268,9 @@ func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, co
 		var callErr error
 		resp, callErr = c.grpcClient.EvaluateSubject(rpcCtx, &servicesv1.EvaluateSubjectRequest{
 			Subject: &commonv1.SubjectRef{
-				Scheme: subject.Scheme,
-				Id:     subject.ID,
+				Scheme:     subject.Scheme,
+				Id:         subject.ID,
+				Attributes: maps.Clone(subject.Attributes),
 			},
 			Controls: protoCtrls,
 		})
@@ -265,7 +287,7 @@ func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, co
 		}
 		ctrl := ControlRef{}
 		if evalProto.Control != nil {
-			ctrl = ControlRef{Namespace: evalProto.Control.Namespace, ID: evalProto.Control.Id}
+			ctrl = ControlRef{Namespace: evalProto.Control.Namespace, ID: evalProto.Control.Id, Version: evalProto.Control.Version}
 		}
 		var epoch AssuranceEpoch
 		if evalProto.Epoch != nil {
@@ -313,7 +335,7 @@ func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, co
 
 		evals = append(evals, ClaimEvaluation{
 			ID:           evalProto.Id,
-			Subject:      subject,
+			Subject:      subjectFromProto(evalProto.Subject),
 			Control:      ctrl,
 			State:        mapProtoState(evalProto.State),
 			Vector:       vec,
@@ -322,14 +344,16 @@ func (c *grpcClient) EvaluateSubject(ctx context.Context, subject SubjectRef, co
 			EvidenceRoot: evalProto.EvidenceRoot,
 			EvaluatedAt:  evalAt,
 			ValidUntil:   validUntil,
+			Evidence:     evidenceFromProto(evalProto.Evidence),
+			Trace:        append([]string(nil), evalProto.Trace...),
 		})
 	}
 
 	return &EvaluationResponse{
-		Subject:      subject,
+		Subject:      subjectFromProto(resp.Subject),
 		SummaryState: mapProtoState(resp.SummaryState),
 		Evaluations:  evals,
-		EvaluatedAt:  time.Now().UTC(),
+		EvaluatedAt:  oldestEvaluationTime(evals),
 	}, nil
 }
 
@@ -339,12 +363,14 @@ func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, contr
 		var callErr error
 		resp, callErr = c.grpcClient.ExplainClaim(rpcCtx, &servicesv1.ExplainClaimRequest{
 			Subject: &commonv1.SubjectRef{
-				Scheme: subject.Scheme,
-				Id:     subject.ID,
+				Scheme:     subject.Scheme,
+				Id:         subject.ID,
+				Attributes: maps.Clone(subject.Attributes),
 			},
 			Control: &controlv1.ControlRef{
 				Namespace: control.Namespace,
 				Id:        control.ID,
+				Version:   control.Version,
 			},
 		})
 		return callErr
@@ -385,19 +411,16 @@ func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, contr
 			continue
 		}
 		evItems = append(evItems, ExplainEvidenceItem{
-			Type:     ev.MediaType,
-			Digest:   ev.Digest,
-			Verified: state != assurance.AssuranceStateFailed && state != assurance.AssuranceStateUnknown && ev.Digest != "",
-			Producer: ev.Uri,
+			Type:   ev.MediaType,
+			Digest: ev.Digest,
+			// References do not supply a producer or per-item verification.
 		})
 	}
 
 	completeness := EvidenceCompleteness{}
 	if resp.Completeness != nil {
 		verified := int(resp.Completeness.Verified)
-		if state == assurance.AssuranceStateFailed || state == assurance.AssuranceStateUnknown || state == assurance.AssuranceStateStale {
-			verified = 0
-		}
+
 		completeness = EvidenceCompleteness{
 			Required: int(resp.Completeness.Required),
 			Present:  int(resp.Completeness.Present),
@@ -419,8 +442,8 @@ func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, contr
 	}
 
 	graph := ExplainGraph{
-		Subject:            subject,
-		Control:            control,
+		Subject:            subjectFromProto(resp.Subject),
+		Control:            controlFromProto(resp.Control),
 		CanonicalControl:   resp.CanonicalControl,
 		Applicability:      resp.Applicability,
 		AtomicRequirements: atoms,
@@ -436,8 +459,9 @@ func (c *grpcClient) ExplainClaim(ctx context.Context, subject SubjectRef, contr
 	}
 
 	return &ExplainResponse{
-		Subject:          subject,
-		Control:          control,
+		Evidence:         evidenceFromProto(resp.Evidence),
+		Subject:          subjectFromProto(resp.Subject),
+		Control:          controlFromProto(resp.Control),
 		CanonicalControl: resp.CanonicalControl,
 		AssuranceState:   state,
 		EvidenceRoot:     resp.EvidenceRoot,
@@ -519,4 +543,38 @@ func mapProtoCoherence(c commonv1.Coherence) assurance.Coherence {
 	default:
 		return assurance.CoherenceCoherent
 	}
+}
+
+func subjectFromProto(s *commonv1.SubjectRef) SubjectRef {
+	if s == nil {
+		return SubjectRef{}
+	}
+	return SubjectRef{Scheme: s.Scheme, ID: s.Id, Attributes: maps.Clone(s.Attributes)}
+}
+func controlFromProto(c *controlv1.ControlRef) ControlRef {
+	if c == nil {
+		return ControlRef{}
+	}
+	return ControlRef{Namespace: c.Namespace, ID: c.Id, Version: c.Version}
+}
+func evidenceFromProto(refs []*evidencev1.EvidenceRef) []EvidenceRef {
+	var out []EvidenceRef
+	for _, ref := range refs {
+		if ref != nil {
+			out = append(out, EvidenceRef{URI: ref.Uri, Digest: ref.Digest, MediaType: ref.MediaType})
+		}
+	}
+	return out
+}
+func oldestEvaluationTime(evaluations []ClaimEvaluation) time.Time {
+	var oldest time.Time
+	for _, e := range evaluations {
+		if e.EvaluatedAt.IsZero() {
+			continue
+		}
+		if oldest.IsZero() || e.EvaluatedAt.Before(oldest) {
+			oldest = e.EvaluatedAt
+		}
+	}
+	return oldest
 }
