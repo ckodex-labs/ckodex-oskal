@@ -64,7 +64,3 @@ type AssurancePolicyList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []AssurancePolicy `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&AssurancePolicy{}, &AssurancePolicyList{})
-}
