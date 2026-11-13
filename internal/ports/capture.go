@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
@@ -36,3 +37,7 @@ type CaptureResolverFunc func(context.Context, CapturedEvent) (assurance.Subject
 func (f CaptureResolverFunc) ResolveCapture(ctx context.Context, event CapturedEvent) (assurance.SubjectRef, assurance.AssuranceEpoch, error) {
 	return f(ctx, event)
 }
+
+// ErrNotApplicable means authoritative scope resolution found no binding.
+// Authentication, lookup, UID, ambiguity and configuration failures must not wrap it.
+var ErrNotApplicable = errors.New("capture is outside configured binding scope")

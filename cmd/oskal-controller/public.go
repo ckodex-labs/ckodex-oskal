@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,5 +36,39 @@ func writePublicFact(path string, data []byte) error {
 	if err := os.Chmod(name, 0644); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	// Link a synced temporary inode into the digest namespace without replacing
+	// an existing historical proof. The latest alias is published only afterward.
+	sum := sha256.Sum256(data)
+	history := path + ".d"
+	if err := os.MkdirAll(history, 0755); err != nil {
+		return err
+	}
+	immutable := filepath.Join(history, hex.EncodeToString(sum[:])+".json")
+	if err := os.Link(name, immutable); err != nil {
+		if !os.IsExist(err) {
+			return err
+		}
+		existing, readErr := os.ReadFile(immutable)
+		if readErr != nil {
+			return readErr
+		}
+		if !bytes.Equal(existing, data) {
+			return fmt.Errorf("public trust snapshot digest collision or corrupt history")
+		}
+	}
+	if err := syncDirectory(history); err != nil {
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
 }

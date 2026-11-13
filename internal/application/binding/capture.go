@@ -2,8 +2,11 @@ package binding
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"reflect"
 	"time"
 
@@ -45,6 +48,18 @@ func (r *Resolver) ResolveCapture(ctx context.Context, event ports.CapturedEvent
 		return assurance.SubjectRef{}, assurance.AssuranceEpoch{}, fmt.Errorf("UID-less capture falls inside the Pod creation timestamp precision window")
 	}
 
+	// A direct Pod binding is authoritative even when its owner is a kind
+	// whose rollout attribution is unsupported.
+	direct, directErr := r.ContextForSubject(ctx, podWorkload.Subject)
+	if directErr == nil {
+		if direct.Epoch.SubjectDigest != podWorkload.Digest {
+			return assurance.SubjectRef{}, assurance.AssuranceEpoch{}, fmt.Errorf("directly bound Pod changed during capture resolution")
+		}
+		return direct.Subject, direct.Epoch, nil
+	}
+	if !errors.Is(directErr, ports.ErrNotApplicable) {
+		return assurance.SubjectRef{}, assurance.AssuranceEpoch{}, directErr
+	}
 	target := podWorkload
 	lineage := []client.Object{pod}
 	owner, err := controllerOwner(pod)
@@ -53,7 +68,7 @@ func (r *Resolver) ResolveCapture(ctx context.Context, event ports.CapturedEvent
 	}
 	if owner != nil {
 		if owner.Kind != "ReplicaSet" || owner.APIVersion != "apps/v1" {
-			return assurance.SubjectRef{}, assurance.AssuranceEpoch{}, fmt.Errorf("unsupported Pod controller %s %s; refusing guessed workload attribution", owner.APIVersion, owner.Kind)
+			return assurance.SubjectRef{}, assurance.AssuranceEpoch{}, r.unsupportedOwner(ctx, pod.Namespace, owner)
 		}
 		var rs appsv1.ReplicaSet
 		if err := r.reader.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: owner.Name}, &rs); err != nil {
@@ -66,8 +81,11 @@ func (r *Resolver) ResolveCapture(ctx context.Context, event ports.CapturedEvent
 		if err != nil {
 			return assurance.SubjectRef{}, assurance.AssuranceEpoch{}, err
 		}
-		if deploymentOwner == nil || deploymentOwner.Kind != "Deployment" || deploymentOwner.APIVersion != "apps/v1" {
-			return assurance.SubjectRef{}, assurance.AssuranceEpoch{}, fmt.Errorf("ReplicaSet lacks a supported Deployment controller")
+		if deploymentOwner == nil {
+			return assurance.SubjectRef{}, assurance.AssuranceEpoch{}, r.unsupportedOwner(ctx, pod.Namespace, owner)
+		}
+		if deploymentOwner.Kind != "Deployment" || deploymentOwner.APIVersion != "apps/v1" {
+			return assurance.SubjectRef{}, assurance.AssuranceEpoch{}, r.unsupportedOwner(ctx, pod.Namespace, deploymentOwner)
 		}
 		ref := assurance.SubjectRef{Scheme: "k8s", ID: fmt.Sprintf("%s/Deployment/%s", pod.Namespace, deploymentOwner.Name), Attributes: map[string]string{"uid": string(deploymentOwner.UID)}}
 		target, err = ResolveWorkload(ctx, r.reader, ref)
@@ -131,4 +149,31 @@ func captureIdentityDigest(object client.Object) string {
 		}{string(o.UID), o.OwnerReferences, o.Spec})
 	}
 	return ""
+}
+
+// unsupportedOwner distinguishes an unbound controller from unsupported configured
+// scope using its real metadata. Read/UID/selector errors remain stream failures.
+func (r *Resolver) unsupportedOwner(ctx context.Context, namespace string, owner *metav1.OwnerReference) error {
+	groupVersion, err := schema.ParseGroupVersion(owner.APIVersion)
+	if err != nil {
+		return err
+	}
+	object := &unstructured.Unstructured{}
+	object.SetGroupVersionKind(groupVersion.WithKind(owner.Kind))
+	if err := r.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: owner.Name}, object); err != nil {
+		return err
+	}
+	if object.GetUID() != owner.UID || !object.GetDeletionTimestamp().IsZero() {
+		return fmt.Errorf("unsupported controller UID mismatch or terminating")
+	}
+	ns, err := r.namespace(ctx, namespace)
+	if err != nil {
+		return err
+	}
+	w := Workload{Object: object, Kind: owner.Kind, Group: groupVersion.Group, Subject: assurance.SubjectRef{Scheme: "k8s", ID: namespace + "/" + owner.Kind + "/" + owner.Name}}
+	_, err = r.matching(ctx, w, ns)
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("configured controller %s %s is unsupported for capture attribution", owner.APIVersion, owner.Kind)
 }

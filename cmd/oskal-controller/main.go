@@ -203,7 +203,7 @@ func main() {
 		setupLog.Error(err, "register source lifecycle")
 		os.Exit(1)
 	}
-	if err = (&reconcile.LiveControlReconciler{Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Resolver: sourceGroup.resolver, Evaluator: evaluator, Signer: signer, Receipts: receiptStore, Interval: evaluationInterval}).SetupWithManager(mgr); err != nil {
+	if err = (&reconcile.LiveControlReconciler{Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Scheme: mgr.GetScheme(), Resolver: sourceGroup.resolver, Evaluator: evaluator, Signer: signer, Receipts: receiptStore, Interval: evaluationInterval, Sources: sourceGroup.candidates}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "register live evaluation")
 		os.Exit(1)
 	}
@@ -250,7 +250,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("sources", sourceGroup.Ready); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -334,4 +335,15 @@ func (r *boundEvidenceRepository) Put(ctx context.Context, envelope assurance.Ev
 	}
 	// Unmapped source facts remain archived, with no invented control standing.
 	return r.EvidenceRepository.Put(ctx, envelope, payload)
+}
+
+// Ready reports configured source availability independently of process liveness.
+// An explicitly read-only controller with no sources has no admission authority.
+func (g *sourceGroup) Ready(_ *http.Request) error {
+	for _, source := range g.candidates.Snapshot() {
+		if source.Lifecycle != collection.SourceRunning {
+			return fmt.Errorf("source %s: %s: %s", source.ID, source.Lifecycle, source.Reason)
+		}
+	}
+	return nil
 }

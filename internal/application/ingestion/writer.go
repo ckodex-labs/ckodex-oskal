@@ -4,6 +4,7 @@ package ingestion
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -52,6 +53,9 @@ func (w *Writer) WriteCapturedEvent(ctx context.Context, event ports.CapturedEve
 		return err
 	}
 	subject, epoch, err := w.Resolver.ResolveCapture(ctx, event)
+	if errors.Is(err, ports.ErrNotApplicable) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

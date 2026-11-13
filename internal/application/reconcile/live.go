@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -30,18 +31,20 @@ type LiveControlReconciler struct {
 	Signer    ports.ReceiptSigner
 	Receipts  ports.ReceiptRepository
 	Interval  time.Duration
+	Sources   ports.EvidenceRevisioner
 }
 
 func (r *LiveControlReconciler) Reconcile(parent context.Context, req ctrl.Request) (ctrl.Result, error) {
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
-	if r.Client == nil || r.Reader == nil || r.Resolver == nil || r.Evaluator == nil || r.Signer == nil || r.Receipts == nil || r.Interval <= 0 {
+	if r.Client == nil || r.Reader == nil || r.Resolver == nil || r.Evaluator == nil || r.Signer == nil || r.Receipts == nil || r.Interval <= 0 || r.Sources == nil {
 		return ctrl.Result{}, fmt.Errorf("live evaluation requires an authoritative reader, binding resolver, verifier, durable receipt store and positive interval")
 	}
 	var object api.ControlBinding
 	if err := r.Reader.Get(ctx, req.NamespacedName, &object); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	revision := r.Sources.Revision()
 	resolved, err := r.Resolver.ContextForBinding(ctx, req.Namespace, req.Name)
 	if err != nil {
 		if statusErr := r.publishUnknown(ctx, &object, err.Error()); statusErr != nil {
@@ -50,7 +53,7 @@ func (r *LiveControlReconciler) Reconcile(parent context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: r.Interval}, nil
 	}
 	if resolved.BindingUID != object.UID || len(resolved.Controls) == 0 || len(resolved.Controls) > 256 {
-		return ctrl.Result{}, fmt.Errorf("binding changed or exceeds the 256-control evaluation bound; re-read the binding")
+		return ctrl.Result{}, r.invalidate(ctx, &object, fmt.Errorf("binding changed or exceeds the 256-control evaluation bound; re-read the binding"))
 	}
 	state := assurance.AssuranceStateAssured
 	var summaryEvidence []assurance.EvidenceRef
@@ -65,9 +68,7 @@ func (r *LiveControlReconciler) Reconcile(parent context.Context, req ctrl.Reque
 			}
 			return ctrl.Result{RequeueAfter: r.Interval}, nil
 		}
-		if evaluation.State == assurance.AssuranceStateVerified {
-			evaluation.State = assurance.AssuranceStateAssured
-		}
+		evaluation.State = policyStanding(evaluation, resolved.Policies, time.Now().UTC())
 		state = combineLiveStates(state, evaluation.State)
 		summaryEvidence = append(summaryEvidence, evaluation.Evidence...)
 		receipt := assurance.ControlReceipt{Subject: resolved.Subject, Control: control, State: evaluation.State, Epoch: evaluation.Epoch, EvidenceRoot: evaluation.EvidenceRoot, EvaluatedAt: evaluation.EvaluatedAt}
@@ -83,11 +84,17 @@ func (r *LiveControlReconciler) Reconcile(parent context.Context, req ctrl.Reque
 		evaluations = append(evaluations, evaluation)
 	}
 	root := ""
-	if state == assurance.AssuranceStateAssured {
+	if state == assurance.AssuranceStateAssured || state == assurance.AssuranceStateVerified {
 		root = receipts.ComputeEvidenceRoot(summaryEvidence)
 	}
+	if err := r.current(ctx, &object, resolved, revision); err != nil {
+		return ctrl.Result{}, r.invalidate(ctx, &object, err)
+	}
 	if err := r.publish(ctx, &object, resolved, state, root, controls, evaluations); err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, r.invalidate(ctx, &object, err)
+	}
+	if err := r.current(ctx, &object, resolved, revision); err != nil {
+		return ctrl.Result{}, r.invalidate(ctx, &object, err)
 	}
 	return ctrl.Result{RequeueAfter: r.Interval}, nil
 }
@@ -104,6 +111,9 @@ func combineLiveStates(current, next assurance.AssuranceState) assurance.Assuran
 	}
 	if next != assurance.AssuranceStateAssured && next != assurance.AssuranceStateVerified {
 		return assurance.AssuranceStateUnknown
+	}
+	if current == assurance.AssuranceStateVerified || next == assurance.AssuranceStateVerified {
+		return assurance.AssuranceStateVerified
 	}
 	return current
 }
@@ -135,9 +145,9 @@ func (r *LiveControlReconciler) condition(ctx context.Context, object *api.Contr
 }
 
 func (r *LiveControlReconciler) publishUnknown(ctx context.Context, object *api.ControlBinding, reason string) error {
-	if err := r.condition(ctx, object, assurance.AssuranceStateUnknown, reason); err != nil {
-		return err
-	}
+	// Retraction gets a separate bounded budget even when evaluation timed out.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	var states api.AssuranceStateList
 	if err := r.Reader.List(ctx, &states, client.InNamespace(object.Namespace), client.MatchingLabels{"assurance.ckodex.io/binding-uid": string(object.UID)}, client.Limit(257)); err != nil {
 		return err
@@ -151,6 +161,9 @@ func (r *LiveControlReconciler) publishUnknown(ctx context.Context, object *api.
 			var latest api.AssuranceState
 			if err := r.Reader.Get(ctx, key, &latest); err != nil {
 				return err
+			}
+			if latest.Labels["assurance.ckodex.io/binding-uid"] != string(object.UID) {
+				return nil
 			}
 			latest.Status.State = assurance.AssuranceStateUnknown.String()
 			latest.Status.EvidenceRoot = ""
@@ -168,7 +181,7 @@ func (r *LiveControlReconciler) publishUnknown(ctx context.Context, object *api.
 			return err
 		}
 	}
-	return nil
+	return r.condition(ctx, object, assurance.AssuranceStateUnknown, reason)
 }
 
 func (r *LiveControlReconciler) publish(ctx context.Context, object *api.ControlBinding, resolved binding.Context, standing assurance.AssuranceState, root string, controls []api.ControlStatus, evaluations []assurance.ClaimEvaluation) error {
@@ -196,6 +209,12 @@ func (r *LiveControlReconciler) publish(ctx context.Context, object *api.Control
 			return fmt.Errorf("assurance state is owned by a different binding; inspect it before replacement")
 		}
 		if latest.Spec.SubjectRef != stateSubject(resolved.Subject) {
+			// Kubernetes has separate spec/status updates. Retract the old
+			// standing before exposing the replacement subject identity.
+			latest.Status = api.AssuranceStateStatus{State: assurance.AssuranceStateUnknown.String()}
+			if err := r.Client.Status().Update(ctx, &latest); err != nil {
+				return err
+			}
 			latest.Spec.SubjectRef = stateSubject(resolved.Subject)
 			if err := r.Client.Update(ctx, &latest); err != nil {
 				return err
@@ -208,6 +227,9 @@ func (r *LiveControlReconciler) publish(ctx context.Context, object *api.Control
 		latest.Status.EvaluatedAt = nil
 		latest.Status.ValidUntil = nil
 		for _, evaluation := range evaluations {
+			if (standing == assurance.AssuranceStateAssured || standing == assurance.AssuranceStateVerified) && !evaluation.ValidUntil.IsZero() && !time.Now().Before(evaluation.ValidUntil) {
+				return fmt.Errorf("evaluation expired before status publication")
+			}
 			if latest.Status.EvaluatedAt == nil || evaluation.EvaluatedAt.Before(latest.Status.EvaluatedAt.Time) {
 				latest.Status.EvaluatedAt = &metav1.Time{Time: evaluation.EvaluatedAt}
 			}
@@ -232,4 +254,54 @@ func stateSubject(subject assurance.SubjectRef) api.StateSubjectRef {
 
 func (r *LiveControlReconciler) SetupWithManager(manager ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(manager).For(&api.ControlBinding{}).Complete(r)
+}
+
+// current fences publication against all five authority epochs and source-session
+// invalidation. Cross-object Kubernetes reads and writes are not a transaction.
+func (r *LiveControlReconciler) current(ctx context.Context, object *api.ControlBinding, expected binding.Context, revision uint64) error {
+	var latest api.ControlBinding
+	if err := r.Reader.Get(ctx, client.ObjectKeyFromObject(object), &latest); err != nil {
+		return err
+	}
+	if latest.UID != object.UID || latest.Generation != object.Generation || !latest.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("binding identity or generation changed before publication")
+	}
+	resolved, err := r.Resolver.ContextForBinding(ctx, object.Namespace, object.Name)
+	if err != nil {
+		return err
+	}
+	if resolved.BindingUID != expected.BindingUID || resolved.Epoch != expected.Epoch || r.Sources.Revision() != revision {
+		return fmt.Errorf("governing epoch or source eligibility changed during evaluation/publication")
+	}
+	return nil
+}
+
+func (r *LiveControlReconciler) invalidate(ctx context.Context, object *api.ControlBinding, cause error) error {
+	return errors.Join(cause, r.publishUnknown(ctx, object, cause.Error()))
+}
+
+func policyStanding(e assurance.ClaimEvaluation, policies []assurance.AssurancePolicy, now time.Time) assurance.AssuranceState {
+	if e.State != assurance.AssuranceStateVerified {
+		return e.State
+	}
+	authorized := false
+	for _, policy := range policies {
+		if policy.RequiredState == assurance.AssuranceStateAssured {
+			authorized = true
+		}
+		if policy.RequireFresh && (e.ValidUntil.IsZero() || !now.Before(e.ValidUntil)) {
+			return assurance.AssuranceStateStale
+		}
+		if policy.MaxEvaluationAge > 0 && (e.EvaluatedAt.IsZero() || now.Sub(e.EvaluatedAt) > policy.MaxEvaluationAge) {
+			return assurance.AssuranceStateStale
+		}
+	}
+	if !authorized {
+		return e.State
+	}
+	state, err := assurance.Transition(e.State, assurance.EventPolicyAssured)
+	if err != nil {
+		return assurance.AssuranceStateUnknown
+	}
+	return state
 }

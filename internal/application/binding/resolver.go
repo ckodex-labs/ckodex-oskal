@@ -18,6 +18,7 @@ import (
 
 	assurancev1alpha1 "github.com/ckodex-labs/ckodex-oskal/api/assurance/v1alpha1"
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 )
 
 const MaxObjects = 256
@@ -101,6 +102,9 @@ func (r *Resolver) matching(ctx context.Context, w Workload, ns *corev1.Namespac
 			}
 			matches = append(matches, b)
 		}
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("%w: subject %s has no matching ControlBinding", ports.ErrNotApplicable, w.Subject.URI())
 	}
 	if len(matches) != 1 {
 		return nil, fmt.Errorf("subject %s has %d matching ControlBindings; exactly one is required", w.Subject.URI(), len(matches))
