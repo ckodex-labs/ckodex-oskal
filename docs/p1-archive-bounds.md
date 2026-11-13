@@ -106,3 +106,21 @@ The complete `go test -race ./...` suite, `go build ./...`, and
 `golangci-lint run` also passed on the archive-bounds branch. Live external
 backend tests retain their explicit environment gates; no cluster or infrastructure
 changes were performed for this storage unit.
+
+## Metadata ownership correction
+
+Independent review of `eccc517` found that its metadata copy occurred after
+`payload.Read`. A synchronous reader callback could mutate the caller's shared
+attribute map or control slice after validation/serialization, causing the resident
+index to differ from the admitted canonical bytes without a Go data race.
+
+`Put` now validates bounds, immediately copies those maps/slices, then serializes
+and invokes the payload reader. It indexes that same frozen copy. It does not copy
+unbounded input before validation, and reader callbacks cannot expand retained
+metadata after admission.
+
+The real-file regression `TestPayloadReadCannotChangeAdmittedMetadata` failed
+before this correction with 65,537 unchecked attribute bytes under a 4,096-byte
+quota. Afterward it passed with 1,004 admitted bytes, matching serialized/indexed
+bytes and digest, unchanged original control identity, and consistent reopening.
+The full storage race suite and scoped storage lint passed for this correction.
