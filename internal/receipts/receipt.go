@@ -20,9 +20,10 @@ var _ ports.ReceiptSigner = (*ReceiptManager)(nil)
 
 // ReceiptManager handles creation, signing, and verification of ControlReceipts (Section 41 & 42).
 type ReceiptManager struct {
-	publicKey  ed25519.PublicKey
-	privateKey ed25519.PrivateKey
-	evaluator  assurance.AuthorityRef
+	publicKey         ed25519.PublicKey
+	privateKey        ed25519.PrivateKey
+	evaluator         assurance.AuthorityRef
+	evidenceAuthority assurance.AuthorityRef
 }
 
 // NewReceiptManager creates a receipt manager with an Ed25519 keypair.
@@ -43,6 +44,7 @@ func NewReceiptManagerFromKey(evaluator assurance.AuthorityRef, privKey ed25519.
 	if !ok {
 		return nil, fmt.Errorf("failed to derive public key from Ed25519 private key")
 	}
+	evidenceAuthority := evaluator
 	if evaluator.Scheme == "" {
 		evaluator = assurance.AuthorityRef{
 			Scheme:      "spiffe",
@@ -52,9 +54,10 @@ func NewReceiptManagerFromKey(evaluator assurance.AuthorityRef, privKey ed25519.
 	}
 
 	return &ReceiptManager{
-		publicKey:  pub,
-		privateKey: privKey,
-		evaluator:  evaluator,
+		publicKey:         pub,
+		privateKey:        privKey,
+		evaluator:         evaluator,
+		evidenceAuthority: evidenceAuthority,
 	}, nil
 }
 
