@@ -196,6 +196,8 @@ type sourceGroup struct {
 	window            time.Duration
 	clockAhead        time.Duration
 	authoritySnapshot []byte
+	captureHealthMu   sync.RWMutex
+	captureHealth     map[string]string
 }
 
 func prepareSources(config sourceConfiguration, archive ports.EvidenceRepository, signer *identitySigner, producer assurance.AuthorityRef, resolver *binding.Resolver, window, clockAhead time.Duration, apiConfig *rest.Config) (*sourceGroup, *verifier.DefaultEvidenceVerifier, string, error) {
@@ -397,12 +399,12 @@ func (r *boundEvidenceRepository) Put(ctx context.Context, envelope assurance.Ev
 	return r.EvidenceRepository.Put(ctx, envelope, payload)
 }
 
-// Ready reports configured source availability independently of process liveness.
-// An explicitly read-only controller with no sources has no admission authority.
+// Ready reports service availability. For capture-only mode this means machinery
+// can receive/poll native facts, never admission authority or control standing.
 func (g *sourceGroup) Ready(_ *http.Request) error {
 	snapshot := g.candidates.Snapshot()
 	if len(snapshot) == 0 {
-		return fmt.Errorf("no bound runtime sources configured; capture-only mode has no admission standing")
+		return g.captureReady()
 	}
 	for _, source := range snapshot {
 		if source.Lifecycle != collection.SourceRunning {
@@ -416,7 +418,8 @@ func (g *sourceGroup) Ready(_ *http.Request) error {
 // eligibility denotes durable native facts, never control standing.
 type sourceOperationalStatus struct {
 	collection.SourceStatus
-	Mode string `json:"mode"`
+	Mode      string `json:"mode"`
+	Transport string `json:"transport,omitempty"`
 }
 
 func (g *sourceGroup) Snapshot() []sourceOperationalStatus {
@@ -428,7 +431,7 @@ func (g *sourceGroup) Snapshot() []sourceOperationalStatus {
 	}
 	if g.captureCandidates != nil {
 		for _, status := range g.captureCandidates.Snapshot() {
-			statuses = append(statuses, sourceOperationalStatus{SourceStatus: status, Mode: "CAPTURE"})
+			statuses = append(statuses, sourceOperationalStatus{SourceStatus: status, Mode: "CAPTURE", Transport: g.captureTransport(status.ID)})
 		}
 	}
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].ID < statuses[j].ID })
