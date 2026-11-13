@@ -1,0 +1,93 @@
+{{- range $index, $source := .Values.policyCapture.reportSources }}
+{{- $namespaced := or (and (eq $source.group "wgpolicyk8s.io") (eq $source.resource "policyreports")) (and (eq $source.group "openreports.io") (eq $source.resource "reports")) }}
+{{- $cluster := or (and (eq $source.group "wgpolicyk8s.io") (eq $source.resource "clusterpolicyreports")) (and (eq $source.group "openreports.io") (eq $source.resource "clusterreports")) }}
+{{- if not (or $namespaced $cluster) }}{{ fail "policyCapture.reportSources requires an exact published WG/OpenReports resource" }}{{ end }}
+{{- if and $namespaced (empty $source.namespace) }}{{ fail "namespaced report source requires namespace" }}{{ end }}
+{{- if and $namespaced (or (gt (len $source.namespace) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $source.namespace))) }}{{ fail "report namespace must be an exact DNS namespace label" }}{{ end }}
+{{- if and $cluster (not (empty $source.namespace)) }}{{ fail "cluster report source must omit namespace" }}{{ end }}
+{{- $name := printf "%s-policy-report-%d" (include "ckodex-oskal.fullname" $) $index }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: {{ if $namespaced }}Role{{ else }}ClusterRole{{ end }}
+metadata:
+  name: {{ $name }}
+  {{- if $namespaced }}
+  namespace: {{ $source.namespace | quote }}
+  {{- end }}
+rules:
+  - apiGroups: [{{ $source.group | quote }}]
+    resources: [{{ $source.resource | quote }}]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: {{ if $namespaced }}RoleBinding{{ else }}ClusterRoleBinding{{ end }}
+metadata:
+  name: {{ $name }}
+  {{- if $namespaced }}
+  namespace: {{ $source.namespace | quote }}
+  {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: {{ if $namespaced }}Role{{ else }}ClusterRole{{ end }}
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ckodex-oskal.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- if .Values.policyCapture.gatekeeperResources }}
+{{- range .Values.policyCapture.gatekeeperResources }}
+{{- if or (contains "*" .) (contains "/" .) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .)) }}{{ fail "Gatekeeper resources must be exact served resource names without wildcard or subresource" }}{{ end }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ckodex-oskal.fullname" . }}-gatekeeper-capture
+rules:
+  - apiGroups: [constraints.gatekeeper.sh]
+    resources:
+      {{- toYaml .Values.policyCapture.gatekeeperResources | nindent 6 }}
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "ckodex-oskal.fullname" . }}-gatekeeper-capture
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "ckodex-oskal.fullname" . }}-gatekeeper-capture
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ckodex-oskal.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- range $index, $namespace := .Values.policyCapture.configMapMetadataNamespaces }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $namespace) }}{{ fail "ConfigMap metadata namespace must be an exact namespace name" }}{{ end }}
+{{- $name := printf "%s-configmap-metadata-%d" (include "ckodex-oskal.fullname" $) $index }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace | quote }}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ckodex-oskal.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}

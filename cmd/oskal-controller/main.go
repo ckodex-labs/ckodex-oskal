@@ -101,23 +101,34 @@ func main() {
 		setupLog.Error(fmt.Errorf("invalid interval"), "use --evaluation-interval in 500ms..5m")
 		os.Exit(1)
 	}
+	if sourceWindow < time.Second || sourceWindow > 5*time.Minute || clockAhead < 0 || clockAhead > time.Second {
+		setupLog.Error(fmt.Errorf("invalid source timing"), "source window must be 1s..5m and clock allowance 0..1s")
+		os.Exit(1)
+	}
+
 	sourceConfig, err := readSourceConfiguration(sourcesPath)
 	if err != nil {
 		setupLog.Error(err, "correct --sources configuration before starting")
 		os.Exit(1)
 	}
-	if enableWebhook && len(sourceConfig.Sources) == 0 {
-		setupLog.Error(fmt.Errorf("no authenticated evidence sources configured"), "provide --sources; explicitly disable webhook for a read-only UNKNOWN controller")
+	if err := validateAdmissionSources(sourceConfig, enableWebhook); err != nil {
+		setupLog.Error(err, "configure admission scope explicitly")
 		os.Exit(1)
 	}
 	for _, source := range sourceConfig.Sources {
-		if _, _, _, err := sourceTransport(source.TLS); err != nil {
-			setupLog.Error(err, "correct source TLS configuration", "source", source.ID)
+		if source.OPA != nil && source.OPA.TLSMode == "spiffe" && (workloadAPI == "" || expectedSPIFFEID == "") {
+			setupLog.Error(fmt.Errorf("SPIFFE policy listener requires explicit own Workload API and SPIFFE ID"), "correct source identity configuration", "source", source.ID)
 			os.Exit(1)
 		}
 	}
+	if err := validatePolicyWindow(sourceConfig, sourceWindow); err != nil {
+		setupLog.Error(err, "correct source timing before creating storage or keys")
+		os.Exit(1)
+	}
+
 	producer := assurance.AuthorityRef{Scheme: "local", Subject: "oskal-controller"}
 	var identity *spire.WorkloadClient
+	var bundleDigest string
 	if workloadAPI != "" || expectedSPIFFEID != "" {
 		identity, err = spire.NewWorkloadClient(ctx, workloadAPI, expectedSPIFFEID, 5*time.Second)
 		if err != nil {
@@ -130,6 +141,12 @@ func main() {
 			setupLog.Error(err, "SPIRE identity unavailable; refusing local identity fallback")
 			os.Exit(1)
 		}
+		bundleDigest, err = identity.TrustBundleDigest(ctx)
+		if err != nil {
+			setupLog.Error(err, "cannot pin fresh public SPIFFE trust before signing authority is initialized")
+			os.Exit(1)
+		}
+
 		producer = assurance.AuthorityRef{Scheme: "spiffe", Subject: strings.TrimPrefix(actual.SPIFFEID, "spiffe://"), TrustDomain: actual.TrustDomain}
 	}
 
@@ -153,6 +170,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := validatePolicyAPIConfiguration(sourceConfig, mgr.GetConfig()); err != nil {
+		setupLog.Error(err, "correct policy API trust before creating storage or keys")
+		os.Exit(1)
+	}
+
 	evidenceRepo, err := openEvidenceRepository(evidenceDir)
 	if err != nil {
 		setupLog.Error(err, "cannot initialize durable evidence storage; inspect the path and permissions before restarting", "path", evidenceDir)
@@ -165,8 +187,8 @@ func main() {
 		setupLog.Error(err, "initialize explicit persistent signing identity")
 		os.Exit(1)
 	}
-	signer := &identitySigner{ReceiptManager: receiptMgr, workload: identity}
-	sourceGroup, verification, authorityDigest, err := prepareSources(sourceConfig, evidenceRepo, signer, producer, binding.NewResolver(mgr.GetAPIReader()), sourceWindow, clockAhead)
+	signer := &identitySigner{ReceiptManager: receiptMgr, workload: identity, bundleDigest: bundleDigest}
+	sourceGroup, verification, authorityDigest, err := prepareSources(sourceConfig, evidenceRepo, signer, producer, binding.NewResolver(mgr.GetAPIReader()), sourceWindow, clockAhead, mgr.GetConfig())
 	if err != nil {
 		setupLog.Error(err, "initialize bounded authenticated evidence sources")
 		os.Exit(1)
