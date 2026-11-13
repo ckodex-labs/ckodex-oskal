@@ -33,7 +33,7 @@ help:
 	@echo "  clean            Remove compiled binaries and test artifacts"
 	@echo "  e2e              Run local Kind end-to-end testbed script"
 
-VERSION ?= v1.0.0
+VERSION ?= v1.0.1
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(BUILD_DATE)

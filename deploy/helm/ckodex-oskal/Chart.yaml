@@ -2,8 +2,8 @@ apiVersion: v2
 name: ckodex-oskal
 description: CKODEX OSKAL - Continuous Kubernetes Assurance & NIST OSCAL Reconciliation Runtime
 type: application
-version: 1.0.0
-appVersion: 1.0.0
+version: 1.0.1
+appVersion: 1.0.1
 keywords:
   - compliance
   - security
