@@ -1,6 +1,9 @@
 OSKAL checks Kubernetes evidence and reports UNKNOWN when required evidence is missing.
 
 [![CI](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml/badge.svg)](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ckodex-labs/ckodex-oskal/badge)](https://scorecard.dev/viewer/?uri=github.com/ckodex-labs/ckodex-oskal)
+
+Code-Review and Contributors scores may be low because this project has a solo maintainer; the badge reports the measured result.
 
 With Go matching go.mod, make, Docker, Kind and kubectl installed, run from this checkout:
 
