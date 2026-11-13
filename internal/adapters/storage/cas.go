@@ -97,10 +97,21 @@ func NewMemoryEvidenceRepository() *ContentAddressedEvidenceRepository {
 
 // NewFilesystemEvidenceRepository creates a durable filesystem-backed evidence repository.
 func NewFilesystemEvidenceRepository(baseDir string) (*ContentAddressedEvidenceRepository, error) {
+	if strings.TrimSpace(baseDir) == "" {
+		return nil, fmt.Errorf("evidence directory is required")
+	}
 	if err := os.MkdirAll(filepath.Join(baseDir, "blobs", "sha256"), 0755); err != nil {
 		return nil, fmt.Errorf("failed to initialize evidence storage directory: %w", err)
 	}
+	return OpenFilesystemEvidenceRepository(baseDir)
+}
 
+// OpenFilesystemEvidenceRepository opens an existing store without creating files
+// or directories. Callers handling read-only requests must use this constructor.
+func OpenFilesystemEvidenceRepository(baseDir string) (*ContentAddressedEvidenceRepository, error) {
+	if strings.TrimSpace(baseDir) == "" {
+		return nil, fmt.Errorf("evidence directory is required")
+	}
 	repo := &ContentAddressedEvidenceRepository{
 		baseDir:      baseDir,
 		blobs:        make(map[string][]byte),

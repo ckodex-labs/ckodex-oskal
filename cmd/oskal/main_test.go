@@ -121,8 +121,8 @@ func TestCLI_Doctor(t *testing.T) {
 	cmd.SetErr(buf)
 	cmd.SetArgs([]string{"doctor", "--output", "json"})
 
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("unexpected error executing doctor: %v", err)
+	if err := cmd.Execute(); err != nil && commandExitCode(err) == 1 {
+		t.Fatalf("doctor failed to run: %v", err)
 	}
 	out := buf.String()
 	if !strings.Contains(out, `"Runtime Substrate"`) || !strings.Contains(out, `"NIST OSCAL v1.2.3 Schemas"`) {

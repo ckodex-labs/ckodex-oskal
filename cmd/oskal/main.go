@@ -78,7 +78,7 @@ func loadLocalEvidence(dir string, sub assurance.SubjectRef) ([]assurance.Eviden
 	if dir == "" {
 		return nil, nil
 	}
-	repo, err := storage.NewFilesystemEvidenceRepository(dir)
+	repo, err := storage.OpenFilesystemEvidenceRepository(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -373,9 +373,10 @@ func validateManifestSecurity(data []byte) error {
 
 func NewRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:     "oskal",
-		Version: fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, date),
-		Short:   "OSKAL -- Continuous Kubernetes Assurance CLI",
+		SilenceUsage: true,
+		Use:          "oskal",
+		Version:      fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, date),
+		Short:        "OSKAL -- Continuous Kubernetes Assurance CLI",
 		Long: `OSKAL is the Continuous Kubernetes Assurance Runtime for CKODEX.
 It evaluates continuous evidence contracts, tracks semantic drift,
 and projects defensible results into standard OSCAL artifacts.`,
@@ -1630,7 +1631,10 @@ Sigstore trust root, local CAS evidence directory, and embedded NIST OSCAL v1.2.
 			w := cmd.OutOrStdout()
 			switch outFormat {
 			case format.FormatJSON, format.FormatYAML:
-				return format.RenderStructured(w, report, outFormat)
+				if err := format.RenderStructured(w, report, outFormat); err != nil {
+					return err
+				}
+				return doctorResult(report)
 			default:
 				_, _ = fmt.Fprintf(w, "OSKAL SYSTEM DIAGNOSTIC DOCTOR\n")
 				_, _ = fmt.Fprintf(w, "----------------------------------------------------------------------\n")
@@ -1648,10 +1652,7 @@ Sigstore trust root, local CAS evidence directory, and embedded NIST OSCAL v1.2.
 					rows = append(rows, []string{c.Name, c.Target, string(c.Status), c.Duration, msg})
 				}
 				_ = format.RenderTable(w, headers, rows)
-				if report.OverallState == diagnostics.StatusFail {
-					return fmt.Errorf("system doctor detected critical health failures")
-				}
-				return nil
+				return doctorResult(report)
 			}
 		},
 	}
@@ -1688,38 +1689,7 @@ for a governed workload subject without collapsing them into generic logs.`,
 				envelopes, _ = loadLocalEvidence(evidenceDir, sub)
 			}
 			if len(envelopes) == 0 && serverAddr != "" {
-				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
-				defer cancel()
-				if client, conn, err := getGRPCClient(ctx, serverAddr); err == nil {
-					defer func() { _ = conn.Close() }()
-					if resp, err := client.ExplainClaim(ctx, &servicesv1.ExplainClaimRequest{
-						Subject: &commonv1.SubjectRef{Scheme: sub.Scheme, Id: sub.ID},
-						Control: &controlv1.ControlRef{Namespace: ctrlNS, Id: ctrlID},
-					}); err == nil && len(resp.Evidence) > 0 {
-						now := time.Now().UTC()
-						for i, ev := range resp.Evidence {
-							obsType := ev.MediaType
-							if obsType == "" {
-								obsType = "admission"
-							}
-							envelopes = append(envelopes, assurance.EvidenceEnvelope{
-								ID:              fmt.Sprintf("ev-remote-%d", i+1),
-								Subject:         sub,
-								ObservationType: obsType,
-								CapturedAt:      now,
-								Producer:        assurance.AuthorityRef{Scheme: "spiffe", Subject: ev.Uri},
-								Artifact: assurance.EvidenceRef{
-									URI:       ev.Uri,
-									Digest:    ev.Digest,
-									MediaType: ev.MediaType,
-								},
-								Epoch: assurance.AssuranceEpoch{
-									SubjectDigest: assurance.ComputeStringDigest(sub.URI()),
-								},
-							})
-						}
-					}
-				}
+				return fmt.Errorf("remote ExplainClaim supplies references, not canonical observations; use assurance explain with --server, or inspect a local evidence store with --evidence-dir")
 			}
 
 			now := time.Now().UTC()
@@ -1808,7 +1778,7 @@ for a governed workload subject without collapsing them into generic logs.`,
 				_, _ = fmt.Fprintf(w, "4. EVIDENCE TRACE:\n")
 				_, _ = fmt.Fprintf(w, "   Evidence Root:   %s\n", report.Evidence.EvidenceRoot)
 				_, _ = fmt.Fprintf(w, "   Signer Identity: %s\n", report.Evidence.SignerIdentity)
-				_, _ = fmt.Fprintf(w, "   Merkle Valid:    %v\n", report.Evidence.MerkleValid)
+				_, _ = fmt.Fprintf(w, "   Root Consistency: %s\n", report.Evidence.RootConsistency)
 				_, _ = fmt.Fprintf(w, "   Artifact Count:  %d\n", len(report.Evidence.Artifacts))
 				for i, a := range report.Evidence.Artifacts {
 					_, _ = fmt.Fprintf(w, "   [%d] %s (Type: %s, Freshness: %s)\n", i+1, a.Digest, a.Type, a.Freshness)
@@ -2351,6 +2321,6 @@ from the local Content-Addressable Storage (CAS) directory to prevent unbounded 
 
 func main() {
 	if err := NewRootCommand().Execute(); err != nil {
-		os.Exit(1)
+		os.Exit(commandExitCode(err))
 	}
 }

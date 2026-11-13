@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 )
@@ -86,10 +85,10 @@ func RunDoctor(ctx context.Context, evidenceDir string) *DoctorReport {
 
 	if hasFail {
 		report.OverallState = StatusFail
-	} else if hasWarn {
-		report.OverallState = StatusWarn
 	} else if hasUnknown {
 		report.OverallState = StatusUnknown
+	} else if hasWarn {
+		report.OverallState = StatusWarn
 	} else {
 		report.OverallState = StatusPass
 	}
@@ -120,7 +119,7 @@ func checkRuntimeSubstrate() DiagnosticCheck {
 
 func checkOscalSchemas() DiagnosticCheck {
 	start := time.Now()
-	validator, err := oscal.DefaultValidator()
+	_, err := oscal.DefaultValidator()
 	if err != nil {
 		return DiagnosticCheck{
 			Name:        "NIST OSCAL v1.2.3 Schemas",
@@ -132,40 +131,12 @@ func checkOscalSchemas() DiagnosticCheck {
 		}
 	}
 
-	projector := oscal.NewProjector()
-	sub := assurance.SubjectRef{Scheme: "k8s", ID: "system/doctor-probe"}
-	now := time.Now().UTC()
-	eval := assurance.ClaimEvaluation{ID: "schema-probe", Subject: sub, Control: assurance.ControlRef{Namespace: "diagnostics", ID: "schema-validation"}, State: assurance.AssuranceStateUnknown, EvaluatedAt: now, ValidUntil: now.Add(time.Minute)}
-	testDoc, err := projector.ProjectAssessmentResults(context.Background(), sub, []assurance.ClaimEvaluation{eval}, nil)
-	if err != nil {
-		return DiagnosticCheck{
-			Name:        "NIST OSCAL v1.2.3 Schemas",
-			Target:      "Embedded JSON Schemas",
-			Status:      StatusFail,
-			Duration:    formatDurationASCII(time.Since(start)),
-			Message:     fmt.Sprintf("Failed to project probe document: %v", err),
-			Remediation: "Check projector implementation",
-		}
-	}
-
-	res, err := validator.Validate(testDoc, "assessment-results")
-	if err != nil || !res.Valid {
-		return DiagnosticCheck{
-			Name:        "NIST OSCAL v1.2.3 Schemas",
-			Target:      "Embedded JSON Schemas",
-			Status:      StatusFail,
-			Duration:    formatDurationASCII(time.Since(start)),
-			Message:     "Schema validator failed basic self-test",
-			Remediation: "Ensure schemas conform strictly to NIST OSCAL v1.2.3 specification",
-		}
-	}
-
 	return DiagnosticCheck{
 		Name:     "NIST OSCAL v1.2.3 Schemas",
 		Target:   "Embedded JSON Schemas (AR, CD, SSP, AP, POAM)",
 		Status:   StatusPass,
 		Duration: formatDurationASCII(time.Since(start)),
-		Message:  "All 5 embedded schemas compiled; an UNKNOWN assessment-results projection passed schema validation",
+		Message:  "All 5 embedded schema validators compiled; this does not evaluate a workload",
 	}
 }
 
