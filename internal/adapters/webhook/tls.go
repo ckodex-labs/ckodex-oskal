@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// GenerateSelfSignedCert creates a high-assurance self-signed TLS cert and private key
+// GenerateSelfSignedCert creates an explicitly requested self-signed TLS cert and private key
 // for the admission webhook server, returning the PEM-encoded certificate and private key.
 func GenerateSelfSignedCert(commonName string, dnsNames []string, ips []net.IP) ([]byte, []byte, error) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)

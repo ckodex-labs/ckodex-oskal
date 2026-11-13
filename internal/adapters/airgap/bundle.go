@@ -87,7 +87,7 @@ func ExportBundle(
 			ExportedAt:     now,
 			SubjectURI:     subject.URI(),
 			EpochComposite: composite,
-			Generator:      "oskal-airgap-packager:v1.0.0",
+			Generator:      "oskal-airgap-packager:v1.0.1",
 		},
 		Evaluations: evaluations,
 		Receipts:    receipts,

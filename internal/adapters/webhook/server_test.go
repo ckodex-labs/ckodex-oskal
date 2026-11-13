@@ -2,621 +2,328 @@ package webhook
 
 import (
 	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
+	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
+	"github.com/ckodex-labs/ckodex-oskal/internal/verifier"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-
-	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
 
 func ptrBool(b bool) *bool    { return &b }
 func ptrInt64(i int64) *int64 { return &i }
-
-func TestGenerateSelfSignedCert(t *testing.T) {
-	certPEM, keyPEM, err := GenerateSelfSignedCert(
-		"oskal-webhook.ckodex.svc",
-		[]string{"oskal-webhook", "oskal-webhook.ckodex.svc"},
-		[]net.IP{net.ParseIP("127.0.0.1")},
-	)
+func must(t *testing.T, err error) {
+	t.Helper()
 	if err != nil {
-		t.Fatalf("unexpected error generating cert: %v", err)
-	}
-	if len(certPEM) == 0 || len(keyPEM) == 0 {
-		t.Fatal("expected non-empty cert and key PEM")
-	}
-	if !strings.Contains(string(certPEM), "BEGIN CERTIFICATE") {
-		t.Fatal("expected CERTIFICATE block in cert PEM")
-	}
-	if !strings.Contains(string(keyPEM), "BEGIN PRIVATE KEY") {
-		t.Fatal("expected PRIVATE KEY block in key PEM")
+		t.Fatal(err)
 	}
 }
 
-func TestAdmissionWebhook_CompliantPod(t *testing.T) {
-	var capturedEnvelopes []assurance.EvidenceEnvelope
-	server := NewAdmissionWebhookServer(ServerConfig{
-		ObserverAuth: assurance.AuthorityRef{Scheme: "spiffe", Subject: "prod/sa/webhook"},
-		EvidenceSink: func(env assurance.EvidenceEnvelope) {
-			capturedEnvelopes = append(capturedEnvelopes, env)
-		},
+func compliantPod() *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "declared-pod", Namespace: "declared-namespace"}, Spec: corev1.PodSpec{SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: ptrBool(true), RunAsUser: ptrInt64(10001)}, Containers: []corev1.Container{{Name: "app", Image: "example:test", SecurityContext: &corev1.SecurityContext{RunAsNonRoot: ptrBool(true), RunAsUser: ptrInt64(10001), Privileged: ptrBool(false), AllowPrivilegeEscalation: ptrBool(false), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}}}}}}
+}
+func reviewBytes(t *testing.T, pod *corev1.Pod) []byte {
+	t.Helper()
+	object, err := json.Marshal(pod)
+	must(t, err)
+	request := &admissionv1.AdmissionRequest{UID: "request-correlation-123", Kind: metav1.GroupVersionKind{Version: "v1", Kind: "Pod"}, Resource: metav1.GroupVersionResource{Version: "v1", Resource: "pods"}, Operation: admissionv1.Create, Namespace: pod.Namespace, Name: pod.Name, Object: runtime.RawExtension{Raw: object}}
+	raw, err := json.MarshalIndent(admissionv1.AdmissionReview{TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"}, Request: request}, "", "  ")
+	must(t, err)
+	return raw
+}
+
+// This is an actual TCP/TLS 1.3 server with an explicitly trusted test certificate.
+// It authenticates the server only; no Kubernetes API client identity is claimed.
+func serveWebhook(t *testing.T, cfg ServerConfig) (*http.Client, string) {
+	t.Helper()
+	cert, key, err := GenerateSelfSignedCert("localhost", []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")})
+	must(t, err)
+	pair, err := tls.X509KeyPair(cert, key)
+	must(t, err)
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(cert) {
+		t.Fatal("invalid actual certificate")
+	}
+	server := NewAdmissionWebhookServer(cfg)
+	server.server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{pair}}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	must(t, err)
+	done := make(chan error, 1)
+	go func() { done <- server.server.ServeTLS(listener, "", "") }()
+	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots}}
+	t.Cleanup(func() {
+		transport.CloseIdleConnections()
+		_ = server.server.Close()
+		if err := <-done; err != nil && err != http.ErrServerClosed {
+			t.Error(err)
+		}
 	})
-
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "payments-api",
-			Namespace: "payments",
-		},
-		Spec: corev1.PodSpec{
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: ptrBool(true),
-				RunAsUser:    ptrInt64(10001),
-			},
-			Containers: []corev1.Container{
-				{
-					Name:  "payments",
-					Image: "payments:v1.0.0",
-					SecurityContext: &corev1.SecurityContext{
-						RunAsNonRoot:             ptrBool(true),
-						RunAsUser:                ptrInt64(10001),
-						AllowPrivilegeEscalation: ptrBool(false),
-						Privileged:               ptrBool(false),
-						Capabilities: &corev1.Capabilities{
-							Drop: []corev1.Capability{"ALL"},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	podRaw, err := json.Marshal(pod)
-	if err != nil {
-		t.Fatalf("failed to marshal test pod: %v", err)
-	}
-
-	review := admissionv1.AdmissionReview{
-		Request: &admissionv1.AdmissionRequest{
-			UID: "req-1234",
-			Kind: metav1.GroupVersionKind{
-				Group:   "",
-				Version: "v1",
-				Kind:    "Pod",
-			},
-			Namespace: "payments",
-			Name:      "payments-api",
-			Object:    runtime.RawExtension{Raw: podRaw},
-		},
-	}
-	body, _ := json.Marshal(review)
-
-	req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
+	return &http.Client{Transport: transport, Timeout: 3 * time.Second}, "https://" + listener.Addr().String()
+}
+func postReview(t *testing.T, client *http.Client, address string, raw []byte) (int, *admissionv1.AdmissionResponse) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, address+"/validate", bytes.NewReader(raw))
+	must(t, err)
 	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	server.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d (body: %s)", w.Code, w.Body.String())
+	response, err := client.Do(req)
+	must(t, err)
+	defer func() { _ = response.Body.Close() }()
+	data, err := io.ReadAll(response.Body)
+	must(t, err)
+	if response.StatusCode != http.StatusOK {
+		return response.StatusCode, nil
 	}
-
-	var responseReview admissionv1.AdmissionReview
-	if err := json.Unmarshal(w.Body.Bytes(), &responseReview); err != nil {
-		t.Fatalf("failed to unmarshal response review: %v", err)
+	var review admissionv1.AdmissionReview
+	must(t, json.Unmarshal(data, &review))
+	if review.Response == nil {
+		t.Fatal("missing AdmissionResponse")
 	}
-
-	if responseReview.Response == nil {
-		t.Fatal("expected non-nil AdmissionResponse")
-	}
-	if !responseReview.Response.Allowed {
-		t.Fatalf("expected compliant pod to be allowed, got denied: %s", responseReview.Response.Result.Message)
-	}
-	if responseReview.Response.UID != "req-1234" {
-		t.Fatalf("expected UID req-1234, got %s", responseReview.Response.UID)
-	}
-
-	// Verify Audit Annotations
-	annotations := responseReview.Response.AuditAnnotations
-	if annotations == nil {
-		t.Fatal("expected audit annotations on allowed pod")
-	}
-	if annotations["assurance.ckodex.io/admission-envelope-id"] == "" {
-		t.Fatal("expected admission envelope ID in audit annotations")
-	}
-	if annotations["assurance.ckodex.io/admission-envelope-digest"] == "" {
-		t.Fatal("expected admission envelope digest in audit annotations")
-	}
-
-	// Verify EvidenceSink captured envelope
-	if len(capturedEnvelopes) != 1 {
-		t.Fatalf("expected 1 captured envelope in sink, got %d", len(capturedEnvelopes))
-	}
-	if capturedEnvelopes[0].ObservationType != "kubernetes.admission" {
-		t.Fatalf("unexpected observation type: %s", capturedEnvelopes[0].ObservationType)
-	}
+	return response.StatusCode, review.Response
 }
 
-func TestAdmissionWebhook_RootUserViolation(t *testing.T) {
-	server := NewAdmissionWebhookServer(ServerConfig{})
-
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "root-pod", Namespace: "default"},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:  "root-app",
-					Image: "evil:latest",
-					SecurityContext: &corev1.SecurityContext{
-						RunAsUser: ptrInt64(0),
-					},
-				},
-			},
-		},
-	}
-	podRaw, _ := json.Marshal(pod)
-
-	review := admissionv1.AdmissionReview{
-		Request: &admissionv1.AdmissionRequest{
-			UID:       "req-root",
-			Kind:      metav1.GroupVersionKind{Kind: "Pod"},
-			Namespace: "default",
-			Name:      "root-pod",
-			Object:    runtime.RawExtension{Raw: podRaw},
-		},
-	}
-	body, _ := json.Marshal(review)
-
-	req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	server.Handler().ServeHTTP(w, req)
-
-	var responseReview admissionv1.AdmissionReview
-	_ = json.Unmarshal(w.Body.Bytes(), &responseReview)
-
-	if responseReview.Response == nil || responseReview.Response.Allowed {
-		t.Fatal("expected root pod to be denied")
-	}
-	if !strings.Contains(responseReview.Response.Result.Message, "runAsUser=0 (root)") {
-		t.Fatalf("unexpected rejection message: %s", responseReview.Response.Result.Message)
-	}
-}
-
-func TestAdmissionWebhook_PrivilegedAndCapViolation(t *testing.T) {
-	server := NewAdmissionWebhookServer(ServerConfig{})
-
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "priv-pod", Namespace: "default"},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:  "priv-app",
-					Image: "app:latest",
-					SecurityContext: &corev1.SecurityContext{
-						RunAsNonRoot: ptrBool(true),
-						RunAsUser:    ptrInt64(1001),
-						Privileged:   ptrBool(true),
-						Capabilities: &corev1.Capabilities{
-							Add: []corev1.Capability{"CAP_SYS_ADMIN"},
-						},
-					},
-				},
-			},
-		},
-	}
-	podRaw, _ := json.Marshal(pod)
-
-	review := admissionv1.AdmissionReview{
-		Request: &admissionv1.AdmissionRequest{
-			UID:       "req-priv",
-			Kind:      metav1.GroupVersionKind{Kind: "Pod"},
-			Namespace: "default",
-			Name:      "priv-pod",
-			Object:    runtime.RawExtension{Raw: podRaw},
-		},
-	}
-	body, _ := json.Marshal(review)
-
-	req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	server.Handler().ServeHTTP(w, req)
-
-	var responseReview admissionv1.AdmissionReview
-	_ = json.Unmarshal(w.Body.Bytes(), &responseReview)
-
-	if responseReview.Response == nil || responseReview.Response.Allowed {
-		t.Fatal("expected privileged pod with CAP_SYS_ADMIN to be denied")
-	}
-	if !strings.Contains(responseReview.Response.Result.Message, "privileged mode") {
-		t.Fatalf("expected privileged mode rejection: %s", responseReview.Response.Result.Message)
-	}
-}
-
-func TestAdmissionWebhook_NonPodPassthrough(t *testing.T) {
-	server := NewAdmissionWebhookServer(ServerConfig{})
-
-	review := admissionv1.AdmissionReview{
-		Request: &admissionv1.AdmissionRequest{
-			UID:  "req-svc",
-			Kind: metav1.GroupVersionKind{Kind: "Service"},
-		},
-	}
-	body, _ := json.Marshal(review)
-
-	req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	server.Handler().ServeHTTP(w, req)
-
-	var responseReview admissionv1.AdmissionReview
-	_ = json.Unmarshal(w.Body.Bytes(), &responseReview)
-
-	if responseReview.Response == nil || !responseReview.Response.Allowed {
-		t.Fatal("expected non-Pod resource to be allowed automatically")
-	}
-}
-
-func TestAdmissionWebhook_HealthEndpoints(t *testing.T) {
-	server := NewAdmissionWebhookServer(ServerConfig{})
-
-	reqHealth := httptest.NewRequest(http.MethodGet, "/healthz", nil)
-	wHealth := httptest.NewRecorder()
-	server.Handler().ServeHTTP(wHealth, reqHealth)
-	if wHealth.Code != http.StatusOK || wHealth.Body.String() != "ok" {
-		t.Fatalf("unexpected healthz response: %d, %s", wHealth.Code, wHealth.Body.String())
-	}
-
-	reqReady := httptest.NewRequest(http.MethodGet, "/readyz", nil)
-	wReady := httptest.NewRecorder()
-	server.Handler().ServeHTTP(wReady, reqReady)
-	if wReady.Code != http.StatusOK || wReady.Body.String() != "ready" {
-		t.Fatalf("unexpected readyz response: %d, %s", wReady.Code, wReady.Body.String())
-	}
-}
-
-func TestAdmissionWebhook_InitContainerViolation(t *testing.T) {
-	server := NewAdmissionWebhookServer(ServerConfig{})
-
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "app-with-bad-init", Namespace: "default"},
-		Spec: corev1.PodSpec{
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: ptrBool(true),
-			},
-			InitContainers: []corev1.Container{
-				{
-					Name:  "setup",
-					Image: "busybox:latest",
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptrBool(true), // Prohibited
-					},
-				},
-			},
-			Containers: []corev1.Container{
-				{
-					Name:  "app",
-					Image: "app:v1",
-					SecurityContext: &corev1.SecurityContext{
-						RunAsNonRoot: ptrBool(true),
-					},
-				},
-			},
-		},
-	}
-
-	podRaw, _ := json.Marshal(pod)
-	review := admissionv1.AdmissionReview{
-		Request: &admissionv1.AdmissionRequest{
-			UID:    "req-init-violation",
-			Kind:   metav1.GroupVersionKind{Kind: "Pod", Version: "v1"},
-			Object: runtime.RawExtension{Raw: podRaw},
-		},
-	}
-	body, _ := json.Marshal(review)
-
-	req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	server.Handler().ServeHTTP(w, req)
-
-	var resp admissionv1.AdmissionReview
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-
-	if resp.Response == nil || resp.Response.Allowed {
-		t.Fatal("expected pod with privileged init container to be denied")
-	}
-	if !strings.Contains(resp.Response.Result.Message, "requests privileged mode") {
-		t.Fatalf("expected privileged violation message, got %s", resp.Response.Result.Message)
-	}
-}
-
-func TestAdmissionWebhook_PartialSecurityContextWithoutRunAsNonRoot(t *testing.T) {
-	server := NewAdmissionWebhookServer(ServerConfig{})
-
-	// Pod lacks runAsNonRoot, and container defines securityContext without runAsNonRoot
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "app-partial-sec", Namespace: "default"},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:  "app",
-					Image: "app:v1",
-					SecurityContext: &corev1.SecurityContext{
-						ReadOnlyRootFilesystem: ptrBool(true), // partial context, lacks runAsNonRoot!
-					},
-				},
-			},
-		},
-	}
-
-	podRaw, _ := json.Marshal(pod)
-	review := admissionv1.AdmissionReview{
-		Request: &admissionv1.AdmissionRequest{
-			UID:    "req-partial-sec",
-			Kind:   metav1.GroupVersionKind{Kind: "Pod", Version: "v1"},
-			Object: runtime.RawExtension{Raw: podRaw},
-		},
-	}
-	body, _ := json.Marshal(review)
-
-	req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	server.Handler().ServeHTTP(w, req)
-
-	var resp admissionv1.AdmissionReview
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-
-	if resp.Response == nil || resp.Response.Allowed {
-		t.Fatal("expected pod with partial container securityContext lacking runAsNonRoot to be denied")
-	}
-	if !strings.Contains(resp.Response.Result.Message, "does not specify runAsNonRoot") {
-		t.Fatalf("expected runAsNonRoot violation message, got %s", resp.Response.Result.Message)
-	}
-}
-
-func TestAdmissionWebhook_DegradedModes_AuditAndWarn(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "legacy-app", Namespace: "default"},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:  "legacy",
-					Image: "legacy:v1",
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptrBool(true),
-					},
-				},
-			},
-		},
-	}
-
-	podRaw, _ := json.Marshal(pod)
-	review := admissionv1.AdmissionReview{
-		Request: &admissionv1.AdmissionRequest{
-			UID:    "req-degraded-mode",
-			Kind:   metav1.GroupVersionKind{Kind: "Pod", Version: "v1"},
-			Object: runtime.RawExtension{Raw: podRaw},
-		},
-	}
-	body, _ := json.Marshal(review)
-
-	// 1. ModeAudit allows admission and adds degraded mode audit annotations + emits adverse evidence
-	var sinkEnvelopes []assurance.EvidenceEnvelope
-	auditServer := NewAdmissionWebhookServer(ServerConfig{
-		Mode: ModeAudit,
-		EvidenceSink: func(env assurance.EvidenceEnvelope) {
-			sinkEnvelopes = append(sinkEnvelopes, env)
-		},
-	})
-	reqAudit := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
-	wAudit := httptest.NewRecorder()
-	auditServer.Handler().ServeHTTP(wAudit, reqAudit)
-
-	var respAudit admissionv1.AdmissionReview
-	_ = json.Unmarshal(wAudit.Body.Bytes(), &respAudit)
-	if respAudit.Response == nil || !respAudit.Response.Allowed {
-		t.Fatalf("expected ModeAudit to allow admission")
-	}
-	if respAudit.Response.AuditAnnotations["assurance.ckodex.io/admitted-in-degraded-mode"] != "true" {
-		t.Errorf("expected degraded mode audit annotation")
-	}
-	if respAudit.Response.AuditAnnotations["assurance.ckodex.io/webhook-mode"] != "audit" {
-		t.Errorf("expected webhook-mode annotation to be audit")
-	}
-	if len(respAudit.Response.Warnings) > 0 {
-		t.Errorf("expected no admission warnings in pure audit mode")
-	}
-	if len(sinkEnvelopes) != 1 || sinkEnvelopes[0].ObservationType != "kubernetes.admission.violation" {
-		t.Fatalf("expected ModeAudit to emit adverse kubernetes.admission.violation envelope, got: %+v", sinkEnvelopes)
-	}
-
-	// Oversized request (> MaxWebhookBodyBytes) must return 413 Request Entity Too Large
-	reqHuge := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(make([]byte, MaxWebhookBodyBytes+64)))
-	wHuge := httptest.NewRecorder()
-	auditServer.Handler().ServeHTTP(wHuge, reqHuge)
-	if wHuge.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("expected 413 Request Entity Too Large on oversized AdmissionReview, got %d", wHuge.Code)
-	}
-
-	// 2. ModeWarn allows admission, adds audit annotations AND admission warnings
-	warnServer := NewAdmissionWebhookServer(ServerConfig{
-		Mode: ModeWarn,
-	})
-	reqWarn := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
-	wWarn := httptest.NewRecorder()
-	warnServer.Handler().ServeHTTP(wWarn, reqWarn)
-
-	var respWarn admissionv1.AdmissionReview
-	_ = json.Unmarshal(wWarn.Body.Bytes(), &respWarn)
-	if respWarn.Response == nil || !respWarn.Response.Allowed {
-		t.Fatalf("expected ModeWarn to allow admission")
-	}
-	if respWarn.Response.AuditAnnotations["assurance.ckodex.io/admitted-in-degraded-mode"] != "true" {
-		t.Errorf("expected degraded mode audit annotation in warn mode")
-	}
-	if len(respWarn.Response.Warnings) == 0 {
-		t.Errorf("expected admission warnings in warn mode")
-	}
-}
-
-func TestAdmissionWebhook_EphemeralContainerViolation(t *testing.T) {
-	server := NewAdmissionWebhookServer(ServerConfig{})
-
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "debug-target", Namespace: "payments"},
-		Spec: corev1.PodSpec{
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: ptrBool(true),
-				RunAsUser:    ptrInt64(65532),
-			},
-			Containers: []corev1.Container{
-				{
-					Name:  "app",
-					Image: "payments:v1",
-					SecurityContext: &corev1.SecurityContext{
-						AllowPrivilegeEscalation: ptrBool(false),
-						ReadOnlyRootFilesystem:   ptrBool(true),
-						Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-					},
-				},
-			},
-			EphemeralContainers: []corev1.EphemeralContainer{
-				{
-					EphemeralContainerCommon: corev1.EphemeralContainerCommon{
-						Name:  "debugger",
-						Image: "busybox:latest",
-						SecurityContext: &corev1.SecurityContext{
-							Privileged: ptrBool(true),
-						},
-					},
-				},
-			},
-		},
-	}
-
-	podRaw, _ := json.Marshal(pod)
-	review := admissionv1.AdmissionReview{
-		Request: &admissionv1.AdmissionRequest{
-			UID:       "req-ephemeral",
-			Kind:      metav1.GroupVersionKind{Kind: "Pod", Version: "v1"},
-			Namespace: "payments",
-			Name:      "debug-target",
-			Object:    runtime.RawExtension{Raw: podRaw},
-		},
-	}
-	body, _ := json.Marshal(review)
-
-	req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	server.Handler().ServeHTTP(w, req)
-
-	var resp admissionv1.AdmissionReview
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp.Response == nil || resp.Response.Allowed {
-		t.Fatal("expected pod with privileged EphemeralContainer to be denied")
-	}
-	if !strings.Contains(resp.Response.Result.Message, "debugger") {
-		t.Fatalf("expected violation message to reference ephemeral container 'debugger', got: %s", resp.Response.Result.Message)
-	}
-}
-
-func TestAdmissionWebhook_ExpandedDangerousCapabilities(t *testing.T) {
-	server := NewAdmissionWebhookServer(ServerConfig{})
-
-	for _, dangerousCap := range []corev1.Capability{"CAP_SYS_PTRACE", "SYS_MODULE", "DAC_OVERRIDE", "NET_RAW"} {
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "cap-test", Namespace: "payments"},
-			Spec: corev1.PodSpec{
-				SecurityContext: &corev1.PodSecurityContext{
-					RunAsNonRoot: ptrBool(true),
-					RunAsUser:    ptrInt64(10001),
-				},
-				Containers: []corev1.Container{
-					{
-						Name:  "worker",
-						Image: "payments:v1",
-						SecurityContext: &corev1.SecurityContext{
-							RunAsNonRoot:             ptrBool(true),
-							RunAsUser:                ptrInt64(10001),
-							AllowPrivilegeEscalation: ptrBool(false),
-							Privileged:               ptrBool(false),
-							Capabilities: &corev1.Capabilities{
-								Drop: []corev1.Capability{"ALL"},
-								Add:  []corev1.Capability{dangerousCap},
-							},
-						},
-					},
-				},
-			},
+func realCaptureSink(t *testing.T, limits storage.ArchiveLimits) (*storage.ContentAddressedEvidenceRepository, *receipts.ReceiptManager, assurance.AuthorityRef, EvidenceSink, string) {
+	t.Helper()
+	directory := t.TempDir()
+	repo, err := storage.NewFilesystemEvidenceRepositoryWithLimits(directory, limits)
+	must(t, err)
+	observer := assurance.AuthorityRef{Scheme: "local", Subject: "webhook-capture-test"}
+	signer, err := receipts.NewReceiptManager(observer)
+	must(t, err)
+	sink := func(ctx context.Context, env assurance.EvidenceEnvelope, payload []byte) error {
+		signed, err := signer.SignEvidence(ctx, env)
+		if err != nil {
+			return err
 		}
+		_, err = repo.Put(ctx, signed, bytes.NewReader(payload))
+		return err
+	}
+	return repo, signer, observer, sink, directory
+}
 
-		podRaw, _ := json.Marshal(pod)
-		review := admissionv1.AdmissionReview{
-			Request: &admissionv1.AdmissionRequest{
-				UID:       "req-cap",
-				Kind:      metav1.GroupVersionKind{Kind: "Pod", Version: "v1"},
-				Namespace: "payments",
-				Name:      "cap-test",
-				Object:    runtime.RawExtension{Raw: podRaw},
-			},
-		}
-		body, _ := json.Marshal(review)
-		req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
-		w := httptest.NewRecorder()
-		server.Handler().ServeHTTP(w, req)
+func TestActualTLSAdmissionCapturePreservesFactsAndSignature(t *testing.T) {
+	repo, signer, observer, sink, _ := realCaptureSink(t, storage.DefaultArchiveLimits())
+	client, address := serveWebhook(t, ServerConfig{ObserverAuth: observer, EvidenceSink: sink})
+	pod := compliantPod()
+	pod.UID = "declared-object-uid"
+	raw := reviewBytes(t, pod)
+	code, response := postReview(t, client, address, raw)
+	if code != 200 || !response.Allowed || response.UID != "request-correlation-123" || response.AuditAnnotations["assurance.ckodex.io/capture-status"] != "RECORDED" {
+		t.Fatalf("actual response: %d %+v", code, response)
+	}
+	envelopes, err := repo.ListAll(t.Context())
+	must(t, err)
+	if len(envelopes) != 1 {
+		t.Fatal("missing actual capture")
+	}
+	envelope := envelopes[0]
+	if envelope.Subject.Scheme != "admission-request" || envelope.Subject.ID != string(response.UID) || envelope.Subject.Attributes["uid"] != "" || envelope.Producer != observer || len(envelope.ControlRefs) != 0 {
+		t.Fatalf("invented subject/authority/control: %+v", envelope)
+	}
+	if envelope.Epoch != (assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeDigest(raw)}) {
+		t.Fatalf("invented governing epoch: %+v", envelope.Epoch)
+	}
+	reader, err := repo.Get(t.Context(), envelope.Artifact)
+	must(t, err)
+	payload, err := io.ReadAll(reader)
+	must(t, err)
+	must(t, reader.Close())
+	if assurance.ComputeDigest(payload) != envelope.Artifact.Digest || envelope.Artifact.URI != "cas://sha256/"+strings.TrimPrefix(envelope.Artifact.Digest, "sha256:") {
+		t.Fatal("artifact is not actual capture bytes")
+	}
+	var capture AdmissionCapture
+	must(t, json.Unmarshal(payload, &capture))
+	if !bytes.Equal(capture.SourceBytes, raw) || capture.DeclaredSubject.ObjectUID != "declared-object-uid" || !capture.PolicyAllowed || len(capture.Checks) != 2 || capture.Limitations["controlStanding"] != "UNKNOWN_CAPTURE_ONLY" || capture.Limitations["apiClientIdentity"] != "NOT_AUTHENTICATED_BY_THIS_CAPTURE" {
+		t.Fatalf("capture facts changed: %+v", capture)
+	}
+	key, err := hex.DecodeString(signer.PublicKey())
+	must(t, err)
+	verification := verifier.NewDefaultEvidenceVerifier()
+	verification.RegisterPublicKey(observer.Canonical(), ed25519.PublicKey(key))
+	valid, err := verification.VerifySignature(t.Context(), envelope)
+	must(t, err)
+	if !valid {
+		t.Fatal("actual signature invalid")
+	}
+	if response.AuditAnnotations["assurance.ckodex.io/capture-digest"] != envelope.Artifact.Digest || response.AuditAnnotations["assurance.ckodex.io/capture-uri"] != envelope.Artifact.URI {
+		t.Fatal("response reference differs from stored capture")
+	}
+	t.Log("real TLS, original request bytes, actual CAS payload and Ed25519 signature verified; no workload or CEL enforcement standing inferred")
+}
 
-		var resp admissionv1.AdmissionReview
-		_ = json.Unmarshal(w.Body.Bytes(), &resp)
-		if resp.Response == nil || resp.Response.Allowed {
-			t.Fatalf("expected pod requesting dangerous capability %s to be denied", dangerousCap)
-		}
-		if !strings.Contains(resp.Response.Result.Message, string(dangerousCap)) {
-			t.Fatalf("expected rejection message to mention %s, got: %s", dangerousCap, resp.Response.Result.Message)
+func TestActualTLSBuiltInChecksRetainEnforcement(t *testing.T) {
+	client, address := serveWebhook(t, ServerConfig{})
+	cases := []struct {
+		name   string
+		change func(*corev1.Pod)
+		text   string
+	}{
+		{"root", func(p *corev1.Pod) { p.Spec.Containers[0].SecurityContext.RunAsUser = ptrInt64(0) }, "runAsUser=0"},
+		{"nonroot-override", func(p *corev1.Pod) { p.Spec.Containers[0].SecurityContext.RunAsNonRoot = ptrBool(false) }, "runAsNonRoot=false"},
+		{"missing-nonroot", func(p *corev1.Pod) {
+			p.Spec.SecurityContext = nil
+			p.Spec.Containers[0].SecurityContext.RunAsNonRoot = nil
+		}, "does not specify runAsNonRoot"},
+		{"privileged", func(p *corev1.Pod) { p.Spec.Containers[0].SecurityContext.Privileged = ptrBool(true) }, "privileged mode"},
+		{"escalation", func(p *corev1.Pod) { p.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation = ptrBool(true) }, "allows privilege escalation"},
+		{"init", func(p *corev1.Pod) {
+			p.Spec.InitContainers = []corev1.Container{{Name: "init", SecurityContext: &corev1.SecurityContext{Privileged: ptrBool(true)}}}
+		}, "init requests privileged"},
+		{"ephemeral", func(p *corev1.Pod) {
+			p.Spec.EphemeralContainers = []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "debug", SecurityContext: &corev1.SecurityContext{Privileged: ptrBool(true)}}}}
+		}, "debug requests privileged"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			pod := compliantPod()
+			test.change(pod)
+			code, response := postReview(t, client, address, reviewBytes(t, pod))
+			if code != 200 || response.Allowed || !strings.Contains(response.Result.Message, test.text) {
+				t.Fatalf("expected %s denial: %d %+v", test.text, code, response)
+			}
+		})
+	}
+	for _, capability := range []corev1.Capability{"CAP_SYS_ADMIN", "NET_ADMIN", "CAP_SYS_PTRACE", "SYS_MODULE", "DAC_OVERRIDE", "NET_RAW"} {
+		pod := compliantPod()
+		pod.Spec.Containers[0].SecurityContext.Capabilities.Add = []corev1.Capability{capability}
+		_, response := postReview(t, client, address, reviewBytes(t, pod))
+		if response.Allowed || !strings.Contains(response.Result.Message, string(capability)) {
+			t.Fatalf("prohibited capability allowed: %s", capability)
 		}
 	}
+	_, response := postReview(t, client, address, reviewBytes(t, compliantPod()))
+	if !response.Allowed || response.AuditAnnotations["assurance.ckodex.io/capture-status"] != "NOT_RECORDED" || response.AuditAnnotations["assurance.ckodex.io/capture-uri"] != "" || response.AuditAnnotations["assurance.ckodex.io/admission-envelope-id"] != "" {
+		t.Fatal("policy-only response invented durable capture")
+	}
 }
 
-func TestAdmissionWebhook_FailClosedOnUnknownOrUppercaseMode(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "root-pod", Namespace: "default"},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:  "root-app",
-					Image: "evil:latest",
-					SecurityContext: &corev1.SecurityContext{
-						RunAsUser: ptrInt64(0),
-					},
-				},
-			},
-		},
+func TestActualTLSAdverseCaptureAndGeneratedName(t *testing.T) {
+	for _, mode := range []WebhookMode{ModeEnforcing, ModeAudit, ModeWarn} {
+		t.Run(string(mode), func(t *testing.T) {
+			repo, _, observer, sink, _ := realCaptureSink(t, storage.DefaultArchiveLimits())
+			client, address := serveWebhook(t, ServerConfig{ObserverAuth: observer, EvidenceSink: sink, Mode: mode})
+			pod := compliantPod()
+			pod.Name = ""
+			pod.GenerateName = "pending-"
+			pod.Spec.Containers[0].SecurityContext.Privileged = ptrBool(true)
+			_, response := postReview(t, client, address, reviewBytes(t, pod))
+			if response.Allowed != (mode != ModeEnforcing) {
+				t.Fatal("mode policy decision changed")
+			}
+			if (len(response.Warnings) > 0) != (mode == ModeWarn) {
+				t.Fatal("warning behavior changed")
+			}
+			envelopes, err := repo.ListAll(t.Context())
+			must(t, err)
+			if len(envelopes) != 1 || envelopes[0].ObservationType != "kubernetes.admission.violation" {
+				t.Fatal("adverse fact not retained")
+			}
+			reader, err := repo.Get(t.Context(), envelopes[0].Artifact)
+			must(t, err)
+			payload, err := io.ReadAll(reader)
+			must(t, err)
+			must(t, reader.Close())
+			var capture AdmissionCapture
+			must(t, json.Unmarshal(payload, &capture))
+			if capture.DeclaredSubject.NameResolution != "UNRESOLVED" || capture.DeclaredSubject.ObjectName != "" || capture.DeclaredSubject.RequestName != "" || capture.DeclaredSubject.GenerateName != "pending-" || capture.Checks[1].Result != "FAIL" || len(capture.Checks[1].Violations) == 0 {
+				t.Fatal("generated name or adverse result fabricated")
+			}
+		})
 	}
-	podRaw, _ := json.Marshal(pod)
-	review := admissionv1.AdmissionReview{
-		Request: &admissionv1.AdmissionRequest{
-			UID:       "req-mode-check",
-			Kind:      metav1.GroupVersionKind{Kind: "Pod"},
-			Namespace: "default",
-			Name:      "root-pod",
-			Object:    runtime.RawExtension{Raw: podRaw},
-		},
+}
+
+func TestActualTLSQuotaAndFilesystemFailureDenyEveryMode(t *testing.T) {
+	for _, mode := range []WebhookMode{ModeEnforcing, ModeAudit, ModeWarn} {
+		t.Run(string(mode), func(t *testing.T) {
+			repo, _, observer, sink, _ := realCaptureSink(t, storage.ArchiveLimits{MaxBytes: 1, MaxEntries: 8})
+			client, address := serveWebhook(t, ServerConfig{ObserverAuth: observer, EvidenceSink: sink, Mode: mode})
+			for _, adverse := range []bool{false, true} {
+				pod := compliantPod()
+				pod.Spec.Containers[0].SecurityContext.Privileged = ptrBool(adverse)
+				_, response := postReview(t, client, address, reviewBytes(t, pod))
+				if response.Allowed || response.AuditAnnotations["assurance.ckodex.io/capture-status"] != "FAILED" || response.AuditAnnotations["assurance.ckodex.io/capture-error"] != "CAPACITY_EXHAUSTED" || response.AuditAnnotations["assurance.ckodex.io/admitted-in-degraded-mode"] != "" || response.AuditAnnotations["assurance.ckodex.io/capture-uri"] != "" {
+					t.Fatalf("quota failure permitted admission: %+v", response)
+				}
+			}
+			envelopes, err := repo.ListAll(t.Context())
+			must(t, err)
+			if len(envelopes) != 0 {
+				t.Fatal("quota failure claimed stored material")
+			}
+		})
 	}
-	body, _ := json.Marshal(review)
+	_, _, observer, sink, directory := realCaptureSink(t, storage.DefaultArchiveLimits())
+	blobDirectory := filepath.Join(directory, "blobs", "sha256")
+	must(t, os.Rename(blobDirectory, blobDirectory+"-preserved"))
+	must(t, os.WriteFile(blobDirectory, []byte("intentional filesystem obstruction"), 0600))
+	client, address := serveWebhook(t, ServerConfig{ObserverAuth: observer, EvidenceSink: sink, Mode: ModeAudit})
+	_, response := postReview(t, client, address, reviewBytes(t, compliantPod()))
+	if response.Allowed || response.AuditAnnotations["assurance.ckodex.io/capture-error"] != "PERSISTENCE_ERROR" {
+		t.Fatal("actual filesystem failure was ignored")
+	}
+}
 
-	for _, mode := range []WebhookMode{"ENFORCING", "enforce", "monitor-only", "unknown", ""} {
-		server := NewAdmissionWebhookServer(ServerConfig{Mode: mode})
-		req := httptest.NewRequest(http.MethodPost, "/validate", bytes.NewReader(body))
-		w := httptest.NewRecorder()
-		server.Handler().ServeHTTP(w, req)
-
-		var resp admissionv1.AdmissionReview
-		_ = json.Unmarshal(w.Body.Bytes(), &resp)
-		if resp.Response == nil || resp.Response.Allowed {
-			t.Fatalf("QA-04 regression: expected mode %q to fail closed (Allowed=false)", mode)
+func TestActualTLSCaptureDeadlineAndNoDefaultObserver(t *testing.T) {
+	repo, _, observer, sink, _ := realCaptureSink(t, storage.DefaultArchiveLimits())
+	boundedSink := func(ctx context.Context, env assurance.EvidenceEnvelope, payload []byte) error {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("sink lacks request deadline")
 		}
+		<-ctx.Done()
+		return sink(ctx, env, payload)
+	}
+	client, address := serveWebhook(t, ServerConfig{ObserverAuth: observer, EvidenceSink: boundedSink, Mode: ModeWarn, RequestTimeout: 30 * time.Millisecond})
+	_, response := postReview(t, client, address, reviewBytes(t, compliantPod()))
+	if response.Allowed || response.AuditAnnotations["assurance.ckodex.io/capture-error"] != "REQUEST_EXPIRED" {
+		t.Fatal("expired persistence allowed")
+	}
+	envelopes, err := repo.ListAll(t.Context())
+	must(t, err)
+	if len(envelopes) != 0 {
+		t.Fatal("expired capture persisted")
+	}
+	client, address = serveWebhook(t, ServerConfig{EvidenceSink: sink})
+	_, response = postReview(t, client, address, reviewBytes(t, compliantPod()))
+	if response.Allowed || response.AuditAnnotations["assurance.ckodex.io/capture-status"] != "FAILED" {
+		t.Fatal("missing observer acquired a default identity")
+	}
+}
+
+func TestActualTLSAdmissionInputBoundsAndOutOfScope(t *testing.T) {
+	client, address := serveWebhook(t, ServerConfig{})
+	if code, _ := postReview(t, client, address, bytes.Repeat([]byte("x"), MaxWebhookBodyBytes+1)); code != 413 {
+		t.Fatalf("oversized body: HTTP%d", code)
+	}
+	raw := []byte(`{"request":{"uid":"a","uid":"b"}}`)
+	if code, _ := postReview(t, client, address, raw); code != 400 {
+		t.Fatal("ambiguous duplicate keys admitted")
+	}
+	raw = []byte(`{"request":{"uid":"not-a-pod","kind":{"version":"v1","kind":"Secret"},"operation":"CREATE"}}`)
+	_, response := postReview(t, client, address, raw)
+	if !response.Allowed || response.AuditAnnotations["assurance.ckodex.io/check-scope"] != "NOT_APPLICABLE" || response.AuditAnnotations["assurance.ckodex.io/capture-status"] != "NOT_RECORDED" {
+		t.Fatal("out-of-scope request claimed checks or recording")
+	}
+	pod := compliantPod()
+	for i := 0; i < MaxJSONArrayItems; i++ {
+		pod.Spec.Containers = append(pod.Spec.Containers, pod.Spec.Containers[0])
+	}
+	if code, _ := postReview(t, client, address, reviewBytes(t, pod)); code != 400 {
+		t.Fatal("container array amplified past structural bound")
 	}
 }
