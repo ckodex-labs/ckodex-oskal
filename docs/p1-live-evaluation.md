@@ -55,6 +55,12 @@ revision also invalidates evaluations racing a session transition. Ordinary
 additions within a RUNNING session do not invalidate an already captured candidate
 snapshot; evaluations describe the facts available at their evaluation boundary.
 
+A zero-source registry is an intentional empty evaluation view: it exposes no
+archive candidates and has an empty status snapshot. It still requires a real
+archive and positive candidate bound. This permits explicitly configured read-only
+operation without synthetic sources; deployment readiness remains the caller's
+responsibility.
+
 Source count is bounded to 16; candidate count is explicitly configured from 1 to
 4096 per source. Queries reject more than 4096 matching candidates before decoding
 envelopes. Envelope metadata is bounded to 64 KiB, payloads to 4 MiB and evaluation
