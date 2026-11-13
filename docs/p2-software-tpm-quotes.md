@@ -115,12 +115,17 @@ docker context show
 docker build --memory=2g --cpu-quota=200000 \
   -t oskal-p2-tpm-runtime:0.10.2 \
   -f tests/runtime/tpm/Dockerfile tests/runtime/tpm
+docker network create \
+  --opt com.docker.network.bridge.host_binding_ipv4=127.0.0.1 \
+  oskal-p2-tpm-loopback
 docker run -d --name oskal-p2-tpm-runtime \
+  --network oskal-p2-tpm-loopback \
   --cpus 0.5 --memory 128m --pids-limit 64 --read-only --cap-drop ALL \
   --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=16m \
   --volume oskal-p2-tpm-state:/state -p 127.0.0.1::2321 \
   oskal-p2-tpm-runtime:0.10.2
 docker port oskal-p2-tpm-runtime 2321
+docker network inspect oskal-p2-tpm-loopback
 # Set this to the actual printed loopback address, never a guessed port.
 export OSKAL_SWTPM_ADDRESS=127.0.0.1:PORT
 export OSKAL_SWTPM_CONTAINER=oskal-p2-tpm-runtime
@@ -129,8 +134,21 @@ go test -tags=integration -race -count=1 -v ./internal/adapters/tpm
 golangci-lint run --build-tags=integration ./internal/adapters/tpm/...
 go build ./...
 docker logs oskal-p2-tpm-runtime
-docker stop --time 5 oskal-p2-tpm-runtime
+docker stop --timeout 5 oskal-p2-tpm-runtime
 ```
+
+The dedicated network must contain only the trusted TPM and any explicitly
+trusted test clients. Never attach a guest or an unrelated workload to it. Host
+loopback publication does not protect the raw TPM port from peers on the same
+Docker network, so the default shared bridge is prohibited for this harness.
+
+This Colima Docker runtime does not retain published ports on an `--internal`
+network: the real attempted configuration ran the TPM but exposed no host port.
+The verified fallback is a dedicated user-defined bridge with `Internal=false`,
+only the trusted TPM as a member, and host publication explicitly on loopback.
+It establishes tested network separation, not host-root resistance or denied
+outbound access. Docker administrators can still attach containers or alter the
+network; they remain inside the trusted-host boundary.
 
 The integration build tag intentionally requires a real endpoint and named test
 container; missing infrastructure fails the test. There are no mocks, stubs,
@@ -171,3 +189,20 @@ were unchanged. All new TPM Go source, this document, and the Dockerfile are ASC
 No hardware, TEE, guest-root resistance, host-root resistance, continuous code
 integrity, protected telemetry key, full source admission, durable replay policy,
 or production deployment is proven by these results.
+
+### Network isolation correction
+
+The initial run above used the default bridge. Independent review correctly
+identified that host-loopback publication still left raw TPM commands reachable
+by same-bridge containers. That runtime was stopped and moved onto the dedicated
+`oskal-p2-tpm-loopback` network, with no default-bridge attachment. Inspection
+showed `Internal=false`, host-binding default `127.0.0.1`, and exactly one member:
+`oskal-p2-tpm-runtime-2` at `172.22.0.2/16`. Its actual published endpoint was
+`127.0.0.1:32770`; these addresses are observations, not portable configuration.
+
+A separate, owned `oskal-p2-tpm-isolation-probe` container on a different owned
+network attempted a real TCP connection to `172.22.0.2:2321`; it timed out with
+exit 124 under a two-second bound. The complete real TPM integration race suite
+then passed through the published host-loopback endpoint. The original bridge
+run is not used as network-isolation proof. Network metadata, the negative probe,
+and the new integration output are retained with the private runtime evidence.
