@@ -107,8 +107,8 @@ func TestControllerReconciliationHarness(t *testing.T) {
 	}
 
 	readyCond := updatedBinding.Status.Conditions[0]
-	if readyCond.Type != "Ready" || readyCond.Status != metav1.ConditionTrue {
-		t.Errorf("expected Ready=True condition, got %v", readyCond)
+	if readyCond.Type != "Ready" || readyCond.Status != metav1.ConditionFalse || readyCond.Reason != "UNKNOWN" {
+		t.Errorf("an evaluator without evidence must publish UNKNOWN and Ready=False, got %v", readyCond)
 	}
 }
 

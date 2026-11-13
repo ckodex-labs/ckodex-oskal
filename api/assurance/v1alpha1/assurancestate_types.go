@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -25,9 +26,11 @@ type StateEpoch struct {
 
 // ControlStatus records the summarized state of an individual evaluated control.
 type ControlStatus struct {
-	ID              string `json:"id"`
-	State           string `json:"state"` // "Assured", "Verified", "Observed", "Stale", "Failed", "Unknown"
-	EvidenceSummary string `json:"evidenceSummary,omitempty"`
+	ID              string                         `json:"id"`
+	State           string                         `json:"state"` // "Assured", "Verified", "Observed", "Stale", "Failed", "Unknown"
+	EvidenceSummary string                         `json:"evidenceSummary,omitempty"`
+	ReceiptRef      string                         `json:"receiptRef,omitempty"`
+	Completeness    assurance.EvidenceCompleteness `json:"completeness"`
 }
 
 // Condition types for AssuranceState

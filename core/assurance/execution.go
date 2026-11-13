@@ -64,9 +64,42 @@ type ExecutionLease struct {
 
 const MaxExecutionPayloadBytes = 1 << 20
 
+// ValidateExecutionGrant checks the bounds of an admitted grant snapshot. It
+// grants no operation and produces no admission or execution receipt.
+func ValidateExecutionGrant(lease ExecutionLease, now time.Time) error {
+	if lease.Principal == "" || len(lease.Principal) > 512 || lease.UID == "" || lease.Namespace == "" || lease.Name == "" {
+		return fmt.Errorf("lease identity and principal are required")
+	}
+	if lease.Generation <= 0 || lease.ObservedGeneration != lease.Generation {
+		return fmt.Errorf("lease policy generation is not admitted")
+	}
+	if lease.MaxTurns <= 0 || lease.MaxTurns > MaxLeaseTurns || lease.TTL <= 0 || lease.IssuedAt.IsZero() || lease.ExpiresAt.IsZero() || !lease.ExpiresAt.Equal(lease.IssuedAt.Add(lease.TTL)) {
+		return fmt.Errorf("lease requires finite valid execution bounds")
+	}
+	if now.Before(lease.IssuedAt) || !now.Before(lease.ExpiresAt) {
+		return fmt.Errorf("lease is outside its validity interval")
+	}
+	resource, err := url.Parse(lease.Scope)
+	if err != nil || resource.Scheme == "" || resource.Host == "" || resource.User != nil || resource.Fragment != "" || len(lease.Scope) > 2048 || strings.ContainsAny(lease.Scope, "*\r\n") {
+		return fmt.Errorf("lease requires an exact resource scope")
+	}
+	if len(lease.AllowedCapabilities) == 0 || len(lease.AllowedCapabilities) > 128 {
+		return fmt.Errorf("lease requires 1..128 exact capabilities")
+	}
+	for _, capability := range lease.AllowedCapabilities {
+		if capability == "" || len(capability) > 128 || strings.ContainsAny(capability, "*\r\n") {
+			return fmt.Errorf("lease capabilities must be exact and bounded")
+		}
+	}
+	return nil
+}
+
 // EvaluateExecution validates a request against authoritative state without I/O
 // or mutation. Its result is not usable until a store atomically reserves it.
 func EvaluateExecution(lease ExecutionLease, request ExecutionRequest, principal string, now time.Time) (*ExecutionAdmission, error) {
+	if err := ValidateExecutionGrant(lease, now); err != nil {
+		return nil, err
+	}
 	if principal == "" || len(principal) > 512 || principal != lease.Principal {
 		return nil, fmt.Errorf("authenticated principal does not match lease")
 	}
@@ -75,15 +108,6 @@ func EvaluateExecution(lease ExecutionLease, request ExecutionRequest, principal
 	}
 	if lease.Deleting || lease.Revoked {
 		return nil, fmt.Errorf("lease is revoked or deleting")
-	}
-	if lease.Generation <= 0 || lease.ObservedGeneration != lease.Generation {
-		return nil, fmt.Errorf("lease policy generation is not admitted")
-	}
-	if lease.MaxTurns <= 0 || lease.MaxTurns > MaxLeaseTurns || lease.TTL <= 0 || lease.IssuedAt.IsZero() || lease.ExpiresAt.IsZero() || !lease.ExpiresAt.Equal(lease.IssuedAt.Add(lease.TTL)) {
-		return nil, fmt.Errorf("lease requires finite valid execution bounds")
-	}
-	if now.Before(lease.IssuedAt) || !now.Before(lease.ExpiresAt) {
-		return nil, fmt.Errorf("lease is outside its validity interval")
 	}
 	if lease.CurrentTurn < 0 || lease.CurrentTurn >= lease.MaxTurns {
 		return nil, fmt.Errorf("lease turn budget exhausted")

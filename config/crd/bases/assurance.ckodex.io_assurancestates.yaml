@@ -129,6 +129,21 @@ spec:
                   properties:
                     evidenceSummary:
                       type: string
+                    receiptRef:
+                      type: string
+                    completeness:
+                      type: object
+                      properties:
+                        required:
+                          type: integer
+                        present:
+                          type: integer
+                        verified:
+                          type: integer
+                        stale:
+                          type: integer
+                        missing:
+                          type: integer
                     id:
                       type: string
                     state:
