@@ -32,7 +32,7 @@ func TestCLI_HelpAndVersion(t *testing.T) {
 	if err := cmdVer.Execute(); err != nil {
 		t.Fatalf("unexpected error executing version: %v", err)
 	}
-	if !strings.Contains(bufVer.String(), "oskal v1.0.0") {
+	if !strings.Contains(bufVer.String(), "oskal v1.0.1") {
 		t.Fatalf("unexpected version output: %s", bufVer.String())
 	}
 }

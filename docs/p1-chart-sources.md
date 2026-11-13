@@ -3,6 +3,11 @@
 The chart mounts an operator's source configuration and credentials without
 inventing a policy, publisher identity, or successful assessment.
 
+This source tree prepares version v1.0.1. Its default image tag is not available
+until the author publishes that release. Before publication, explicitly select
+an image built and verified from this branch; changing the chart alone does not
+upgrade an already published v1.0.0 controller.
+
 `sources.configMapName` selects an existing ConfigMap in the release namespace.
 Its `sources.configMapKey` (default `sources.json`) is mounted read-only at
 `/etc/oskal/sources/sources.json` and passed to the controller's `--sources` flag.
