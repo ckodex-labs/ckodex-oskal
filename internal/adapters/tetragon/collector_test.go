@@ -25,9 +25,9 @@ func TestCaptureProcessIdentityAndValence(t *testing.T) {
 		if err != nil || captured == nil {
 			t.Fatalf("complete process could not be captured: %v", err)
 		}
-		expected := "workload.runtime.process.nonroot"
+		expected := "workload.runtime.process.euid.nonroot"
 		if uid == 0 {
-			expected = "workload.runtime.process.violation"
+			expected = "workload.runtime.process.euid.root"
 		}
 		if captured.Type != expected || captured.Subject.Attributes["uid"] != "pod-uid" || !captured.CapturedAt.Equal(event.Time.AsTime()) {
 			t.Fatal("capture changed observed valence, identity, or timestamp")

@@ -71,9 +71,9 @@ func (c *Collector) capture(event *tetragonapi.GetEventsResponse) (*ports.Captur
 	if event.GetTime() == nil || event.GetTime().CheckValid() != nil {
 		return nil, fmt.Errorf("tetragon process event lacks a valid observed timestamp")
 	}
-	observationType := "workload.runtime.process.nonroot"
+	observationType := "workload.runtime.process.euid.nonroot"
 	if p.GetUid().GetValue() == 0 {
-		observationType = "workload.runtime.process.violation"
+		observationType = "workload.runtime.process.euid.root"
 	}
 	payload, err := protojson.Marshal(event)
 	if err != nil {
@@ -85,6 +85,6 @@ func (c *Collector) capture(event *tetragonapi.GetEventsResponse) (*ports.Captur
 		}},
 		Type: observationType, CapturedAt: event.GetTime().AsTime(), Producer: c.Producer,
 		Payload: payload, MediaType: "application/vnd.tetragon.event+json",
-		ControlRefs: []assurance.ControlRef{{Namespace: "ckodex", ID: "container.least-privilege"}},
+		ControlRefs: []assurance.ControlRef{{Namespace: "ckodex", ID: "runtime.process-uid"}},
 	}, nil
 }

@@ -31,4 +31,7 @@ func TestCaptureFlowNeverAssertsIsolation(t *testing.T) {
 	if captured, err := c.capture(&observerapi.GetFlowsResponse{}); err != nil || captured != nil {
 		t.Fatal("stream status was interpreted as a workload flow")
 	}
+	if _, err := c.capture(&observerapi.GetFlowsResponse{ResponseTypes: &observerapi.GetFlowsResponse_LostEvents{LostEvents: &flowapi.LostEvent{}}}); err == nil {
+		t.Fatal("explicit event loss was silently ignored")
+	}
 }
