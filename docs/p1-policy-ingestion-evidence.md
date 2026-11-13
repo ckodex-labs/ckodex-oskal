@@ -80,8 +80,8 @@ the test policy matched ConfigMaps only in `oskal-policy-test`. Real ConfigMaps
 with and without a `team` label generated pass/fail reports. Gatekeeper audit used
 `constraintViolationsLimit=1`, producing two total violations and one listed.
 
-Actual engine → actual source API/log → decoder → live resource UID/creation-time
-check → subject epoch → filesystem CAS → payload digest verification passed:
+Actual engine -> actual source API/log -> decoder -> live resource UID/creation-time
+check -> subject epoch -> filesystem CAS -> payload digest verification passed:
 
 | Source | Sample persisted capture SHA-256 |
 | --- | --- |
