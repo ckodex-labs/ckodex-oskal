@@ -1,8 +1,5 @@
 OSKAL checks Kubernetes security evidence and reports UNKNOWN by default when required evidence is missing.
 
-[![CI](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml/badge.svg)](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ckodex-labs/ckodex-oskal/badge)](https://scorecard.dev/viewer/?uri=github.com/ckodex-labs/ckodex-oskal)
-
 With Go matching go.mod, make, Docker, Kind, kubectl, Helm and Git installed:
 
 ```sh
@@ -12,12 +9,14 @@ make demo
 A fresh-cluster run deployed the real controller and Tetragon sensor, observed a
 non-root process, then stopped the sensor:
 
+ASSURED means the observed check passed its explicit policy.
+
 ```text
-Before: ASSURED, 1/1 verified, root=sha256:aa5f5d807c79e3bc25ae66e3cd640ce7dc648c1250e894039676fa8a8d99c0e0, signed receipt=rcpt-9dad178f057f509fb28cfe26a30852bcab86f48657ed8dcb891f7a497978a6ea
-After: UNKNOWN, 0/1 verified, root cleared, signed receipt=rcpt-b1e82640a59083bc95dad1a9d0f8da5dcd5177c94b7a407f3d5692b0ba370d23
-Source-loss transition observed in 3.014592917s.
+Before: ASSURED, 1/1 verified, root=sha256:ea667a485cba14fe41364fdb6ce25767958e3f7b87688fab79100d9e28613084, signed receipt=rcpt-55cd983060949917afe2b85f30ba2084819ac854df84623956306959c1c12e4a
+After: UNKNOWN, 0/1 verified, root cleared, signed receipt=rcpt-f4ebf1ec7e84c14e2467740c62e3657a2a1aef05c6d00299481285abc33f5344
+Source-loss transition observed in 3.014099416s.
 Both receipts verified with the actual CLI and the host-pinned public key.
-Demo acceptance duration: 1m26.568509s.
+Demo acceptance duration: 1m30.990875542s.
 ```
 
 The control means that this Pod was observed executing with a nonzero effective
@@ -27,11 +26,15 @@ an explicit contract and policy. When the source stops, earlier evidence remains
 archived but loses eligibility for the current assessment. The demo verifies both
 receipts against a public key created before deployment.
 
-The quoted run used an unchanged source snapshot and the inspected official chart;
-three earlier image-identity checks failed and were corrected before this fresh run
-succeeded. [Exact command, output, failures and scope](docs/p1-deployed-demo-evidence.md).
-The cluster and protected artifacts are retained for inspection; cleanup is printed.
+The quoted run used clean source `02a9f36`, Go 1.27.4 and the default official chart
+download. A preceding wrapper mistake restricted executable permissions; that
+failed run and the earlier image-identity failures remain recorded.
+[Exact command, output, failures and scope](docs/p1-deployed-demo-evidence.md).
+The stopped cluster and protected artifacts are retained for inspection.
 Local signing keys are not hardware-backed, and no TEE assurance is claimed.
+
+[![CI](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml/badge.svg?branch=p1/controller)](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/ci.yml)
+[![Scorecard PR scan](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/scorecard.yml/badge.svg?branch=p1/controller&event=pull_request)](https://github.com/ckodex-labs/ckodex-oskal/actions/workflows/scorecard.yml)
 
 ## Implemented and verified
 
@@ -45,9 +48,11 @@ may escalate UNKNOWN to FAILED.
 | --- | --- |
 | Runtime capture | Real Tetragon 1.8.0 and Hubble/Cilium 1.20.4 APIs over mutual TLS, live Pod identity checks, and disk-backed evidence. Effective-UID and observed-flow facts do not imply complete least privilege or isolation. |
 | Policy-engine inputs | Real Kyverno PolicyReport/OpenReports, Gatekeeper audit and masked OPA decision logs decoded and delivered to storage. Reporter pass, zero violations and truncated audit lists are not automatic compliance decisions. |
+| Admission capture | Actual TLS request checks and durable request captures. Configured storage failures deny admission in enforcing, audit and warn modes. Captures establish neither workload creation nor runtime privilege. |
 | Identity | Real SPIRE Workload API identity, exact mutual-TLS peers, stopped-agent denial and recovery. SPIFFE identifies workloads; SPIRE supplies those identities. |
 | Artifact verification | Real Sigstore signatures and provenance bundles, exact issuer/signer, explicit trusted-root pin and artifact digest. Wrong identity, missing proof and tampering are rejected. Historical verification does not prove current TUF freshness or running-image lineage. |
 | Evidence and receipts | SHA-256 content-addressed storage (CAS), atomic writes, immutable full-digest receipt references, and Ed25519 evaluation receipts. Corrupt recovery fails closed and preserves bytes. The aggregate root is not a Merkle inclusion-proof tree. |
+| Archive bounds | Explicit byte/object budgets, bounded restore and metadata, and SAFE_HOLD on exhausted capacity. Historical bytes remain intact; reviewed operator limits allow reopening. |
 | Execution authority | Kubernetes CapabilityLease reads and atomic turn reservations, authenticated caller/scope/capability checks, actual completion history and crash-safe pending state. Execution chains are unsigned and do not protect against an administrator rewriting status. |
 | OSCAL export | All five embedded NIST OSCAL 1.2.3 schemas, with explicit document relationships and system facts. OSCAL is a machine-readable assessment format; schema validity is not certification. Missing mandatory facts produce errors. |
 | Diagnostics and clients | Unverified material remains UNKNOWN in CLI, MCP, UTCP, service and SDK paths. Receipt verification requires an explicit key. Network clients require explicit TLS trust; archive inventory does not invent current assurance. |
@@ -58,6 +63,9 @@ immutable history. Detailed evidence and boundaries are recorded in the
 [controller](docs/p1-publication-guards.md), [runtime](docs/p1-runtime-evidence.md),
 [policy ingestion](docs/p1-policy-ingestion-evidence.md),
 [delivery](docs/p1-policy-delivery-evidence.md),
+[controller capture](docs/p1-policy-controller.md),
+[admission](docs/p1-admission-capture.md),
+[archive limits](docs/p1-archive-configuration.md),
 [lease](docs/p1-capability-lease-evidence.md),
 [CLI](docs/p1-cli-truth.md), and [service](docs/p1-service-evaluation.md) records.
 
@@ -69,6 +77,12 @@ immutable history. Detailed evidence and boundaries are recorded in the
 - Policy-engine ingestion retains native assertions, missing revisions and audit
   truncation. Capture-only records do not authorize control promotion; an authored
   mapping and sufficient proof are required.
+- Receipt signatures cover the canonical assessment tuple. Supplemental subject
+  attributes require the trusted full-JSON reference; signature validity alone
+  does not establish current assurance. The demo checks both.
+  [Verification scope](docs/p1-receipt-verification-scope.md).
+- Model/AI forensics is not implemented. Subject descriptor helpers generate no
+  forensics evidence or model-safety finding.
 - Bound workload resolution supports Pods and Deployments. Unsupported or ambiguous
   attribution fails closed. UID-less flows have an additional creation-time guard.
 - Multi-object Kubernetes reads/publications are not transactional. Consumers must
@@ -81,8 +95,10 @@ immutable history. Detailed evidence and boundaries are recorded in the
   Resource contention caused earlier control-plane delays; unrelated workloads
   were preserved. No performance or scale claim is made.
 - Scorecard publishing runs on the default branch. The PR scan is read-only; the
-  published result badge remains unverified until an approved merge and publishing
-  run. Code-Review and Contributors may score low for a solo maintainer.
+  badge above shows its actual workflow status. The
+  [published score](https://scorecard.dev/viewer/?uri=github.com/ckodex-labs/ckodex-oskal)
+  awaits an approved merge and publishing run. Code-Review and Contributors may
+  score low for a solo maintainer.
 
 ## Development
 
