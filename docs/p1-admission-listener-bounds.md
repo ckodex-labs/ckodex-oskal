@@ -30,9 +30,12 @@ This is not a process RSS, rate, workload-capacity, or production-load claim.
 
 ## Actual verification
 
-The tests run the real native Start path over TCP/TLS and count accepted and
-closed connections through the HTTP server's actual ConnState callback. They do
-not infer connection count from goroutine counts or use a fake listener/backend.
+The tests run the real native Start path over TCP/TLS. They observe acceptance
+at HTTP StateNew and physical TCP closure through a forwarding connection wrapper,
+before the listener releases its token. The observer is installed synchronously
+before net/http starts the connection goroutine. They do not infer live TCP count
+from later StateClosed notifications or goroutine counts, and use no fake
+listener/backend.
 
 - 64 real sockets stalled before TLS and filled native capacity. An additional
   real TLS handshake reached its I/O deadline without a 65th acceptance.
@@ -58,3 +61,36 @@ Focused real tests and race verification use Go 1.27.4 darwin/arm64. Output is
 retained in `/private/tmp/oskal-p1-listener-{live,race,lint,build}.log`. No cluster,
 VM configuration, unrelated process, trust store, remote branch, or release was
 modified.
+
+
+## Hosted callback-ordering failure and measurement correction
+
+The [hosted Go job](https://github.com/ckodex-labs/ckodex-oskal/actions/runs/43443914456/job/131948286970)
+failed the earlier post-release counter assertion at 2026-11-13T14:39:17Z:
+`accepted concurrency exceeded bound after release: 65`, after 0.37 seconds.
+Its full output is preserved at
+`/private/tmp/oskal-p1-listener-hosted-failure/job-131948286970.log`.
+
+Go 1.27.4's `net/http/server.go` closes the connection at line 1975 and only then
+invokes StateClosed at line 1976. Its close path calls the underlying connection's
+Close at line 1816. The bounded listener closes the real TCP connection and
+releases its token before returning from that call. A newly accepted connection
+can therefore reach StateNew while the old StateClosed callback is still pending.
+The old counter measured outstanding callback notifications, which can reach 65;
+that value does not establish 65 live TCP connections.
+
+A controlled real-network reproduction delays the first StateClosed notification
+until another verified TLS request completes. It reproduces the old callback
+counter at 65 while the corrected live TCP counter stays at 64. The corrected
+observer forwards every real connection operation unchanged and decrements only
+after actual TCP Close returns, before token release. The full-capacity blocked
+extra handshake, accepted count, slot-release verified TLS request, maximum live
+TCP bound, and bounded shutdown assertions remain in place. Production listener
+and server code are unchanged by this correction.
+
+Controlled pre-correction output is retained at
+`/private/tmp/oskal-p1-listener-hosted-failure/controlled-ordering-before-fix.log`;
+the corrected comparison is at `.../accurate-counter.log`. Repeated focused race
+verification and shutdown output are at `.../repeated-race.log` and
+`.../shutdown-race.log`, with scoped lint at `.../lint.log`. This correction is
+local Go 1.27.4 darwin/arm64 evidence; the final hosted rerun remains separate.

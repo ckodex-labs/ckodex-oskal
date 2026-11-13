@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -14,44 +15,79 @@ import (
 	"time"
 )
 
+// ConnState(StateClosed) is a later notification, not the TCP close point.
+// Observe the real accepted connection's Close before the limiter releases its
+// token, so a delayed HTTP callback cannot inflate the measured live TCP count.
 type acceptedConnections struct {
-	mu         sync.Mutex
-	live       map[net.Conn]bool
-	total, max int
-	accepted   chan struct{}
-	closed     chan struct{}
+	mu               sync.Mutex
+	live             map[net.Conn]bool
+	total, max       int
+	accepted         chan struct{}
+	observationError error
 }
 
 func newAcceptedConnections() *acceptedConnections {
-	return &acceptedConnections{live: make(map[net.Conn]bool), accepted: make(chan struct{}, MaxWebhookConnections*4), closed: make(chan struct{}, MaxWebhookConnections*4)}
+	return &acceptedConnections{live: make(map[net.Conn]bool), accepted: make(chan struct{}, MaxWebhookConnections*4)}
+}
+
+type observedTCPConnection struct {
+	net.Conn
+	once    sync.Once
+	onClose func()
+}
+
+func (c *observedTCPConnection) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.onClose)
+	return err
 }
 func (c *acceptedConnections) state(connection net.Conn, state http.ConnState) {
+	if state != http.StateNew {
+		return
+	}
+	tlsConnection, ok := connection.(*tls.Conn)
+	if !ok {
+		c.mu.Lock()
+		c.observationError = fmt.Errorf("native connection is not TLS: %T", connection)
+		c.mu.Unlock()
+		c.accepted <- struct{}{}
+		return
+	}
+	limited, ok := tlsConnection.NetConn().(*limitedConnection)
+	if !ok {
+		c.mu.Lock()
+		c.observationError = fmt.Errorf("native TLS connection has no pre-handshake limiter: %T", tlsConnection.NetConn())
+		c.mu.Unlock()
+		c.accepted <- struct{}{}
+		return
+	}
+	// net/http invokes StateNew synchronously before creating c.serve, so this
+	// forwarding observer is installed before connection I/O or Close can run.
+	limited.Conn = &observedTCPConnection{Conn: limited.Conn, onClose: func() { c.mu.Lock(); delete(c.live, connection); c.mu.Unlock() }}
 	c.mu.Lock()
-	switch state {
-	case http.StateNew:
-		c.live[connection] = true
-		c.total++
-		if len(c.live) > c.max {
-			c.max = len(c.live)
-		}
-	case http.StateClosed, http.StateHijacked:
-		delete(c.live, connection)
+	c.total++
+	c.live[connection] = true
+	if len(c.live) > c.max {
+		c.max = len(c.live)
 	}
 	c.mu.Unlock()
-	if state == http.StateNew {
-		c.accepted <- struct{}{}
-	}
-	if state == http.StateClosed {
-		c.closed <- struct{}{}
-	}
+	c.accepted <- struct{}{}
 }
 func (c *acceptedConnections) counts() (int, int, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.total, len(c.live), c.max
 }
+func (c *acceptedConnections) error() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.observationError
+}
 
 func nativeBoundedWebhook(t *testing.T) (string, *tls.Config, *acceptedConnections, func()) {
+	return nativeBoundedWebhookWithStateHook(t, nil)
+}
+func nativeBoundedWebhookWithStateHook(t *testing.T, beforeState func(net.Conn, http.ConnState)) (string, *tls.Config, *acceptedConnections, func()) {
 	t.Helper()
 	certificate, key, err := GenerateSelfSignedCert("localhost", []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")})
 	must(t, err)
@@ -66,7 +102,12 @@ func nativeBoundedWebhook(t *testing.T) (string, *tls.Config, *acceptedConnectio
 	server := NewAdmissionWebhookServer(ServerConfig{ListenAddr: address, TLSCertBytes: certificate, TLSKeyBytes: key})
 	server.server.ErrorLog = log.New(io.Discard, "", 0)
 	counts := newAcceptedConnections()
-	server.server.ConnState = counts.state
+	server.server.ConnState = func(connection net.Conn, state http.ConnState) {
+		if beforeState != nil {
+			beforeState(connection, state)
+		}
+		counts.state(connection, state)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- server.Start(ctx) }()
@@ -107,6 +148,9 @@ func waitAccepted(t *testing.T, counts *acceptedConnections) {
 	t.Helper()
 	select {
 	case <-counts.accepted:
+		if err := counts.error(); err != nil {
+			t.Fatal(err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("actual native connection was not accepted")
 	}
