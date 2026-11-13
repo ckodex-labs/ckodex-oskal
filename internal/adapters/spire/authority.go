@@ -3,7 +3,7 @@ package spire
 import (
 	"context"
 	"fmt"
-	"strings"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 )
@@ -57,22 +57,17 @@ func (r *SpireAuthorityResolver) ValidateIdentity(auth assurance.AuthorityRef) e
 		return fmt.Errorf("unsupported identity scheme: %s; expected spiffe", auth.Scheme)
 	}
 
-	canonical := auth.Canonical()
-	if !strings.HasPrefix(canonical, "spiffe://") {
-		return fmt.Errorf("invalid SPIFFE URI format: %s", canonical)
+	id, err := spiffeid.FromString(auth.Canonical())
+	if err != nil || id.Path() == "" {
+		return fmt.Errorf("invalid workload SPIFFE ID: %s", auth.Canonical())
 	}
-
-	// Extract trust domain
-	trimmed := strings.TrimPrefix(canonical, "spiffe://")
-	parts := strings.SplitN(trimmed, "/", 2)
-	if len(parts) == 0 || parts[0] == "" {
-		return fmt.Errorf("missing trust domain in SPIFFE ID: %s", canonical)
+	trustDomain := id.TrustDomain().String()
+	if auth.TrustDomain != "" && auth.TrustDomain != trustDomain {
+		return fmt.Errorf("authority trust domain contradicts SPIFFE ID")
 	}
-
-	trustDomain := parts[0]
 	trusted := false
 	for _, td := range r.policy.AllowedTrustDomains {
-		if td == trustDomain || td == "*" {
+		if td == trustDomain {
 			trusted = true
 			break
 		}
