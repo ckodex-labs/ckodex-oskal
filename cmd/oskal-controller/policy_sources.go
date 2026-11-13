@@ -639,9 +639,18 @@ func (g *sourceGroup) followPolicy(ctx context.Context, source preparedSource) {
 	}
 }
 func (g *sourceGroup) runPolicy(ctx context.Context, source preparedSource, batches *policyBatches) error {
+	g.setCaptureTransport(source.spec.ID, "UNAVAILABLE")
+	defer g.setCaptureTransport(source.spec.ID, "UNAVAILABLE")
 	if source.policy.report != nil {
 		config := *source.policy.report
 		config.BeginBatch = batches.begin
+		config.PollCompleted = func(err error) {
+			state := "POLLING"
+			if err != nil {
+				state = "UNAVAILABLE"
+			}
+			g.setCaptureTransport(source.spec.ID, state)
+		}
 		runner, err := policycollection.NewReportsRunner(config)
 		if err != nil {
 			return err
@@ -678,7 +687,8 @@ func (g *sourceGroup) runPolicy(ctx context.Context, source preparedSource, batc
 	defer func() { _ = limited.Close() }()
 	server := &http.Server{Handler: receiver, TLSConfig: source.policy.tls, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: timeout, WriteTimeout: timeout + time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10, ErrorLog: policyHTTPLogger()}
 	done := make(chan error, 1)
-	go func() { done <- server.ServeTLS(limited, "", "") }()
+	serving := &servingPolicyListener{Listener: limited, ready: func() { g.setCaptureTransport(source.spec.ID, "LISTENING") }}
+	go func() { done <- server.ServeTLS(serving, "", "") }()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {

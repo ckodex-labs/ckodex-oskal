@@ -25,10 +25,39 @@ both registries with explicit BOUND_RUNTIME / CAPTURE modes; policy faults
 remain visible without silently changing runtime standing.
 
 A configuration with policy sources and no bound runtime source must explicitly
-set `--enable-webhook=false`. Capture-only mode has no admission standing and
-its runtime readiness remains unavailable even while captures are operational.
+set `--enable-webhook=false`. Capture-only mode has no admission standing.
+Its Kubernetes service readiness becomes available when each OPA listener is
+actually serving TLS or each report source has completed a successful poll.
+This includes valid empty polls and listeners awaiting their first request;
+neither creates an observation or control standing. This separation permits
+Kubernetes Services to route the first OPA delivery. A failed/stopped report
+poller or listener clears service readiness. SAFE_HOLD blocks readiness until
+operator review and restart. Native batch failures and expiry remain visible
+in capture lifecycle even when the listener can accept a recovery batch.
 UNKNOWN policy revisions and Gatekeeper truncation remain explicit in payloads.
 An observer's signature identifies the controller, not the policy publisher.
+
+Readiness verification on 2026-11-13 ran against actual mTLS sockets and an
+explicit isolated Kind kubeconfig. The real empty-report namespace was retained
+as `oskal-capture-empty-gj4jz` (UID
+`89467b78-6832-4580-9a9c-4ac966a7816e`). Actual command and output:
+
+```text
+OSKAL_POLICY_CONTROLLER_KUBECONFIG=/private/tmp/oskal-p1-runtime-evidence/kubeconfig go test -count=1 -race ./cmd/oskal-controller -run 'TestCaptureListener|TestPolicyBatchesCannot|TestCaptureOnly|TestRealEmptyReportPoll' -v
+actual empty report poll: service ready, eligible=0, capture=STARTING, bound runtime sources=0
+--- PASS: TestRealEmptyReportPollReadinessWithoutEvidence (0.09s)
+--- PASS: TestCaptureListenerReadyBeforeFirstDeliveryWithoutControlStanding (0.05s)
+--- PASS: TestPolicyBatchesCannotInvalidateBoundRuntimeEvidence (0.02s)
+--- PASS: TestCaptureOnlySourcesRequireExplicitReadOnlyMode (0.00s)
+PASS
+ok github.com/ckodex-labs/ckodex-oskal/cmd/oskal-controller 1.861s
+exit 0
+```
+
+The listener test authenticated a real TLS request and observed HTTP 405 for
+GET, then readiness becoming unavailable after shutdown. Poll readiness was
+observed after an actual successful empty API list, with zero eligible captures.
+These tests do not prove a deployed Helm release or Kubernetes Service routing.
 
 ## Reports and metadata
 
@@ -43,7 +72,8 @@ verified server certificates, and explicit public CA bytes are required;
 ambient contexts and insecure TLS are not introduced by this source path.
 Each poll starts a new fenced batch. A failed list, decode, metadata lookup,
 signature, or durable write invalidates that batch's eligibility. A successful
-empty list produces no eligible observation and cannot make readiness true.
+empty list produces no eligible observation; successful delivery health is
+reported separately and may make capture-only service readiness true.
 Deletion or replacement cannot keep the previous batch eligible. At most three
 consecutive failed runs are restarted, with one bounded restart owner.
 
