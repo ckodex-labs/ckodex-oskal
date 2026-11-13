@@ -54,3 +54,18 @@ go test -v ./internal/adapters/spire -run '^TestRealWorkloadAPI$'
 Without those variables, the integration test explicitly skips. It never starts a
 fake SPIRE server. The stopped-agent test separately requires
 `OSKAL_SPIRE_UNAVAILABLE_SOCKET` and must run only after the real agent is stopped.
+
+`WorkloadClient.AuthenticatedPeer` revalidates a completed TLS 1.3 peer chain
+against a fresh Workload API bundle and exact allowlist on each operation. It
+also verifies a fresh own SVID and requires a working TLS connection exporter,
+which rejects manually assembled `tls.ConnectionState` values. Exported keying
+material is discarded; it is never returned or logged. Standard TLS
+`VerifiedChains` may be empty when go-spiffe performs custom verification.
+
+`NewPeerPrincipal(client, allowedIDs, stateExtractor)` adapts this check to the
+execution broker. The extractor must read transport-owned TLS state from a
+private request context. Request headers and caller-provided principal strings
+are not identity evidence. Missing TLS state or an unavailable Workload API
+prevents execution. This does not supply immediate peer-registration revocation
+proof: a peer certificate may remain valid until expiry. Lease revocation and
+operation authorization remain separate authoritative checks.
