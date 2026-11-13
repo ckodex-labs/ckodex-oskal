@@ -8,8 +8,11 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -241,10 +244,18 @@ func TestRealTPMSessionTransitions(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if admitted != 1 {
+		// A duplicate may fence the session while the first verification runs
+		// outside the mutex, so zero successful admissions is also safe. The
+		// invariant is single use and terminal fencing, not scheduler ordering.
+		if admitted > 1 {
 			t.Fatalf("challenge accepted %d times", admitted)
 		}
 		requireUnknown(t, f.session, f.start)
+		requireFenced(t, f, f.start)
+		if standing, digest := f.session.Standing(); admitted == 0 && (standing != nil || digest != "") {
+			t.Fatal("a rejected concurrent admission left historical standing")
+		}
+		t.Logf("concurrent duplicate calls: %d successful admissions; terminal UNKNOWN and fenced", admitted)
 	})
 	t.Run("record_replay_is_fenced", func(t *testing.T) {
 		f := newSessionFixture(t, provider, verifier, channel, nil)
@@ -366,4 +377,82 @@ func TestRealTPMSessionTransitions(t *testing.T) {
 		}
 		requireFenced(t, f, f.start)
 	})
+}
+
+func TestRealTPMSessionWatchdogConcurrency(t *testing.T) {
+	provider, verifier := realProvider(t)
+	channel := realTLSBinding(t)
+	started := time.Now()
+	var overlappingSnapshots int
+	var slowestSnapshot time.Duration
+	for trial := range 32 {
+		f := newSessionFixture(t, provider, verifier, channel, nil)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		var admitting atomic.Bool
+		quoteStarted := make(chan struct{})
+		quoteDone := make(chan error, 1)
+		type snapshotResult struct {
+			overlap int
+			slowest time.Duration
+			err     error
+		}
+		snapshotDone := make(chan snapshotResult, 1)
+		go func() {
+			admitting.Store(true)
+			close(quoteStarted)
+			_, err := f.session.AcceptQuote(ctx, f.challenge.ID, f.report, f.proof, f.start)
+			admitting.Store(false)
+			quoteDone <- err
+		}()
+		go func() {
+			<-quoteStarted
+			var result snapshotResult
+			for range 32 {
+				before := time.Now()
+				integrity, err := f.session.Snapshot(f.start)
+				elapsed := time.Since(before)
+				if elapsed > result.slowest {
+					result.slowest = elapsed
+				}
+				if err != nil || integrity.State != assurance.AssuranceStateUnknown {
+					result.err = fmt.Errorf("snapshot before a complete heartbeat window: state=%s error=%v", integrity.State, err)
+					break
+				}
+				if admitting.Load() {
+					result.overlap++
+				}
+				runtime.Gosched()
+			}
+			snapshotDone <- result
+		}()
+		select {
+		case err := <-quoteDone:
+			if err != nil {
+				cancel()
+				t.Fatalf("trial %d quote admission: %v", trial, err)
+			}
+		case <-ctx.Done():
+			cancel()
+			t.Fatalf("trial %d quote admission exceeded test bound", trial)
+		}
+		select {
+		case result := <-snapshotDone:
+			if result.err != nil {
+				cancel()
+				t.Fatal(result.err)
+			}
+			overlappingSnapshots += result.overlap
+			if result.slowest > slowestSnapshot {
+				slowestSnapshot = result.slowest
+			}
+		case <-ctx.Done():
+			cancel()
+			t.Fatalf("trial %d watchdog snapshot exceeded test bound", trial)
+		}
+		cancel()
+		if standing, digest := f.session.Standing(); standing == nil || digest != assurance.ComputeDigest(f.report) {
+			t.Fatalf("trial %d lost successfully verified standing", trial)
+		}
+	}
+	t.Logf("32 real quote admissions with 1024 concurrent snapshots: elapsed=%s max_snapshot_call=%s observed_in_flight_snapshots=%d; scheduling observation, not stalled-verifier or production latency proof", time.Since(started), slowestSnapshot, overlappingSnapshots)
 }
