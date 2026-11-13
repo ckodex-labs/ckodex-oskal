@@ -367,6 +367,9 @@ func (r *ContentAddressedEvidenceRepository) Put(
 	if err := envelopeBounds(envelope); err != nil {
 		return assurance.EvidenceRef{}, err
 	}
+	// Freeze bounded caller-owned maps/slices before serialization or invoking
+	// the payload reader. The indexed object must be this exact admitted copy.
+	envelope = cloneEnvelope(envelope)
 	envelopeData, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
 		return assurance.EvidenceRef{}, fmt.Errorf("failed to serialize evidence envelope: %w", err)
@@ -429,7 +432,7 @@ func (r *ContentAddressedEvidenceRepository) Put(
 	}
 
 	r.blobs[digest] = envelopeData
-	r.envelopes[digest] = cloneEnvelope(envelope)
+	r.envelopes[digest] = envelope
 
 	subURI := envelope.Subject.URI()
 	r.subjectIndex[subURI] = appendUniqueDigest(r.subjectIndex[subURI], digest)
