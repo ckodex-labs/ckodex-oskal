@@ -39,23 +39,26 @@ An observer's signature identifies the controller, not the policy publisher.
 
 Readiness verification on 2026-11-13 ran against actual mTLS sockets and an
 explicit isolated Kind kubeconfig. The real empty-report namespace was retained
-as `oskal-capture-empty-gj4jz` (UID
-`89467b78-6832-4580-9a9c-4ac966a7816e`). Actual command and output:
+as `oskal-capture-empty-22xbh` (UID
+`4af67a8f-3c80-40f1-a15c-d24e5a40eca7`). Actual command and output:
 
 ```text
-OSKAL_POLICY_CONTROLLER_KUBECONFIG=/private/tmp/oskal-p1-runtime-evidence/kubeconfig go test -count=1 -race ./cmd/oskal-controller -run 'TestCaptureListener|TestPolicyBatchesCannot|TestCaptureOnly|TestRealEmptyReportPoll' -v
+OSKAL_POLICY_CONTROLLER_KUBECONFIG=/private/tmp/oskal-p1-runtime-evidence/kubeconfig go test -count=1 -race ./cmd/oskal-controller -run 'TestCaptureListener|TestPolicyBatchesCannot|TestCaptureOnly|TestRealEmptyReportPoll|TestPolicyBatchSafeHold' -v
 actual empty report poll: service ready, eligible=0, capture=STARTING, bound runtime sources=0
---- PASS: TestRealEmptyReportPollReadinessWithoutEvidence (0.09s)
---- PASS: TestCaptureListenerReadyBeforeFirstDeliveryWithoutControlStanding (0.05s)
+--- PASS: TestRealEmptyReportPollReadinessWithoutEvidence (0.08s)
+--- PASS: TestCaptureListenerReadyBeforeFirstDeliveryWithoutControlStanding (0.59s)
 --- PASS: TestPolicyBatchesCannotInvalidateBoundRuntimeEvidence (0.02s)
 --- PASS: TestCaptureOnlySourcesRequireExplicitReadOnlyMode (0.00s)
+--- PASS: TestPolicyBatchSafeHoldCannotBeResetByAnotherDelivery (0.00s)
 PASS
-ok github.com/ckodex-labs/ckodex-oskal/cmd/oskal-controller 1.861s
+ok github.com/ckodex-labs/ckodex-oskal/cmd/oskal-controller 2.580s
 exit 0
 ```
 
-The listener test authenticated a real TLS request and observed HTTP 405 for
-GET, then readiness becoming unavailable after shutdown. Poll readiness was
+The listener test authenticated real TLS requests and observed HTTP 405 for
+GET and HTTP 413 for oversized POST. The latter entered SAFE_HOLD and blocked
+readiness while the listener was still serving, then transport became
+unavailable after shutdown. Poll readiness was
 observed after an actual successful empty API list, with zero eligible captures.
 These tests do not prove a deployed Helm release or Kubernetes Service routing.
 

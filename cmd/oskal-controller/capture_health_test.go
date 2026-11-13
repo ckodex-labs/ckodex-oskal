@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -101,9 +102,27 @@ func TestCaptureListenerReadyBeforeFirstDeliveryWithoutControlStanding(t *testin
 	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("actual mTLS listener was not accepting authenticated traffic: status=%d read=%v close=%v", response.StatusCode, readErr, closeErr)
 	}
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://"+config.Listen+"/logs", bytes.NewReader(make([]byte, opa.MaxCompressedBytes+1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Encoding", "gzip")
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr = io.Copy(io.Discard, response.Body)
+	closeErr = response.Body.Close()
+	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("actual oversized request was not rejected: status=%d read=%v close=%v", response.StatusCode, readErr, closeErr)
+	}
+	if group.Ready(nil) == nil || group.Snapshot()[0].Lifecycle != collection.SourceSafeHold {
+		t.Fatal("serving listener hid SAFE_HOLD behind transport readiness")
+	}
 	cancel()
 	deadline = time.Now().Add(5 * time.Second)
-	for group.Ready(nil) == nil {
+	for group.captureTransport("opa") != "UNAVAILABLE" {
 		if time.Now().After(deadline) {
 			t.Fatal("stopped listener retained service readiness")
 		}
