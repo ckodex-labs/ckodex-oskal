@@ -10,12 +10,15 @@ GO := go
 all: fmt check-ascii lint test build
 
 .PHONY: demo
+DEMO_SOURCE ?= .
+DEMO_TETRAGON_CHART ?=
 demo:
-	$(GO) run ./cmd/demo
+	$(GO) run ./cmd/demo --source "$(DEMO_SOURCE)" --tetragon-chart "$(DEMO_TETRAGON_CHART)"
 
 help:
 	@echo "Available targets:"
 	@echo "  build            Compile oskal CLI and oskal-controller binaries"
+	@echo "  demo             Deploy a fresh Kind controller + Tetragon and verify signed source-loss receipts"
 	@echo "  test             Run all tests with race detector"
 	@echo "  schema-test      Run strict NIST OSCAL v1.2.3 JSON schema validation suite"
 	@echo "  check-ascii      Verify 100% pure ASCII across source and documentation"
