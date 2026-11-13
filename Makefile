@@ -9,6 +9,10 @@ GO := go
 
 all: fmt check-ascii lint test build
 
+.PHONY: demo
+demo:
+	$(GO) run ./cmd/demo
+
 help:
 	@echo "Available targets:"
 	@echo "  build            Compile oskal CLI and oskal-controller binaries"
