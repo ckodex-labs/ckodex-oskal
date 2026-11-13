@@ -7,6 +7,7 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -312,8 +313,8 @@ func TestEvidenceRepository_ListAllAndReceipts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PutReceipt failed: %v", err)
 	}
-	if rcptID != "rcpt-AC-6" {
-		t.Fatalf("expected receipt ID rcpt-AC-6, got %s", rcptID)
+	if len(rcptID) != 69 || !strings.HasPrefix(rcptID, "rcpt-") {
+		t.Fatalf("expected immutable full receipt digest, got %s", rcptID)
 	}
 
 	repoReloaded, err := NewFilesystemEvidenceRepository(tmpDir)

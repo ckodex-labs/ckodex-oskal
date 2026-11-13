@@ -20,10 +20,9 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/diagnostics"
-	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
+	"github.com/ckodex-labs/ckodex-oskal/internal/application/evaluation"
 	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	proj "github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
-	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	"github.com/ckodex-labs/ckodex-oskal/internal/scaffold"
 	"github.com/google/uuid"
 )
@@ -325,10 +324,9 @@ func BuildOSKALManual(opts ManualOptions) UTCPManual {
 					"control": map[string]interface{}{
 						"type":        "string",
 						"description": "Control identifier (e.g. nist-sp-800-53:AC-6)",
-						"default":     "nist-sp-800-53:AC-6",
 					},
 				},
-				"required": []string{"subject"},
+				"required": []string{"subject", "control"},
 			},
 			Outputs: map[string]interface{}{
 				"type": "object",
@@ -437,27 +435,14 @@ func BuildOSKALManual(opts ManualOptions) UTCPManual {
 			Name:        "project_oscal",
 			Description: "Project continuous assurance state into a standard NIST OSCAL v1.2.3 document (AR, CD, SSP, AP, POAM).",
 			Tags:        []string{"oscal", "export", "projection", "ssp", "assessment-results", "poam"},
-			Inputs: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"subject": map[string]interface{}{
-						"type":        "string",
-						"description": "Subject URI",
-					},
-					"document_type": map[string]interface{}{
-						"type":        "string",
-						"description": "Document type: assessment-results, component-definition, ssp, assessment-plan, poam",
-					},
-				},
-				"required": []string{"subject", "document_type"},
-			},
+			Inputs:      proj.ProjectionRequestSchema(),
 			Outputs: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"oscal_json": map[string]interface{}{"type": "string"},
 				},
 			},
-			CallTemplate:        makeTemplate("project_oscal", []string{"subject", "document_type"}, "assurance.services.v1.OSCALProjectionService", "ProjectAssessmentResults"),
+			CallTemplate:        makeTemplate("project_oscal", []string{"subject", "document_type", "projection_context", "control"}, "assurance.services.v1.OSCALProjectionService", "ProjectAssessmentResults"),
 			AverageResponseSize: 8192,
 			RequiredCapability:  "tool:read-evidence",
 		}),
@@ -494,10 +479,9 @@ func BuildOSKALManual(opts ManualOptions) UTCPManual {
 					"control": map[string]interface{}{
 						"type":        "string",
 						"description": "Control ID (e.g. nist-sp-800-53:AC-6)",
-						"default":     "nist-sp-800-53:AC-6",
 					},
 				},
-				"required": []string{"subject"},
+				"required": []string{"subject", "control"},
 			},
 			Outputs: map[string]interface{}{
 				"type": "object",
@@ -638,8 +622,6 @@ type Registry struct {
 	evidenceDir string
 	broker      ports.ExecutionBroker
 	validator   *proj.Validator
-	projector   *proj.Projector
-	explainer   *explain.Explainer
 }
 
 // NewRegistry creates a UTCP Registry pre-populated with the built-in OSKAL UTCP manual.
@@ -656,8 +638,6 @@ func NewRegistry(evidenceDir string, broker ports.ExecutionBroker) (*Registry, e
 		evidenceDir: evidenceDir,
 		broker:      broker,
 		validator:   val,
-		projector:   proj.NewProjector(),
-		explainer:   explain.NewExplainer(),
 	}
 	defaultManual := BuildOSKALManual(DefaultManualOptions())
 	_ = r.registerManualInternal("oskal", defaultManual)
@@ -1369,19 +1349,19 @@ func (r *Registry) CallTool(
 	}, nil
 }
 
-func (r *Registry) loadSubjectEnvelopes(ctx context.Context, sub assurance.SubjectRef) []assurance.EvidenceEnvelope {
+func (r *Registry) loadSubjectEnvelopes(ctx context.Context, sub assurance.SubjectRef) ([]assurance.EvidenceEnvelope, error) {
 	if r.evidenceDir == "" {
-		return nil
+		return nil, nil
 	}
-	repo, err := storage.NewFilesystemEvidenceRepository(r.evidenceDir)
+	repo, err := storage.OpenFilesystemEvidenceRepository(r.evidenceDir)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	envelopes, err := repo.ListBySubject(ctx, sub)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return envelopes
+	return envelopes, nil
 }
 
 func countEpochDivergences(envelopes []assurance.EvidenceEnvelope) int {
@@ -1428,145 +1408,24 @@ func countEpochDivergences(envelopes []assurance.EvidenceEnvelope) int {
 }
 
 func (r *Registry) buildEvaluation(sub assurance.SubjectRef, ctrl assurance.ControlRef, envelopes []assurance.EvidenceEnvelope) assurance.ClaimEvaluation {
-	now := time.Now().UTC()
-	var validEnvelopes []assurance.EvidenceEnvelope
-	isStale := false
-	isViolation := false
-	for _, env := range envelopes {
-		if env.CapturedAt.IsZero() || env.CapturedAt.After(now.Add(1*time.Minute)) {
-			continue
-		}
-		if assurance.IsAdverseObservationType(env.ObservationType) {
-			isViolation = true
-		}
-		if now.Sub(env.CapturedAt) > DefaultFreshnessWindow {
-			isStale = true
-		}
-		validEnvelopes = append(validEnvelopes, env)
-	}
-	if len(validEnvelopes) == 0 {
-		return assurance.ClaimEvaluation{
-			ID:           fmt.Sprintf("eval-unknown-%s", ctrl.ID),
-			Subject:      sub,
-			Control:      ctrl,
-			State:        assurance.AssuranceStateUnknown,
-			Epoch:        assurance.AssuranceEpoch{SubjectDigest: assurance.ComputeStringDigest(sub.URI())},
-			Completeness: assurance.EvidenceCompleteness{Required: 1, Verified: 0, Missing: 1},
-			EvaluatedAt:  now,
-		}
-	}
-	var evRefs []assurance.EvidenceRef
-	for _, env := range validEnvelopes {
-		evRefs = append(evRefs, env.Artifact)
-	}
-	evRoot := receipts.ComputeEvidenceRoot(evRefs)
-	state := assurance.AssuranceStateAssured
-	comp := assurance.EvidenceCompleteness{Required: len(evRefs), Present: len(evRefs), Verified: len(evRefs)}
-	if isViolation {
-		state = assurance.AssuranceStateFailed
-		comp = assurance.EvidenceCompleteness{Required: len(evRefs), Present: len(evRefs), Verified: 0, Missing: 1}
-	} else if isStale {
-		state = assurance.AssuranceStateStale
-		comp = assurance.EvidenceCompleteness{Required: len(evRefs), Present: len(evRefs), Verified: 0, Stale: len(evRefs)}
-	}
-	return assurance.ClaimEvaluation{
-		ID:      fmt.Sprintf("eval-%s", ctrl.ID),
-		Subject: sub,
-		Control: ctrl,
-		State:   state,
-		Epoch: assurance.AssuranceEpoch{
-			SubjectDigest:        assurance.ComputeStringDigest(sub.URI()),
-			ImplementationDigest: assurance.ComputeStringDigest("kubernetes:admission-policy"),
-			PolicyDigest:         assurance.ComputeStringDigest(sub.URI() + ":" + evRoot),
-			AuthorityDigest:      assurance.ComputeStringDigest("spiffe://assurance.ckodex.io/operator"),
-			EnvironmentDigest:    assurance.ComputeStringDigest("cluster:local"),
-		},
-		Evidence:     evRefs,
-		Completeness: comp,
-		EvidenceRoot: evRoot,
-		EvaluatedAt:  now,
-		ValidUntil:   now.Add(5 * time.Minute),
-	}
+	return evaluation.UnverifiedEvaluation(sub, ctrl, envelopes, time.Now().UTC())
 }
 
 func (r *Registry) executeNativeTool(ctx context.Context, tool Tool, args map[string]interface{}) (interface{}, error) {
 	switch tool.Name {
 	case "get_assurance_state":
-		subRaw, _ := args["subject"].(string)
-		if subRaw == "" {
-			return nil, errors.New("subject argument is required")
+		raw, _ := args["subject"].(string)
+		if raw == "" {
+			return nil, fmt.Errorf("subject argument is required")
 		}
-		sub := parseSubjectRef(subRaw)
-		ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-		envelopes := r.loadSubjectEnvelopes(ctx, sub)
-		eval := r.buildEvaluation(sub, ctrl, envelopes)
-
-		switch eval.State {
-		case assurance.AssuranceStateAssured:
-			return map[string]interface{}{
-				"subject":       sub.URI(),
-				"state":         "ASSURED",
-				"status":        "Verified evidence present in CAS",
-				"evidence_root": eval.EvidenceRoot,
-				"freshness":     "current",
-				"vector_state": map[string]string{
-					"presence":  "PRESENT",
-					"valence":   "POSITIVE",
-					"coherence": "COHERENT",
-					"evidence":  "VERIFIED",
-					"lifecycle": "ACTIVE",
-				},
-				"last_evaluated": eval.EvaluatedAt.Format(time.RFC3339),
-			}, nil
-		case assurance.AssuranceStateFailed:
-			return map[string]interface{}{
-				"subject":       sub.URI(),
-				"state":         "FAILED",
-				"status":        "Adverse or violation evidence observed in CAS",
-				"evidence_root": eval.EvidenceRoot,
-				"freshness":     "current",
-				"vector_state": map[string]string{
-					"presence":  "PRESENT",
-					"valence":   "NEGATIVE",
-					"coherence": "DECOHERENT",
-					"evidence":  "VERIFIED",
-					"lifecycle": "DEGRADED",
-				},
-				"last_evaluated": eval.EvaluatedAt.Format(time.RFC3339),
-			}, nil
-		case assurance.AssuranceStateStale:
-			return map[string]interface{}{
-				"subject":       sub.URI(),
-				"state":         "STALE",
-				"status":        "Evidence in CAS exceeded maximum freshness window",
-				"evidence_root": eval.EvidenceRoot,
-				"freshness":     "stale",
-				"vector_state": map[string]string{
-					"presence":  "PRESENT",
-					"valence":   "MIXED",
-					"coherence": "COHERENT",
-					"evidence":  "STALE",
-					"lifecycle": "DEGRADED",
-				},
-				"last_evaluated": eval.EvaluatedAt.Format(time.RFC3339),
-			}, nil
-		default:
-			return map[string]interface{}{
-				"subject":       sub.URI(),
-				"state":         "UNKNOWN",
-				"status":        "Absence of verified evidence (Section 15: EMPTY != NEGATIVE)",
-				"evidence_root": "none",
-				"freshness":     "unknown",
-				"vector_state": map[string]string{
-					"presence":  "EMPTY",
-					"valence":   "NEUTRAL",
-					"coherence": "COHERENT",
-					"evidence":  "UNKNOWN",
-					"lifecycle": "UNKNOWN",
-				},
-				"last_evaluated": eval.EvaluatedAt.Format(time.RFC3339),
-			}, nil
+		sub := parseSubjectRef(raw)
+		envelopes, err := r.loadSubjectEnvelopes(ctx, sub)
+		if err != nil {
+			return nil, err
 		}
+		eval := r.buildEvaluation(sub, assurance.ControlRef{}, envelopes)
+		state := map[string]any{"subject": sub.URI(), "state": "UNKNOWN", "status": "Supplied material is unverified; no authoritative contract, producer verification or current epoch was supplied", "evidence_root": "", "freshness": "UNKNOWN", "supplied_envelopes": eval.Completeness.Present, "verified_envelopes": 0, "vector_state": map[string]string{"presence": materialPresence(envelopes), "valence": "NEUTRAL", "coherence": "UNKNOWN", "evidence": "UNKNOWN", "lifecycle": "UNKNOWN"}}
+		return state, nil
 
 	case "explain_claim":
 		subRaw, _ := args["subject"].(string)
@@ -1574,26 +1433,22 @@ func (r *Registry) executeNativeTool(ctx context.Context, tool Tool, args map[st
 			return nil, errors.New("subject argument is required")
 		}
 		sub := parseSubjectRef(subRaw)
-		ctrlID := "AC-6"
-		ctrlNS := "nist-sp-800-53"
-		if rawCtrl, ok := args["control"].(string); ok && rawCtrl != "" {
-			parts := strings.SplitN(rawCtrl, ":", 2)
-			if len(parts) == 2 {
-				ctrlNS = parts[0]
-				ctrlID = parts[1]
-			} else {
-				ctrlID = rawCtrl
-			}
+		rawControl, _ := args["control"].(string)
+		ctrl, err := evaluation.ParseControlReference(rawControl)
+		if err != nil {
+			return nil, err
 		}
-		ctrl := assurance.ControlRef{Namespace: ctrlNS, ID: ctrlID}
-		envelopes := r.loadSubjectEnvelopes(ctx, sub)
+		envelopes, err := r.loadSubjectEnvelopes(ctx, sub)
+		if err != nil {
+			return nil, err
+		}
 		eval := r.buildEvaluation(sub, ctrl, envelopes)
-		graph := r.explainer.BuildExplainGraph(ctx, sub, ctrl, eval)
+		explanation := evaluation.UnverifiedExplanation(eval)
 		return map[string]interface{}{
 			"subject":         sub.URI(),
 			"control":         ctrl.Canonical(),
-			"assurance_state": graph.AssuranceState.String(),
-			"rendered_text":   graph.RenderText(),
+			"assurance_state": eval.State.String(),
+			"rendered_text":   explanation,
 		}, nil
 
 	case "validate_oscal":
@@ -1609,60 +1464,18 @@ func (r *Registry) executeNativeTool(ctx context.Context, tool Tool, args map[st
 		return report, nil
 
 	case "detect_drift":
-		subRaw, _ := args["subject"].(string)
-		if subRaw == "" {
-			return nil, errors.New("subject argument is required")
+		raw, _ := args["subject"].(string)
+		if raw == "" {
+			return nil, fmt.Errorf("subject argument is required")
 		}
-		sub := parseSubjectRef(subRaw)
-		ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-		envelopes := r.loadSubjectEnvelopes(ctx, sub)
-		eval := r.buildEvaluation(sub, ctrl, envelopes)
-		epochDriftDims := countEpochDivergences(envelopes)
-		if epochDriftDims > 0 && eval.State == assurance.AssuranceStateAssured {
-			return map[string]interface{}{
-				"subject":          sub.URI(),
-				"status":           "DECOHERENT",
-				"assurance_status": "FAILED",
-				"drift_dimensions": epochDriftDims,
-				"reason":           "Epoch digest divergence detected across active evidence envelopes",
-			}, nil
+		sub := parseSubjectRef(raw)
+		envelopes, err := r.loadSubjectEnvelopes(ctx, sub)
+		if err != nil {
+			return nil, err
 		}
-		switch eval.State {
-		case assurance.AssuranceStateAssured:
-			return map[string]interface{}{
-				"subject":          sub.URI(),
-				"status":           "IN_SYNC",
-				"assurance_status": "ASSURED",
-				"drift_dimensions": 0,
-			}, nil
-		case assurance.AssuranceStateFailed:
-			dims := epochDriftDims
-			if dims == 0 {
-				dims = 1
-			}
-			return map[string]interface{}{
-				"subject":          sub.URI(),
-				"status":           "DECOHERENT",
-				"assurance_status": "FAILED",
-				"drift_dimensions": dims,
-				"reason":           "Adverse or violation evidence observed in CAS",
-			}, nil
-		case assurance.AssuranceStateStale:
-			return map[string]interface{}{
-				"subject":          sub.URI(),
-				"status":           "DRIFT_DETECTED",
-				"assurance_status": "STALE",
-				"drift_dimensions": 1,
-			}, nil
-		default:
-			return map[string]interface{}{
-				"subject":          sub.URI(),
-				"status":           "UNKNOWN",
-				"assurance_status": "UNKNOWN",
-				"drift_dimensions": 0,
-				"reason":           "Absence of verified baseline evidence",
-			}, nil
-		}
+		dimensions := countEpochDivergences(envelopes)
+		result := map[string]any{"subject": sub.URI(), "status": "UNKNOWN", "assurance_status": "UNKNOWN", "raw_metadata_divergence_dimensions": dimensions, "reason": "Unverified material is not an authoritative current baseline"}
+		return result, nil
 
 	case "scaffold_compliance":
 		profile, _ := args["profile"].(string)
@@ -1685,56 +1498,35 @@ func (r *Registry) executeNativeTool(ctx context.Context, tool Tool, args map[st
 		}, nil
 
 	case "project_oscal":
-		subRaw, _ := args["subject"].(string)
-		docType, _ := args["document_type"].(string)
-		if subRaw == "" || docType == "" {
-			return nil, errors.New("subject and document_type arguments are required")
+		raw, err := json.Marshal(args)
+		if err != nil {
+			return nil, err
 		}
-		sub := parseSubjectRef(subRaw)
-		ctrl := assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"}
-		envelopes := r.loadSubjectEnvelopes(ctx, sub)
-		eval := r.buildEvaluation(sub, ctrl, envelopes)
-
-		var projected []byte
-		var err error
-		normDoc, _ := proj.NormalizeDocumentType(docType)
-		switch normDoc {
-		case proj.DocTypeAssessmentResults:
-			projected, err = r.projector.ProjectAssessmentResults(ctx, sub, []assurance.ClaimEvaluation{eval}, nil)
-		case proj.DocTypeComponentDefinition:
-			projected, err = r.projector.ProjectComponentDefinition(ctx, sub.ID, []assurance.ClaimEvaluation{eval})
-		case proj.DocTypeSSP:
-			projected, err = r.projector.ProjectSSP(ctx, sub.ID, []assurance.ClaimEvaluation{eval})
-		case proj.DocTypeAssessmentPlan:
-			contract := assurance.EvidenceContract{
-				ID: fmt.Sprintf("contract-%s", sub.ID),
-				Requirements: []assurance.EvidenceRequirement{
-					{ID: "req-1", EvidenceType: "admission", Required: true, MaxAge: DefaultFreshnessWindow},
-				},
-			}
-			projected, err = r.projector.ProjectAssessmentPlan(ctx, sub, contract, []assurance.ControlRef{ctrl})
-		case proj.DocTypePOAM:
-			var findings []assurance.Finding
-			if eval.State != assurance.AssuranceStateAssured {
-				findings = append(findings, assurance.Finding{
-					ID:           fmt.Sprintf("finding-%s-%s", ctrl.ID, strings.ToLower(eval.State.String())),
-					Subject:      sub,
-					Control:      ctrl,
-					Severity:     "HIGH",
-					Title:        fmt.Sprintf("Control %s Assurance State is %s", ctrl.Canonical(), eval.State),
-					Description:  fmt.Sprintf("Subject %s does not have current verified evidence for %s.", sub.URI(), ctrl.Canonical()),
-					DiscoveredAt: eval.EvaluatedAt,
-				})
-			}
-			projected, err = r.projector.ProjectPOAM(ctx, sub, findings)
-		default:
-			return nil, fmt.Errorf("unsupported OSCAL projection document type: %s", docType)
+		request, err := proj.DecodeProjectionRequest(raw)
+		if err != nil {
+			return nil, err
 		}
+		sub, err := request.SubjectRef()
+		if err != nil {
+			return nil, err
+		}
+		controls, err := request.ControlRefs()
+		if err != nil {
+			return nil, err
+		}
+		envelopes, err := r.loadSubjectEnvelopes(ctx, sub)
+		if err != nil {
+			return nil, err
+		}
+		var evaluations []assurance.ClaimEvaluation
+		for _, control := range controls {
+			evaluations = append(evaluations, evaluation.UnverifiedEvaluation(sub, control, envelopes, time.Now().UTC()))
+		}
+		projected, err := request.Project(ctx, evaluations)
 		if err != nil {
 			return nil, err
 		}
 		return json.RawMessage(projected), nil
-
 	case "run_doctor":
 		return diagnostics.RunDoctor(ctx, r.evidenceDir), nil
 
@@ -1744,19 +1536,15 @@ func (r *Registry) executeNativeTool(ctx context.Context, tool Tool, args map[st
 			return nil, errors.New("subject argument is required")
 		}
 		sub := parseSubjectRef(subRaw)
-		ctrlID := "AC-6"
-		ctrlNS := "nist-sp-800-53"
-		if rawCtrl, ok := args["control"].(string); ok && rawCtrl != "" {
-			parts := strings.SplitN(rawCtrl, ":", 2)
-			if len(parts) == 2 {
-				ctrlNS = parts[0]
-				ctrlID = parts[1]
-			} else {
-				ctrlID = rawCtrl
-			}
+		rawControl, _ := args["control"].(string)
+		ctrl, err := evaluation.ParseControlReference(rawControl)
+		if err != nil {
+			return nil, err
 		}
-		ctrl := assurance.ControlRef{Namespace: ctrlNS, ID: ctrlID}
-		envelopes := r.loadSubjectEnvelopes(ctx, sub)
+		envelopes, err := r.loadSubjectEnvelopes(ctx, sub)
+		if err != nil {
+			return nil, err
+		}
 		eval := r.buildEvaluation(sub, ctrl, envelopes)
 		return diagnostics.InspectSubject(ctx, sub, eval, envelopes), nil
 
@@ -2154,7 +1942,7 @@ func (s *HTTPServer) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	return withTransportTLS(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
 				w.Header().Set("Content-Type", "application/json")
@@ -2182,7 +1970,7 @@ func (s *HTTPServer) Handler() http.Handler {
 		}
 
 		mux.ServeHTTP(w, req)
-	})
+	}))
 }
 
 // SDKBundle holds generated configuration and integration code for all official UTCP SDKs.
@@ -2370,4 +2158,11 @@ asyncio.run(main())`, trimmedBase),
 }`, binaryPath),
 		},
 	}
+}
+
+func materialPresence(envelopes []assurance.EvidenceEnvelope) string {
+	if len(envelopes) > 0 {
+		return "PRESENT"
+	}
+	return "EMPTY"
 }

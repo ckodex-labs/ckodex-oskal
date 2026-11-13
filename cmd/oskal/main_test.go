@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,41 +49,14 @@ func TestCLI_AssuranceExplain(t *testing.T) {
 	}
 }
 
-func TestCLI_ExportOSCAL(t *testing.T) {
-	// 1. assessment-results
-	cmdAR := NewRootCommand()
-	bufAR := new(bytes.Buffer)
-	cmdAR.SetOut(bufAR)
-	cmdAR.SetArgs([]string{"export", "assessment-results", "--subject", "k8s://prod/payments/Deployment/payments-api"})
-	if err := cmdAR.Execute(); err != nil {
-		t.Fatalf("unexpected error exporting assessment results: %v", err)
-	}
-
-	// 2. component-definition
-	cmdCD := NewRootCommand()
-	bufCD := new(bytes.Buffer)
-	cmdCD.SetOut(bufCD)
-	cmdCD.SetArgs([]string{"export", "component-definition", "--component", "payments-api"})
-	if err := cmdCD.Execute(); err != nil {
-		t.Fatalf("unexpected error exporting component definition: %v", err)
-	}
-
-	// 3. assessment-plan
-	cmdAP := NewRootCommand()
-	bufAP := new(bytes.Buffer)
-	cmdAP.SetOut(bufAP)
-	cmdAP.SetArgs([]string{"export", "assessment-plan", "--subject", "k8s://prod/payments/Deployment/payments-api"})
-	if err := cmdAP.Execute(); err != nil {
-		t.Fatalf("unexpected error exporting assessment plan: %v", err)
-	}
-
-	// 4. poam
-	cmdPOAM := NewRootCommand()
-	bufPOAM := new(bytes.Buffer)
-	cmdPOAM.SetOut(bufPOAM)
-	cmdPOAM.SetArgs([]string{"export", "poam", "--subject", "k8s://prod/payments/Deployment/payments-api"})
-	if err := cmdPOAM.Execute(); err != nil {
-		t.Fatalf("unexpected error exporting poam: %v", err)
+func TestCLI_ExportOSCALRequiresExplicitContext(t *testing.T) {
+	cmd := NewRootCommand()
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetArgs([]string{"export", "assessment-results", "--subject", "k8s://example/Pod/material", "--control", "example:observed"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "projection-context") {
+		t.Fatalf("missing OSCAL context was accepted: %v", err)
 	}
 }
 
@@ -135,7 +109,7 @@ func TestCLI_Inspect(t *testing.T) {
 	buf := new(bytes.Buffer)
 	cmd.SetOut(buf)
 	cmd.SetErr(buf)
-	cmd.SetArgs([]string{"inspect", "k8s://prod/payments/Deployment/payments-api", "--output", "tree"})
+	cmd.SetArgs([]string{"inspect", "k8s://prod/payments/Deployment/payments-api", "--output", "tree", "--control", "example:observed"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("unexpected error executing inspect: %v", err)
@@ -209,6 +183,9 @@ func TestCLI_Config(t *testing.T) {
 
 func TestCLI_Prune(t *testing.T) {
 	tmpDir := t.TempDir()
+	if _, err := storage.NewFilesystemEvidenceRepository(tmpDir); err != nil {
+		t.Fatal(err)
+	}
 	cmdPrune := NewRootCommand()
 	bufPrune := new(bytes.Buffer)
 	cmdPrune.SetOut(bufPrune)
@@ -325,7 +302,7 @@ func TestCLI_UTCPCommands(t *testing.T) {
 	cmdFlags.SetArgs([]string{
 		"utcp", "call", "explain_claim",
 		"--subject", "k8s://prod/payments/Deployment/payments-api",
-		"--control", "UTCP_ARG_control_UTCP_END",
+		"--control", "example:observed",
 	})
 	if err := cmdFlags.Execute(); err != nil {
 		t.Fatalf("utcp call with --<key> flags failed: %v", err)

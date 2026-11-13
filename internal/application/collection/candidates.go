@@ -79,8 +79,8 @@ type Candidates struct {
 var _ ports.EvidenceRepository = (*Candidates)(nil)
 
 func NewCandidates(archive ports.EvidenceRepository, configs []SourceConfig, maxPerSource int) (*Candidates, error) {
-	if archive == nil || len(configs) == 0 || len(configs) > MaxSources || maxPerSource <= 0 || maxPerSource > MaxCandidatesPerSource {
-		return nil, fmt.Errorf("archive, 1..%d sources and 1..%d candidates per source are required", MaxSources, MaxCandidatesPerSource)
+	if archive == nil || len(configs) > MaxSources || maxPerSource <= 0 || maxPerSource > MaxCandidatesPerSource {
+		return nil, fmt.Errorf("archive, 0..%d sources and 1..%d candidates per source are required", MaxSources, MaxCandidatesPerSource)
 	}
 	c := &Candidates{archive: archive, sources: make(map[string]*source), limit: maxPerSource}
 	for _, config := range configs {
