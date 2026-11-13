@@ -58,8 +58,13 @@ func (c *Collector) Run(ctx context.Context) error {
 }
 
 func (c *Collector) capture(event *observerapi.GetFlowsResponse) (*ports.CapturedEvent, error) {
+	if event != nil {
+		if _, lost := event.ResponseTypes.(*observerapi.GetFlowsResponse_LostEvents); lost {
+			return nil, fmt.Errorf("hubble reported lost events; source visibility is incomplete")
+		}
+	}
 	if event == nil || event.GetFlow() == nil {
-		return nil, nil // Relay status and loss notifications are not workload facts.
+		return nil, nil // Relay status is not a workload fact.
 	}
 	f := event.GetFlow()
 	source := f.GetSource()

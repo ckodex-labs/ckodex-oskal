@@ -1,13 +1,13 @@
 # Phase 1 runtime capture evidence
 
-Observed and verified locally on 2026-11-12. This record covers real runtime
+Observed and verified locally on 2026-11-12 and 2026-11-13. This record covers real runtime
 subscriptions and storage, not a deployed OSKAL controller or production trust.
 
 ## Execution path
 
 ```text
 Tetragon FineGuidanceSensors.GetEvents (mTLS)
-  or Hubble Observer.GetFlows (Kubernetes-authorized loopback port-forward)
+  or Hubble Observer.GetFlows (mTLS through a Kubernetes-authorized port-forward)
 → official generated protobuf messages
 → namespace, identity, verdict/UID and timestamp validation
 → synchronous CapturedEventWriter (4 MiB bound)
@@ -24,13 +24,26 @@ assurance promotion. The epoch resolver is an application port: production wirin
 must supply the same epoch authority as reconciliation, rather than constructing
 an epoch from the subject URI. The live test uses the current API Pod digest.
 
-Tetragon nonroot executions are individual `workload.runtime.process.nonroot`
-facts. Root executions are `workload.runtime.process.violation` facts. Neither
-proves all executions were observed. Hubble forwarded and dropped packets remain
+Tetragon's official `Process.uid` field is the effective user ID used for
+permission checks (mapped to `ProcessCredentials.euid` in the generated SDK).
+Individual observations are `workload.runtime.process.euid.nonroot` or
+`workload.runtime.process.euid.root`, under the narrow `runtime.process-uid`
+control reference. Root execution is a fact; policy determines whether it is
+prohibited. A nonroot effective UID does not prove capabilities are restricted,
+least privilege, or that all executions were observed. Hubble forwarded and dropped packets remain
 `network.flow.observed`; neither establishes default-deny isolation. An isolation
 contract evaluated against these observations remained UNKNOWN in the live test.
-No events produce no evidence. Continuous coverage/loss guarantees are outside
-this capture claim.
+No events produce no evidence. An explicit Hubble `LostEvents` stream message
+terminates collection with an error so the source owner can downgrade availability.
+It cannot silently establish complete visibility. Continuous coverage, loss-window
+accounting and loss metrics remain outside this capture claim.
+
+Unused legacy `TetragonObserver`/`CiliumObserver` APIs were retired after a
+repository-wide caller inventory found only tests. Those APIs constructed
+digest-only envelopes from caller-supplied booleans and process structs without
+retaining their payload. Their former composition test's fabricated VERIFIED and
+ASSURED claim was replaced with a missing-runtime/isolation UNKNOWN assertion.
+The real SDK mapping and live storage tests remain.
 
 ## Versions and dependency consequence
 
@@ -65,18 +78,45 @@ runtime image IDs were:
 | Hubble relay | `sha256:cb23408209697ed30d2bc462e1f01eb622ea4423a891458f78bc88d7255bbfc1` |
 | Tetragon | `sha256:5ed9088a1582131d71b06c98e0d549a37a71ae63ab13aabefc7a47553c822a9d` |
 
-The final live test returned exit 0, including stream cancellation, real API
+The initial 2026-11-12 run used plaintext Hubble gRPC through a Kubernetes-authorized
+loopback port-forward, with `disable-server-tls: true` in the relay configuration.
+That historical output remains in `live-test-final.log`; it did not prove Hubble
+mTLS. The isolated cluster was then upgraded with the exact official Cilium
+1.20.4 chart settings:
+
+```yaml
+hubble:
+  tls:
+    enabled: true
+  relay:
+    tls:
+      server:
+        enabled: true
+        mtls: true
+```
+
+The chart's `_extensions.tpl` configures `tls-relay-client-ca-files` using the
+relay's mounted `hubble-server-ca.crt`. The generated server certificate has SAN
+`*.hubble-relay.cilium.io`. A dedicated client certificate was signed by this
+isolated cluster's CA and provided with explicit roots and server name
+`oskal.hubble-relay.cilium.io`. The service changed from port 80 to port 443;
+the explicit loopback port-forward now targets 443. These options are defined in
+the [versioned official chart values](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/values.yaml).
+
+The final 2026-11-13 live test returned exit 0, including stream cancellation, real API
 identity resolution, persisted payload verification and the isolation UNKNOWN
-check:
+check. Both actual source APIs rejected a missing client certificate with
+`tls: certificate required` and rejected an incorrect server name with an x509
+SAN validation error before successful authenticated capture:
 
 ```text
-captured real workload.runtime.process.nonroot
+captured real workload.runtime.process.euid.nonroot
   subject=k8s://oskal-runtime-test/Pod/capture-workload
-  artifact=sha256:ec75cd514fc695255238e2686f855ef6d6904ed85c39a981010b1978c69e667c
+  artifact=sha256:5fc3d70e7b1b1998de064aed9a6a2803452a1d1f04c8bc752842f37869361116
 captured real network.flow.observed
   subject=k8s://oskal-runtime-test/Pod/capture-workload
-  artifact=sha256:9f6a9cd69aca6a6ba0ed32bba806146c77b9863a57c6e2c99e58c21373b2a25c
---- PASS: TestLiveRuntimeCapture (3.15s)
+  artifact=sha256:a92ac9712d61dfc3e82916acc95053c671a5d96619cb8000ef1f6efbead8175f
+--- PASS: TestLiveRuntimeCapture (2.51s)
 PASS
 ```
 
@@ -92,17 +132,21 @@ No source timestamp was rewritten and no clock setting was changed.
 
 `TestLiveRuntimeCapture` skips unless `OSKAL_LIVE_KUBECONFIG` is explicitly set.
 It also requires `OSKAL_LIVE_NAMESPACE`, `OSKAL_LIVE_POD`,
-`OSKAL_LIVE_TETRAGON_ENDPOINT`, `OSKAL_LIVE_HUBBLE_ENDPOINT`, and the explicit
-Tetragon CA/certificate/key file paths in `OSKAL_LIVE_TETRAGON_{CA,CERT,KEY}`.
+`OSKAL_LIVE_TETRAGON_ENDPOINT`, `OSKAL_LIVE_HUBBLE_ENDPOINT`, and explicit
+CA/certificate/key file paths and server names for both sources:
+`OSKAL_LIVE_TETRAGON_{CA,CERT,KEY,SERVER_NAME}` and
+`OSKAL_LIVE_HUBBLE_{CA,CERT,KEY,SERVER_NAME}`. Partial TLS configuration fails;
+there is no plaintext or insecure verification fallback.
 `OSKAL_LIVE_EVIDENCE_DIR` selects retained CAS output. Run:
 
 ```sh
 go test -race -count=1 -run TestLiveRuntimeCapture -v ./internal/application/ingestion
 ```
 
-The test's Tetragon certificate requires the SAN
-`test.tetragon-grpc.cilium.io`; its loopback Hubble endpoint uses Kubernetes
-port-forward authorization. This setup does not verify production SPIFFE peer
+The test uses server names `test.tetragon-grpc.cilium.io` and
+`oskal.hubble-relay.cilium.io`, verified against the respective certificate SANs.
+Its loopback Hubble endpoint additionally uses Kubernetes port-forward
+authorization. This setup does not verify production SPIFFE peer
 authorization or production source availability enforcement.
 
 Local logs, manifests, image identities and CAS payloads are retained under
