@@ -106,7 +106,8 @@ func TestAirGapAcceptanceWithoutPublicNetwork(t *testing.T) {
 		ValidUntil:   now.Add(10 * time.Minute),
 	}
 
-	projector := oscal.NewProjector()
+	// Explicit projection example; this test does not resolve the imported plan.
+	projector := oscal.NewProjectorWithContext(oscal.ProjectionContext{AssessmentPlanHref: "example-assessment-plan.json", ControlNamespace: eval.Control.Namespace, ControlVersion: eval.Control.Version})
 	oscalJSON, err := projector.ProjectAssessmentResults(context.Background(), sub, []assurance.ClaimEvaluation{eval}, nil)
 	if err != nil {
 		t.Fatalf("failed to project local OSCAL assessment results: %v", err)

@@ -97,7 +97,8 @@ func TestShieldAIModelAssuranceEvaluation(t *testing.T) {
 		ValidUntil:   now.Add(24 * time.Hour),
 	}
 
-	projector := oscal.NewProjector()
+	// Explicit projection example; this test does not resolve the imported plan.
+	projector := oscal.NewProjectorWithContext(oscal.ProjectionContext{AssessmentPlanHref: "example-assessment-plan.json", ControlNamespace: "ckodex"})
 	oscalData, err := projector.ProjectAssessmentResults(context.Background(), subject, []assurance.ClaimEvaluation{eval}, nil)
 	if err != nil {
 		t.Fatalf("failed to project AI model assessment into OSCAL: %v", err)

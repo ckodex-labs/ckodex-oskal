@@ -29,7 +29,8 @@ func TestMCPServerLifecycleAndTools(t *testing.T) {
 	// 3. tools/list
 	listReq := `{"jsonrpc":"2.0","id":3,"method":"tools/list"}` + "\n"
 	// 4. tools/call validate_oscal
-	projector := proj.NewProjector()
+	// Explicit projection example; this test does not resolve the imported plan.
+	projector := proj.NewProjectorWithContext(proj.ProjectionContext{AssessmentPlanHref: "example-assessment-plan.json", ControlNamespace: "nist-sp-800-53"})
 	sub := assurance.SubjectRef{Scheme: "k8s", ID: "prod/payments/Deployment/payments-api"}
 	now := time.Now().UTC()
 	eval := assurance.ClaimEvaluation{

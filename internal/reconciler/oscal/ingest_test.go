@@ -164,20 +164,23 @@ system-security-plan:
 
 func TestProjectorToIngestRoundtrip(t *testing.T) {
 	// 1. Generate Component Definition with Projector
-	projector := proj.NewProjector()
+	// Explicit example implementation inputs; no catalog resolution is asserted.
+	projector := proj.NewProjectorWithContext(proj.ProjectionContext{ControlSource: "example-catalog.json", ControlNamespace: "nist-sp-800-53", Component: &proj.ComponentContext{Type: "software", Description: "Example ledger service", Implementations: map[string]string{"nist-sp-800-53:AC-6": "Example service uses a dedicated unprivileged account.", "nist-sp-800-53:SC-7": "Example service traffic passes through a declared gateway."}}})
 	sub := assurance.SubjectRef{Scheme: "k8s", ID: "k8s://banking/Deployment/ledger-service"}
 	evaluations := []assurance.ClaimEvaluation{
 		{
-			ID:      "eval-01",
-			Control: assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
-			Subject: sub,
-			State:   assurance.AssuranceStateAssured,
+			EvaluatedAt: time.Now().UTC(),
+			ID:          "eval-01",
+			Control:     assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "AC-6"},
+			Subject:     sub,
+			State:       assurance.AssuranceStateAssured,
 		},
 		{
-			ID:      "eval-02",
-			Control: assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "SC-7"},
-			Subject: sub,
-			State:   assurance.AssuranceStateAssured,
+			EvaluatedAt: time.Now().UTC(),
+			ID:          "eval-02",
+			Control:     assurance.ControlRef{Namespace: "nist-sp-800-53", ID: "SC-7"},
+			Subject:     sub,
+			State:       assurance.AssuranceStateAssured,
 		},
 	}
 

@@ -10,13 +10,18 @@ invariant: "OSCAL export is derived from the evidence graph (I-06)"
 
 OSKAL does not treat OSCAL as an internal runtime data model. Instead, **Invariant I-06** specifies that NIST OSCAL artifacts are projected outward from the underlying runtime evidence graph.
 
-Every projected document conforms strictly to embedded NIST OSCAL v1.2.3 schemas and is offline-validatable with `oskal validate`.
+Successful projections are structurally validated against embedded NIST OSCAL
+v1.2.3 JSON schemas. This does not prove semantic completeness, authentic evidence,
+resolved imports, Metaschema constraint conformance, or compliance. Projection
+requires caller-supplied context for actual document references and system facts;
+missing mandatory inputs return an actionable error instead of invented defaults.
+See `docs/oscal-projection-inputs.md` for the SDK context contract.
 
 ---
 
 ## 1. Export Live Assurance State to OSCAL Assessment Results
 
-Export the active assurance state for a workload into an OSCAL Assessment Results JSON file:
+After configuring actual projection context, export the active assurance state for a workload into an OSCAL Assessment Results JSON file:
 
 ```bash
 oskal export assessment-results \
@@ -33,14 +38,14 @@ OSKAL supports projecting all five operational NIST OSCAL v1.2.3 models:
 
 The resulting Assessment Results document contains:
 - `assessment-results` root element with UUID and metadata timestamp (`oscal-version: "1.2.3"`).
-- Concrete `findings` linked to specific control identifiers (e.g. `AC-6`).
+- Supplied `findings` linked to explicitly mapped objective or statement identifiers and source evaluation evidence, when those inputs exist.
 - Source `observations` carrying integrity digests and Merkle evidence root references.
 
 ---
 
 ## 2. Validate with Embedded NIST OSCAL v1.2.3 Schemas (`oskal validate`)
 
-Run the embedded sub-millisecond NIST OSCAL v1.2.3 validator (100% air-gap compatible):
+Run the embedded NIST OSCAL v1.2.3 JSON schema validator (no network required):
 
 ```bash
 oskal validate /tmp/assessment-results.json
@@ -57,3 +62,7 @@ Output:
 ```text
 [PASS] Document valid against NIST OSCAL v1.2.3 schema (assessment-results).
 ```
+
+Missing evaluations cannot produce an assessment result or SSP control list. Empty
+POA&M findings return an error because the pinned schema requires at least one
+item; an empty finding set does not establish that controls are satisfied.
