@@ -19,12 +19,13 @@ import (
 
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
-	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/workcell"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/diagnostics"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	proj "github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	"github.com/ckodex-labs/ckodex-oskal/internal/scaffold"
+	"github.com/google/uuid"
 )
 
 const (
@@ -477,7 +478,7 @@ func BuildOSKALManual(opts ManualOptions) UTCPManual {
 			},
 			CallTemplate:        makeTemplate("run_doctor", nil, "assurance.services.v1.DiagnosticsService", "RunDoctor"),
 			AverageResponseSize: 2048,
-			RequiredCapability:  "tool:query-metrics",
+			RequiredCapability:  "utcp:run-doctor",
 		}),
 		decorateTool(Tool{
 			Name:        "inspect_subject",
@@ -558,6 +559,9 @@ func ValidateManual(manual UTCPManual) error {
 		if strings.TrimSpace(t.Name) == "" {
 			return fmt.Errorf("tool[%d] missing required 'name'", i)
 		}
+		if strings.ContainsAny(t.Name, "./") {
+			return errors.New("tool names must not contain dots or slashes")
+		}
 		if seen[t.Name] {
 			return fmt.Errorf("duplicate tool name '%s' in utcp manual", t.Name)
 		}
@@ -615,13 +619,13 @@ func isAllowedTransport(t string) bool {
 	return false
 }
 
-// ToolCallResult encapsulates the result of a governed UTCP tool execution and its optional CheckReceipt.
+// ToolCallResult encapsulates the result of a governed UTCP tool execution and its completion receipt when an effect executes.
 type ToolCallResult struct {
-	ToolName    string                  `json:"tool_name"`
-	Transport   string                  `json:"transport"`
-	Output      interface{}             `json:"output"`
-	Receipt     *assurance.CheckReceipt `json:"receipt,omitempty"`
-	EvaluatedAt time.Time               `json:"evaluated_at"`
+	ToolName    string                      `json:"tool_name"`
+	Transport   string                      `json:"transport"`
+	Output      interface{}                 `json:"output"`
+	Receipt     *assurance.ExecutionReceipt `json:"receipt,omitempty"`
+	EvaluatedAt time.Time                   `json:"evaluated_at"`
 }
 
 // Registry manages registered UTCP manuals, providers, tool discovery, and governed tool execution.
@@ -630,15 +634,16 @@ type Registry struct {
 	manuals     map[string]UTCPManual
 	providers   map[string]ProviderConfig
 	tools       map[string]Tool
+	owners      map[string]string
 	evidenceDir string
-	broker      *workcell.EffectBroker
+	broker      ports.ExecutionBroker
 	validator   *proj.Validator
 	projector   *proj.Projector
 	explainer   *explain.Explainer
 }
 
 // NewRegistry creates a UTCP Registry pre-populated with the built-in OSKAL UTCP manual.
-func NewRegistry(evidenceDir string, broker *workcell.EffectBroker) (*Registry, error) {
+func NewRegistry(evidenceDir string, broker ports.ExecutionBroker) (*Registry, error) {
 	val, err := proj.DefaultValidator()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize OSCAL validator for UTCP registry: %w", err)
@@ -647,6 +652,7 @@ func NewRegistry(evidenceDir string, broker *workcell.EffectBroker) (*Registry, 
 		manuals:     make(map[string]UTCPManual),
 		providers:   make(map[string]ProviderConfig),
 		tools:       make(map[string]Tool),
+		owners:      make(map[string]string),
 		evidenceDir: evidenceDir,
 		broker:      broker,
 		validator:   val,
@@ -675,11 +681,17 @@ func (r *Registry) registerManualInternal(name string, manual UTCPManual) error 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, exists := r.manuals[name]; !exists && len(r.manuals) >= MaxRegisteredManuals {
+	if _, exists := r.manuals[name]; exists {
+		return errors.New("manual already registered; deregister before replacement")
+	}
+	if len(r.manuals) >= MaxRegisteredManuals {
 		return fmt.Errorf("utcp registry capacity exceeded: maximum %d manuals allowed", MaxRegisteredManuals)
 	}
 	newTools := 0
 	for _, t := range manual.Tools {
+		if _, exists := r.tools[name+"."+t.Name]; !exists {
+			newTools++
+		}
 		if _, exists := r.tools[t.Name]; !exists {
 			newTools++
 		}
@@ -706,35 +718,77 @@ func (r *Registry) registerManualInternal(name string, manual UTCPManual) error 
 		}
 		if name != "" {
 			r.tools[name+"."+t.Name] = t
+			r.owners[name+"."+t.Name] = name
 		}
 		if name == "oskal" || !builtInTools[t.Name] {
 			r.tools[t.Name] = t
+			r.owners[t.Name] = name
 		}
 	}
 	return nil
 }
 
 // RegisterManual validates and registers a UTCPManual in the registry.
-// When the registry is governed by an EffectBroker, a valid CapabilityLease is required via RegisterManualWithLease.
+// A valid CapabilityLease and execution broker are required via RegisterManualWithLease.
 func (r *Registry) RegisterManual(name string, manual UTCPManual) error {
 	return r.RegisterManualWithLease(context.Background(), name, manual, "", "")
 }
 
-// RegisterManualWithLease validates and registers a UTCPManual gated by the registry's EffectBroker when present.
+// RegisterManualWithLease validates and registers a UTCPManual under a durable execution lease.
 func (r *Registry) RegisterManualWithLease(ctx context.Context, name string, manual UTCPManual, leaseID, prevReceiptHash string) error {
-	if strings.EqualFold(strings.TrimSpace(name), "oskal") {
-		return errors.New("cannot overwrite reserved built-in 'oskal' manual")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = strings.TrimSpace(manual.Info.Title)
 	}
-	if r.broker != nil {
-		if leaseID == "" {
-			leaseID, prevReceiptHash = leaseFromContext(ctx)
-		}
-		payload, _ := json.Marshal(map[string]interface{}{"name": name, "utcp_version": manual.UTCPVersion})
-		if _, err := r.broker.RequestExecution(ctx, leaseID, "utcp:register-manual", payload, prevReceiptHash); err != nil {
-			return fmt.Errorf("UTCP capability lease gate denied manual registration '%s': %w", name, err)
-		}
+	if name == "" || strings.ContainsAny(name, "./") || isKnownOSKALNamespace(name) {
+		return errors.New("manual requires a non-reserved canonical name without dots or slashes")
 	}
-	return r.registerManualInternal(name, manual)
+	if err := ValidateManual(manual); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(struct {
+		Name   string
+		Manual UTCPManual
+	}{name, manual})
+	if err != nil {
+		return err
+	}
+	// Freeze all nested caller-owned maps before admission and execution.
+	var snapshot struct {
+		Name   string
+		Manual UTCPManual
+	}
+	if err := json.Unmarshal(payload, &snapshot); err != nil {
+		return err
+	}
+	_, err = r.executeEffect(ctx, "manual", name, "utcp:register-manual", payload, leaseID, prevReceiptHash, func(context.Context) ([]byte, error) {
+		if err := r.registerManualInternal(name, snapshot.Manual); err != nil {
+			return nil, err
+		}
+		return []byte(name), nil
+	})
+	return err
+}
+
+// executeEffect is the sole external-effect boundary. leaseID binds namespace,
+// name and UID; authentication is obtained independently inside the broker.
+func (r *Registry) executeEffect(ctx context.Context, kind, name, capability string, payload []byte, leaseID, previous string, effect func(context.Context) ([]byte, error)) (*assurance.ExecutionReceipt, error) {
+	if r.broker == nil {
+		return nil, errors.New("UTCP capability lease gate denied: execution broker is required")
+	}
+	if leaseID == "" {
+		leaseID, previous = leaseFromContext(ctx)
+	}
+	identity := strings.Split(leaseID, "/")
+	if len(identity) != 3 || identity[0] == "" || identity[1] == "" || identity[2] == "" {
+		return nil, errors.New("UTCP capability lease gate denied: lease_id must be namespace/name/UID")
+	}
+	request := assurance.ExecutionRequest{LeaseNamespace: identity[0], LeaseName: identity[1], LeaseUID: identity[2], Resource: "utcp://registry/" + kind + "/" + url.PathEscape(name), Capability: capability, Payload: payload, RequestID: uuid.NewString(), PreviousAdmissionHash: previous}
+	receipt, err := r.broker.Execute(ctx, request, effect)
+	if err != nil {
+		return nil, fmt.Errorf("UTCP governed execution: %w", err)
+	}
+	return receipt, nil
 }
 
 func isBlockedMetadataOrLinkLocalIP(ip net.IP) bool {
@@ -883,10 +937,11 @@ func doHTTPWithRetry(ctx context.Context, client *http.Client, buildReq func() (
 
 // RegisterToolProvider registers a UTCP provider and loads its manual if reachable via file or HTTP.
 func (r *Registry) RegisterToolProvider(ctx context.Context, cfg ProviderConfig) error {
-	if strings.TrimSpace(cfg.Name) == "" {
+	cfg.Name = strings.TrimSpace(cfg.Name)
+	if cfg.Name == "" || strings.ContainsAny(cfg.Name, "./") {
 		return errors.New("provider config requires a non-empty 'name'")
 	}
-	if strings.EqualFold(strings.TrimSpace(cfg.Name), "oskal") {
+	if isKnownOSKALNamespace(cfg.Name) {
 		return errors.New("cannot overwrite reserved built-in 'oskal' manual")
 	}
 	pType := strings.ToLower(strings.TrimSpace(cfg.ProviderType))
@@ -900,26 +955,29 @@ func (r *Registry) RegisterToolProvider(ctx context.Context, cfg ProviderConfig)
 		return fmt.Errorf("provider '%s' uses unsupported provider_type '%s'", cfg.Name, pType)
 	}
 
-	if r.broker != nil {
-		leaseID := cfg.LeaseID
-		prevHash := cfg.PrevReceiptHash
-		if leaseID == "" {
-			leaseID, prevHash = leaseFromContext(ctx)
-		}
-		capName := cfg.RequiredCapability
-		if capName == "" {
-			capName = "utcp:register-provider"
-		}
-		payload, _ := json.Marshal(map[string]interface{}{
-			"name":          cfg.Name,
-			"provider_type": pType,
-			"url":           cfg.URL,
-			"file_path":     cfg.FilePath,
-		})
-		if _, err := r.broker.RequestExecution(ctx, leaseID, capName, payload, prevHash); err != nil {
-			return fmt.Errorf("UTCP capability lease gate denied provider registration '%s': %w", cfg.Name, err)
-		}
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		return err
 	}
+	var snapshot ProviderConfig
+	if err := json.Unmarshal(payload, &snapshot); err != nil {
+		return err
+	}
+	_, err = r.executeEffect(ctx, "provider", cfg.Name, "utcp:register-provider", payload, cfg.LeaseID, cfg.PrevReceiptHash, func(ctx context.Context) ([]byte, error) {
+		if err := r.registerProvider(ctx, snapshot, pType); err != nil {
+			return nil, err
+		}
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		return json.Marshal(struct {
+			Provider ProviderConfig
+			Manual   UTCPManual
+		}{snapshot, r.manuals[snapshot.Name]})
+	})
+	return err
+}
+
+func (r *Registry) registerProvider(ctx context.Context, cfg ProviderConfig, pType string) error {
 
 	if cfg.FilePath != "" {
 		data, err := os.ReadFile(cfg.FilePath)
@@ -969,12 +1027,16 @@ func (r *Registry) RegisterToolProvider(ctx context.Context, cfg ProviderConfig)
 	}
 
 	r.mu.Lock()
+	if len(r.providers) >= MaxRegisteredManuals {
+		r.mu.Unlock()
+		return errors.New("provider registry capacity exceeded")
+	}
 	r.providers[cfg.Name] = cfg
 	r.mu.Unlock()
 	return nil
 }
 
-// DeregisterManual removes a registered manual/provider and its tools, enforcing CapabilityLease governance when broker is set.
+// DeregisterManual removes a manual and its tools only under a durable lease.
 func (r *Registry) DeregisterManual(ctx context.Context, name, leaseID, prevReceiptHash string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -983,29 +1045,20 @@ func (r *Registry) DeregisterManual(ctx context.Context, name, leaseID, prevRece
 	if strings.EqualFold(name, "oskal") {
 		return errors.New("cannot deregister reserved built-in 'oskal' manual")
 	}
-	if r.broker != nil {
-		if leaseID == "" {
-			leaseID, prevReceiptHash = leaseFromContext(ctx)
-		}
-		payload, _ := json.Marshal(map[string]interface{}{"name": name})
-		if _, err := r.broker.RequestExecution(ctx, leaseID, "utcp:deregister-manual", payload, prevReceiptHash); err != nil {
-			return fmt.Errorf("UTCP capability lease gate denied manual deregistration '%s': %w", name, err)
-		}
+	payload, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return err
 	}
-	r.deregisterUnlocked(name)
-	return nil
+	_, err = r.executeEffect(ctx, "manual", name, "utcp:deregister-manual", payload, leaseID, prevReceiptHash, func(context.Context) ([]byte, error) {
+		r.deregisterUnlocked(name)
+		return []byte(name), nil
+	})
+	return err
 }
 
-// DeregisterToolProvider removes a provider and its manual from the registry.
-func (r *Registry) DeregisterToolProvider(name string) {
-	if strings.EqualFold(strings.TrimSpace(name), "oskal") {
-		return
-	}
-	if r.broker != nil {
-		_ = r.DeregisterManual(context.Background(), name, "", "")
-		return
-	}
-	r.deregisterUnlocked(name)
+// DeregisterToolProvider fails closed without explicit lease metadata.
+func (r *Registry) DeregisterToolProvider(name string) error {
+	return r.DeregisterManual(context.Background(), name, "", "")
 }
 
 func (r *Registry) deregisterUnlocked(name string) {
@@ -1024,8 +1077,10 @@ func (r *Registry) deregisterUnlocked(name string) {
 	if m, ok := r.manuals[name]; ok {
 		for _, t := range m.Tools {
 			delete(r.tools, name+"."+t.Name)
-			if !builtInTools[t.Name] {
+			delete(r.owners, name+"."+t.Name)
+			if !builtInTools[t.Name] && r.owners[t.Name] == name {
 				delete(r.tools, t.Name)
+				delete(r.owners, t.Name)
 			}
 		}
 		delete(r.manuals, name)
@@ -1035,25 +1090,31 @@ func (r *Registry) deregisterUnlocked(name string) {
 // resolveTool resolves both unprefixed ("get_assurance_state") and namespaced
 // ("oskal.get_assurance_state", "ckodex_oskal.get_assurance_state", "<provider>.<tool>") tool names.
 func (r *Registry) resolveTool(toolName string) (Tool, bool) {
+	tool, _, ok := r.resolveToolOwner(toolName)
+	return tool, ok
+}
+
+func (r *Registry) resolveToolOwner(toolName string) (Tool, string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-
-	trimmed := strings.TrimSpace(toolName)
-	if t, ok := r.tools[trimmed]; ok {
-		return t, true
+	key := strings.TrimSpace(toolName)
+	if idx := strings.LastIndex(key, "."); idx > 0 && isKnownOSKALNamespace(key[:idx]) {
+		key = "oskal." + key[idx+1:]
 	}
-	if idx := strings.LastIndex(trimmed, "."); idx > 0 && idx < len(trimmed)-1 {
-		prefix := trimmed[:idx]
-		shortName := trimmed[idx+1:]
-		if t, ok := r.tools[shortName]; ok {
-			_, inManuals := r.manuals[prefix]
-			_, inProviders := r.providers[prefix]
-			if inManuals || inProviders || isKnownOSKALNamespace(prefix) {
-				return t, true
-			}
-		}
+	tool, ok := r.tools[key]
+	if !ok {
+		return Tool{}, "", false
 	}
-	return Tool{}, false
+	// Return an independent snapshot; discovery callers cannot mutate definitions.
+	encoded, err := json.Marshal(tool)
+	if err != nil {
+		return Tool{}, "", false
+	}
+	var snapshot Tool
+	if json.Unmarshal(encoded, &snapshot) != nil {
+		return Tool{}, "", false
+	}
+	return snapshot, r.owners[key], true
 }
 
 func isKnownOSKALNamespace(prefix string) bool {
@@ -1133,7 +1194,15 @@ func (r *Registry) ListTools() []Tool {
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].Name < out[j].Name
 	})
-	return out
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	var snapshot []Tool
+	if json.Unmarshal(encoded, &snapshot) != nil {
+		return nil
+	}
+	return snapshot
 }
 
 // SearchTools searches registered UTCP tools by keyword query and optional tags, returning ranked matches.
@@ -1215,7 +1284,7 @@ func (r *Registry) SearchTools(query string, tags []string, limit int) []Tool {
 	return res
 }
 
-// CallTool executes a registered UTCP tool directly and enforces CapabilityLease governance whenever r.broker is configured.
+// CallTool runs fixed local analysis directly and gates every external effect through a durable lease.
 func (r *Registry) CallTool(
 	ctx context.Context,
 	toolName string,
@@ -1223,7 +1292,7 @@ func (r *Registry) CallTool(
 	leaseID string,
 	prevReceiptHash string,
 ) (*ToolCallResult, error) {
-	tool, ok := r.resolveTool(toolName)
+	tool, owner, ok := r.resolveToolOwner(toolName)
 	if !ok {
 		return nil, fmt.Errorf("utcp tool '%s' not found in registry", toolName)
 	}
@@ -1231,24 +1300,56 @@ func (r *Registry) CallTool(
 		args = make(map[string]interface{})
 	}
 
-	var checkRcpt *assurance.CheckReceipt
-	if r.broker != nil {
-		if leaseID == "" {
-			leaseID, prevReceiptHash = leaseFromContext(ctx)
+	var checkRcpt *assurance.ExecutionReceipt
+	var output interface{}
+	var err error
+	if owner == "oskal" && tool.Name != "run_doctor" {
+		// The immutable built-in catalog contains local analysis and rendering only.
+		output, err = r.executeNativeTool(ctx, tool, args)
+	} else {
+		payload, encodeErr := json.Marshal(struct {
+			Tool      Tool
+			Arguments map[string]interface{}
+		}{tool, args})
+		if encodeErr != nil {
+			return nil, encodeErr
 		}
-		capName := tool.RequiredCapability
-		if capName == "" {
-			capName = "utcp:" + tool.Name
+		var snapshot struct {
+			Tool      Tool
+			Arguments map[string]interface{}
 		}
-		payload, _ := json.Marshal(args)
-		rcpt, err := r.broker.RequestExecution(ctx, leaseID, capName, payload, prevReceiptHash)
-		if err != nil {
-			return nil, fmt.Errorf("UTCP capability lease gate denied execution of '%s': %w", tool.Name, err)
+		if err := json.Unmarshal(payload, &snapshot); err != nil {
+			return nil, err
 		}
-		checkRcpt = rcpt
+		capability := "utcp:execute-tool"
+		if owner == "oskal" {
+			capability = "utcp:run-doctor"
+		}
+		checkRcpt, err = r.executeEffect(ctx, "tool", owner+"."+tool.Name, capability, payload, leaseID, prevReceiptHash, func(ctx context.Context) ([]byte, error) {
+			if owner == "oskal" {
+				var executeErr error
+				output, executeErr = r.executeNativeTool(ctx, snapshot.Tool, snapshot.Arguments)
+				if executeErr != nil {
+					return nil, executeErr
+				}
+				return json.Marshal(output)
+			}
+			tmpl := snapshot.Tool.EffectiveCallTemplate()
+			typ := tmpl.CallTemplateType
+			if typ == "" {
+				typ = tmpl.ProviderType
+			}
+			if typ != "http" && typ != "streamable_http" {
+				return nil, fmt.Errorf("unsupported external execution transport %q", typ)
+			}
+			var executeErr error
+			output, executeErr = executeRemoteHTTPTool(ctx, snapshot.Tool.Name, tmpl, snapshot.Arguments)
+			if executeErr != nil {
+				return nil, executeErr
+			}
+			return json.Marshal(output)
+		})
 	}
-
-	output, err := r.executeNativeTool(ctx, tool, args)
 	if err != nil {
 		return nil, err
 	}
@@ -1741,11 +1842,12 @@ func executeRemoteHTTPTool(ctx context.Context, toolName string, tmpl CallTempla
 		contentType = "application/json"
 	}
 
-	attempts := 1
-	if method == http.MethodGet || method == http.MethodHead {
-		attempts = 3
-	}
 	client := newSafeHTTPClient(10 * time.Second)
+	// Redirects and transport retries can repeat an authority-bearing effect.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		transport.DisableKeepAlives = true
+	}
 	resp, err := doHTTPWithRetry(ctx, client, func() (*http.Request, error) {
 		var rdr io.Reader
 		if hasBody {
@@ -1763,15 +1865,18 @@ func executeRemoteHTTPTool(ctx context.Context, toolName string, tmpl CallTempla
 			req.Header.Set(k, v)
 		}
 		return req, nil
-	}, attempts)
+	}, 1)
 	if err != nil {
 		return nil, fmt.Errorf("remote HTTP tool '%s' request failed: %w", toolName, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed reading response from remote HTTP tool '%s': %w", toolName, err)
+	}
+	if len(respBytes) > 5*1024*1024 {
+		return nil, errors.New("external tool response exceeds 5 MiB")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("remote HTTP tool '%s' returned status %d: %s", toolName, resp.StatusCode, strings.TrimSpace(string(respBytes)))

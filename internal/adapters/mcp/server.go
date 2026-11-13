@@ -13,9 +13,9 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/storage"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/utcp"
-	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/workcell"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/diagnostics"
 	"github.com/ckodex-labs/ckodex-oskal/internal/application/explain"
+	"github.com/ckodex-labs/ckodex-oskal/internal/ports"
 	proj "github.com/ckodex-labs/ckodex-oskal/internal/projection/oscal"
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 	"github.com/ckodex-labs/ckodex-oskal/internal/scaffold"
@@ -100,8 +100,8 @@ func NewServer(in io.Reader, out io.Writer, evidenceDir string) (*Server, error)
 	return NewServerWithBroker(in, out, evidenceDir, nil)
 }
 
-// NewServerWithBroker initializes an MCP Server whose UTCP registry operations are governed by an EffectBroker.
-func NewServerWithBroker(in io.Reader, out io.Writer, evidenceDir string, broker *workcell.EffectBroker) (*Server, error) {
+// NewServerWithBroker initializes an MCP Server whose UTCP registry operations are governed by a durable execution broker.
+func NewServerWithBroker(in io.Reader, out io.Writer, evidenceDir string, broker ports.ExecutionBroker) (*Server, error) {
 	val, err := proj.DefaultValidator()
 	if err != nil {
 		return nil, fmt.Errorf("failed to init validator for MCP: %w", err)
@@ -356,8 +356,12 @@ func (s *Server) listTools() mcpToolsListResult {
 				Name:        "run_doctor",
 				Description: "Run deep system preflight diagnostics (Kubernetes, SPIRE, Sigstore, CAS, NIST schemas).",
 				InputSchema: map[string]interface{}{
-					"type":       "object",
-					"properties": map[string]interface{}{},
+					"type": "object",
+					"properties": map[string]interface{}{
+						"lease_id":          map[string]interface{}{"type": "string", "description": "Lease identity namespace/name/UID"},
+						"prev_receipt_hash": map[string]interface{}{"type": "string", "description": "Previous admission hash; empty for the first turn"},
+					},
+					"required": []string{"lease_id"},
 				},
 			},
 			{
@@ -453,11 +457,11 @@ func (s *Server) listTools() mcpToolsListResult {
 						},
 						"lease_id": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional CapabilityLease ID for governed execution",
+							"description": "Lease identity namespace/name/UID for governed execution",
 						},
 						"prev_receipt_hash": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional prior CheckReceipt hash for monotonic lease chain",
+							"description": "Previous admission hash; empty only for the first turn",
 						},
 					},
 					"required": []string{"tool_name"},
@@ -491,11 +495,11 @@ func (s *Server) listTools() mcpToolsListResult {
 						},
 						"lease_id": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional CapabilityLease ID for governed registration",
+							"description": "Lease identity namespace/name/UID for governed registration",
 						},
 						"prev_receipt_hash": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional prior CheckReceipt hash",
+							"description": "Previous admission hash; empty only for the first turn",
 						},
 					},
 				},
@@ -516,11 +520,11 @@ func (s *Server) listTools() mcpToolsListResult {
 						},
 						"lease_id": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional CapabilityLease ID for governed deregistration",
+							"description": "Lease identity namespace/name/UID for governed deregistration",
 						},
 						"prev_receipt_hash": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional prior CheckReceipt hash",
+							"description": "Previous admission hash; empty only for the first turn",
 						},
 					},
 				},
@@ -549,11 +553,11 @@ func (s *Server) listTools() mcpToolsListResult {
 						},
 						"lease_id": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional CapabilityLease ID for governed provider registration",
+							"description": "Lease identity namespace/name/UID for governed provider registration",
 						},
 						"prev_receipt_hash": map[string]interface{}{
 							"type":        "string",
-							"description": "Optional prior CheckReceipt hash",
+							"description": "Previous admission hash; empty only for the first turn",
 						},
 					},
 					"required": []string{"name", "provider_type"},
@@ -991,8 +995,13 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]inte
 		}, nil
 
 	case "run_doctor":
-		report := diagnostics.RunDoctor(ctx, s.evidenceDir)
-		buf, _ := json.MarshalIndent(report, "", "  ")
+		leaseID, _ := args["lease_id"].(string)
+		previous, _ := args["prev_receipt_hash"].(string)
+		result, err := s.utcpRegistry.CallTool(ctx, "oskal.run_doctor", args, leaseID, previous)
+		if err != nil {
+			return nil, err
+		}
+		buf, _ := json.MarshalIndent(result, "", "  ")
 		return &mcpCallToolResult{
 			Content: []mcpToolContentItem{{Type: "text", Text: string(buf)}},
 		}, nil
