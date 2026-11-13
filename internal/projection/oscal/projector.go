@@ -437,6 +437,11 @@ func (p *Projector) evaluations(dt DocumentType, subject *assurance.SubjectRef, 
 		if e.EvaluatedAt.IsZero() || e.EvaluatedAt.After(time.Now().UTC()) {
 			return OscalReviewedControls{}, inputError(dt, "evaluations.evaluatedAt", "supply an actual evaluation timestamp, not zero or a future time")
 		}
+		if e.Telemetry != nil {
+			if err := e.Telemetry.ValidateForEvaluation(e.State, e.EvidenceRoot, e.EvaluatedAt); err != nil {
+				return OscalReviewedControls{}, inputError(dt, "evaluations.telemetry", err.Error())
+			}
+		}
 		controls = append(controls, e.Control)
 	}
 	return p.controls(dt, controls)
@@ -459,7 +464,7 @@ func metadata(title string) OscalMetadata {
 	return OscalMetadata{Title: title, LastModified: now, Version: "1.0.0", OscalVersion: "1.2.3", Remarks: "Projection of caller-supplied facts. Schema validation does not verify source authenticity, imported document resolution, semantic completeness, or system compliance."}
 }
 
-func properties(e assurance.ClaimEvaluation) []Property {
+func properties(e assurance.ClaimEvaluation) ([]Property, error) {
 	props := []Property{
 		{Name: "control-ref", Value: e.Control.Canonical(), Ns: "https://assurance.ckodex.io/ns"},
 		{Name: "subject-uri", Value: e.Subject.URI(), Ns: "https://assurance.ckodex.io/ns"},
@@ -469,7 +474,17 @@ func properties(e assurance.ClaimEvaluation) []Property {
 	if e.EvidenceRoot != "" {
 		props = append(props, Property{Name: "evidence-root", Value: e.EvidenceRoot, Ns: "https://assurance.ckodex.io/ns"})
 	}
-	return props
+	if e.Telemetry != nil {
+		raw, err := json.Marshal(e.Telemetry)
+		if err != nil {
+			return nil, fmt.Errorf("encode telemetry context: %w", err)
+		}
+		props = append(props, Property{Name: "telemetry-context", Value: string(raw), Ns: "https://assurance.ckodex.io/ns"},
+			Property{Name: "telemetry-integrity", Value: e.Telemetry.Integrity.State.String(), Ns: "https://assurance.ckodex.io/ns"},
+			Property{Name: "attestation-root-kind", Value: e.Telemetry.Integrity.RootKind, Ns: "https://assurance.ckodex.io/ns"},
+			Property{Name: "attestation-root-label", Value: e.Telemetry.Integrity.RootLabel, Ns: "https://assurance.ckodex.io/ns"})
+	}
+	return props, nil
 }
 
 func marshalProjection(ctx context.Context, dt DocumentType, wrapper any) ([]byte, error) {
@@ -525,7 +540,11 @@ func (p *Projector) ProjectAssessmentResults(ctx context.Context, subject assura
 	resources := make(map[string]BackMatterResource)
 	observations := make(map[string][]OscalRelatedObservation)
 	for _, e := range evaluations {
-		obs := OscalObservation{UUID: uuid.NewString(), Title: fmt.Sprintf("Evaluation of %s", e.Control.Canonical()), Description: fmt.Sprintf("Supplied evaluation state: %s (completeness: %s)", e.State, e.Completeness.Summary()), Collected: e.EvaluatedAt, Methods: []string{"AUTOMATED_CONTINUOUS_EVALUATION"}, Types: []string{"assurance-claim-evaluation"}, Props: properties(e)}
+		props, err := properties(e)
+		if err != nil {
+			return nil, inputError(dt, "evaluations.telemetry", err.Error())
+		}
+		obs := OscalObservation{UUID: uuid.NewString(), Title: fmt.Sprintf("Evaluation of %s", e.Control.Canonical()), Description: fmt.Sprintf("Supplied evaluation state: %s (completeness: %s)", e.State, e.Completeness.Summary()), Collected: e.EvaluatedAt, Methods: []string{"AUTOMATED_CONTINUOUS_EVALUATION"}, Types: []string{"assurance-claim-evaluation"}, Props: props}
 		if !e.ValidUntil.IsZero() {
 			if e.ValidUntil.Before(e.EvaluatedAt) {
 				return nil, inputError(dt, "evaluations.validUntil", "cannot precede evaluatedAt")
@@ -626,7 +645,11 @@ func (p *Projector) ProjectComponentDefinition(ctx context.Context, componentNam
 			if err := requireText(dt, "component.implementations["+e.Control.Canonical()+"]", description); err != nil {
 				return nil, err
 			}
-			impl.ImplementedRequirements = append(impl.ImplementedRequirements, OscalImplementedRequirement{UUID: uuid.NewString(), ControlID: e.Control.ID, Description: description, Props: properties(e)})
+			props, err := properties(e)
+			if err != nil {
+				return nil, inputError(dt, "evaluations.telemetry", err.Error())
+			}
+			impl.ImplementedRequirements = append(impl.ImplementedRequirements, OscalImplementedRequirement{UUID: uuid.NewString(), ControlID: e.Control.ID, Description: description, Props: props})
 		}
 		comp.ControlImplementations = []OscalControlImplementation{impl}
 	}
@@ -683,7 +706,11 @@ func (p *Projector) ProjectSSP(ctx context.Context, systemName string, evaluatio
 		if err := requireText(dt, "system.implementations["+e.Control.Canonical()+"]", description); err != nil {
 			return nil, err
 		}
-		ssp.ControlImplementation.ImplementedRequirements = append(ssp.ControlImplementation.ImplementedRequirements, OscalSSPImplementedRequirement{UUID: uuid.NewString(), ControlID: e.Control.ID, Remarks: description, Props: properties(e)})
+		props, err := properties(e)
+		if err != nil {
+			return nil, inputError(dt, "evaluations.telemetry", err.Error())
+		}
+		ssp.ControlImplementation.ImplementedRequirements = append(ssp.ControlImplementation.ImplementedRequirements, OscalSSPImplementedRequirement{UUID: uuid.NewString(), ControlID: e.Control.ID, Remarks: description, Props: props})
 	}
 	return marshalProjection(ctx, dt, wrapper)
 }
