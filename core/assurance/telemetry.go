@@ -139,7 +139,7 @@ func (h TelemetryHeartbeat) Validate() error {
 }
 
 // TelemetryGap preserves exact missing ranges without allocating one item per
-// absent heartbeat. Ranges are inclusive; zero denotes no such gap.
+// absent heartbeat. Ranges are inclusive, including the initial slot zero.
 type TelemetryGap struct {
 	Kind  string `json:"kind"`
 	First uint64 `json:"first"`
