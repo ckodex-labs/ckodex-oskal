@@ -509,3 +509,40 @@ func TestConfiguredAdverseEvidenceDominatesPositiveCompleteness(t *testing.T) {
 		t.Fatalf("optional-only contract inferred a verdict: %+v", result)
 	}
 }
+
+func TestEmptySourceRegistryNeverFallsBackToArchive(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	payload := []byte("historical observation")
+	if _, err := f.archive.Put(ctx, f.sign(t, f.envelope("historical", payload)), bytes.NewReader(payload)); err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := collection.NewCandidates(f.archive, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates.Snapshot()) != 0 {
+		t.Fatal("empty registry invented a source")
+	}
+	if _, err := candidates.BeginSession("unconfigured"); err == nil {
+		t.Fatal("unconfigured source admitted")
+	}
+	evaluator, err := evaluation.NewEvaluator(candidates, f.verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := evaluator.Evaluate(ctx, f.claim(), f.contract, f.epoch)
+	if err != nil || result.State != assurance.AssuranceStateUnknown || len(result.Evidence) != 0 || result.Completeness.Missing != 1 {
+		t.Fatalf("archive restored eligibility: %+v %v", result, err)
+	}
+	archived, err := f.archive.ListBySubject(ctx, f.subject)
+	if err != nil || len(archived) != 1 {
+		t.Fatal("empty registry changed archive")
+	}
+	if _, err := collection.NewCandidates(nil, nil, 1); err == nil {
+		t.Fatal("nil archive accepted")
+	}
+	if _, err := collection.NewCandidates(f.archive, nil, 0); err == nil {
+		t.Fatal("zero bound accepted")
+	}
+}
