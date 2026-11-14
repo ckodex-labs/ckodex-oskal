@@ -381,27 +381,12 @@ type boundEvidenceRepository struct {
 }
 
 func (r *boundEvidenceRepository) Put(ctx context.Context, envelope assurance.EvidenceEnvelope, payload io.Reader) (assurance.EvidenceRef, error) {
-	resolved, err := r.resolver.ContextForSubject(ctx, envelope.Subject)
+	bound, err := r.resolver.BindEnvelope(ctx, envelope)
 	if err != nil {
 		return assurance.EvidenceRef{}, err
 	}
-	if envelope.Epoch != resolved.Epoch {
-		return assurance.EvidenceRef{}, fmt.Errorf("binding or workload epoch changed before evidence persistence")
-	}
-	envelope.ControlRefs = nil
-	for _, requirement := range resolved.Contract.Requirements {
-		if requirement.EvidenceType != envelope.ObservationType {
-			continue
-		}
-		for _, producer := range requirement.AcceptedProducers {
-			if producer == envelope.Producer.Canonical() {
-				envelope.ControlRefs = resolved.Controls
-				return r.EvidenceRepository.Put(ctx, envelope, payload)
-			}
-		}
-	}
 	// Unmapped source facts remain archived, with no invented control standing.
-	return r.EvidenceRepository.Put(ctx, envelope, payload)
+	return r.EvidenceRepository.Put(ctx, bound, payload)
 }
 
 // Ready reports service availability. For capture-only mode this means machinery

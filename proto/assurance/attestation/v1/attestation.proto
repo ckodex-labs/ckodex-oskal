@@ -1,0 +1,20 @@
+syntax = "proto3";
+package assurance.attestation.v1;
+option go_package = "github.com/ckodex-labs/ckodex-oskal/proto/assurance/attestation/v1;attestationv1";
+
+// QuoteIssuer exposes no raw TPM commands or AK credentials.
+service QuoteIssuer {
+  rpc Challenge(ChallengeRequest) returns (ChallengeResponse);
+  rpc Issue(IssueRequest) returns (IssueResponse);
+}
+message ChallengeRequest {}
+message ChallengeResponse {
+  bytes nonce = 1;
+  int64 issued_unix_nano = 2;
+}
+message IssueRequest { bytes signed_proof = 1; }
+message IssueResponse {
+  bytes attestation_report = 1;
+  string root_label = 2;
+  string limitations = 3;
+}
