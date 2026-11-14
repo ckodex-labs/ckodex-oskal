@@ -29,6 +29,7 @@ type Publication struct {
 	Standing             *assurance.TelemetryAttestation
 	QuoteDigest          string
 	Reason               string
+	RejectedQuote        *QuoteAttempt
 }
 
 // Publisher durably records the supplied outcome and returns its actual signed
@@ -54,4 +55,13 @@ type Sample struct {
 // stream; transport never converts a sample error into a fabricated heartbeat.
 type Sampler interface {
 	Sample(context.Context) (Sample, error)
+}
+
+// QuoteAttempt preserves received assertions that did not establish standing.
+// It must never replace the admitted report/proof tuple associated with Standing.
+type QuoteAttempt struct {
+	ChallengeID          string
+	Challenge            *Challenge
+	AttestationReport    []byte
+	SignedExportKeyProof []byte
 }

@@ -6,6 +6,7 @@ require (
 	github.com/cilium/cilium v1.20.4
 	github.com/cilium/tetragon/api v1.8.0
 	github.com/go-logr/logr v1.4.4
+	github.com/google/go-tpm v0.9.8
 	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
@@ -29,6 +30,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/cilium/ebpf v0.22.0
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/digitorus/pkcs7 v0.0.0-20260821105541-05f79448fa77 // indirect
