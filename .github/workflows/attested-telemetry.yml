@@ -1,0 +1,83 @@
+name: Software TPM quotes
+
+on:
+  push:
+    branches: [main, develop, 'p2/**']
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  software-tpm:
+    name: Real software TPM quote conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      OSKAL_SWTPM_CONTAINER: oskal-p2-tpm-ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Select the runner-owned proof directory
+        run: echo "OSKAL_TPM_EVIDENCE_DIR=$RUNNER_TEMP/oskal-tpm-evidence" >> "$GITHUB_ENV"
+      - name: Build the source-pinned software TPM
+        run: >-
+          docker build --memory=2g --cpu-quota=200000
+          --tag oskal-p2-tpm-runtime:ci
+          --file tests/runtime/tpm/Dockerfile tests/runtime/tpm
+      - name: Start an isolated test-owned TPM
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$OSKAL_TPM_EVIDENCE_DIR"
+          docker network create --opt com.docker.network.bridge.host_binding_ipv4=127.0.0.1 oskal-p2-tpm-ci
+          docker run --detach --name "$OSKAL_SWTPM_CONTAINER" \
+            --network oskal-p2-tpm-ci --cpus 0.5 --memory 128m --pids-limit 64 \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --tmpfs /state:rw,noexec,nosuid,size=8m,uid=65532,gid=65532,mode=0700 \
+            --publish 127.0.0.1::2321 oskal-p2-tpm-runtime:ci
+          ready=false
+          for attempt in {1..20}; do
+            if docker exec "$OSKAL_SWTPM_CONTAINER" /usr/local/bin/swtpm_ioctl \
+              --tcp 127.0.0.1:2322 -c > "$OSKAL_TPM_EVIDENCE_DIR/control-capabilities.txt"; then
+              ready=true
+              break
+            fi
+            echo "Waiting for the software TPM control API ($attempt/20)." >&2
+            sleep 0.25
+          done
+          if [ "$ready" != true ]; then
+            echo "Software TPM control API did not become ready within five seconds; inspect the retained container log." >&2
+            exit 1
+          fi
+          address=$(docker port "$OSKAL_SWTPM_CONTAINER" 2321/tcp)
+          case "$address" in 127.0.0.1:[0-9]*) ;; *) exit 1 ;; esac
+          echo "OSKAL_SWTPM_ADDRESS=$address" >> "$GITHUB_ENV"
+      - name: Verify real quotes and malformed-report rejection
+        run: go test -tags=integration -race -count=1 -v ./internal/adapters/tpm
+      - name: Retain public proof and stop the test-owned TPM
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$OSKAL_TPM_EVIDENCE_DIR"
+          if docker inspect "$OSKAL_SWTPM_CONTAINER" >/dev/null 2>&1; then
+            docker logs "$OSKAL_SWTPM_CONTAINER" > "$OSKAL_TPM_EVIDENCE_DIR/swtpm.log" 2>&1
+            docker stop --time 5 "$OSKAL_SWTPM_CONTAINER"
+          fi
+      - name: Upload public quote proof only
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: software-tpm-quote-proof
+          path: ${{ runner.temp }}/oskal-tpm-evidence/
+          if-no-files-found: error
+          retention-days: 14
