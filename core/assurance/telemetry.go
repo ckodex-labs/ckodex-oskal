@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const MaxTelemetrySignals = 2048
@@ -67,22 +69,34 @@ type AttestedEnvironment struct {
 }
 
 func (a TelemetryAttestation) Validate() error {
-	if !telemetryDigest(a.SessionID) || !telemetryIdentifier(a.SourceInstance, 1024) || !telemetryDigest(a.MeasurementDigest) || !telemetryDigest(a.ExportKeyDigest) || !telemetryDigest(a.ChannelDigest) {
+	if !telemetryDigest(a.SessionID) || !telemetryDigest(a.ExportKeyDigest) || !telemetryDigest(a.ChannelDigest) {
 		return fmt.Errorf("attestation requires a session, source instance, and exact measurement/key/channel digests")
 	}
-	if !telemetryIdentifier(a.RootKind, 128) || !telemetryIdentifier(a.RootLabel, 1024) || len(a.Caveats) > 16 {
+	if err := ValidateTelemetrySource(a.SourceInstance, a.MeasurementDigest, a.RootKind, a.RootLabel, a.Caveats); err != nil {
+		return err
+	}
+	if a.StartedAt.IsZero() || a.VerifiedAt.Before(a.StartedAt) || !a.ExpiresAt.After(a.VerifiedAt) {
+		return fmt.Errorf("attestation requires an ordered session start, verification, and expiry")
+	}
+	return nil
+}
+
+// ValidateTelemetrySource is shared by outside enrollment and verified
+// attestation metadata. Structural validity does not authenticate its claims.
+func ValidateTelemetrySource(source, measurement, rootKind, rootLabel string, caveats []string) error {
+	if !telemetryIdentifier(source, 1024) || !telemetryDigest(measurement) {
+		return fmt.Errorf("telemetry source requires an exact instance and measurement digest")
+	}
+	if !telemetryIdentifier(rootKind, 128) || !telemetryIdentifier(rootLabel, 1024) || len(caveats) == 0 || len(caveats) > 16 {
 		return fmt.Errorf("attestation requires a bounded explicit root and caveats")
 	}
-	for _, caveat := range a.Caveats {
+	for _, caveat := range caveats {
 		if !telemetryIdentifier(caveat, 2048) {
 			return fmt.Errorf("attestation caveats must be bounded and nonempty")
 		}
 	}
-	if a.RootKind == "SOFTWARE_TPM" && (a.RootLabel != "software TPM root \u2014 not hardware-backed" || len(a.Caveats) == 0) {
+	if rootKind == "SOFTWARE_TPM" && rootLabel != "software TPM root \u2014 not hardware-backed" {
 		return fmt.Errorf("software TPM attestation must carry its exact root label and limitations")
-	}
-	if a.StartedAt.IsZero() || a.VerifiedAt.Before(a.StartedAt) || !a.ExpiresAt.After(a.VerifiedAt) {
-		return fmt.Errorf("attestation requires an ordered session start, verification, and expiry")
 	}
 	return nil
 }
@@ -311,7 +325,7 @@ func telemetryCounter(counters []TelemetryLossCounter, id string) (TelemetryLoss
 }
 
 func telemetryIdentifier(value string, maximum int) bool {
-	return len(value) > 0 && len(value) <= maximum && strings.TrimSpace(value) == value && !strings.ContainsAny(value, "\x00\r\n")
+	return len(value) > 0 && len(value) <= maximum && utf8.ValidString(value) && strings.TrimSpace(value) == value && strings.IndexFunc(value, unicode.IsControl) < 0
 }
 
 func telemetryDigest(value string) bool {
