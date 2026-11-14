@@ -96,3 +96,28 @@ before starting a read-only runtime; no global installation was performed.
 Native sensor acceptance remains blocked until the owner authorizes a suitable
 environment change or provides an independently available environment. The agent
 must not raise the shared inotify limit or stop unrelated containers on its own.
+
+## Prepared read-only native helper
+
+`tests/runtime/nativehealth` provides three Linux-only modes for the next
+authorized experiment. `credentials` measures the current locked OS thread.
+`inventory` reads the actual kernel, sensor PID start ticks and cgroup, and the
+IDs and ABI metadata of the seven pinned Tetragon health maps using read-only
+descriptors. It emits a `candidateEnrollment`; the digest identifies those
+observations with the digest field empty during hashing. It does not authenticate
+the candidate or grant permission to use it.
+
+`read` accepts a bounded private JSON file containing externally authorized
+`enrollment` and `grant` values, rejects ambiguous JSON through the shared strict
+decoder, and invokes the production `ReadWitness` with a five-second deadline.
+The enclosing operator must authenticate and authorize that input before calling
+the helper. No signature or external authority is invented by the local CLI.
+Errors retain the returned UNKNOWN witness in machine-readable output and exit 1.
+The helper creates no maps, programs, grants, mounts, or counters and does not
+change process capabilities or namespaces.
+
+The actual Linux arm64 build and Linux-target lint passed. Native BPF inventory
+and witness execution remain unperformed because the retained node could not
+start. Compilation is not native sensor proof. The prepared binary is
+`/private/tmp/oskal-p2-native-proof/nativehealth`; it must not be used against an
+unrelated or production node to bypass the pending environment authorization.
