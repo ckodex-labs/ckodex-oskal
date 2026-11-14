@@ -434,6 +434,7 @@ func (s *Session) Snapshot(now time.Time) (assurance.TelemetryIntegrity, error) 
 	}
 	if s.fault != "" {
 		r.State = assurance.AssuranceStateUnknown
+		r.Recovery = assurance.TelemetryFreshSessionRequired
 		r.Reasons = append(r.Reasons, s.fault)
 	}
 	return r, nil
