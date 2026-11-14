@@ -8,13 +8,13 @@ subscriptions and storage, not a deployed OSKAL controller or production trust.
 ```text
 Tetragon FineGuidanceSensors.GetEvents (mTLS)
   or Hubble Observer.GetFlows (mTLS through a Kubernetes-authorized port-forward)
-→ official generated protobuf messages
-→ namespace, identity, verdict/UID and timestamp validation
-→ synchronous CapturedEventWriter (4 MiB bound)
-→ live Kubernetes Pod GET + UID/creation-time check
-→ authoritative subject and epoch resolver
-→ exact protobuf JSON payload + envelope in filesystem CAS
-→ SHA-256 verification
+-> official generated protobuf messages
+-> namespace, identity, verdict/UID and timestamp validation
+-> synchronous CapturedEventWriter (4 MiB bound)
+-> live Kubernetes Pod GET + UID/creation-time check
+-> authoritative subject and epoch resolver
+-> exact protobuf JSON payload + envelope in filesystem CAS
+-> SHA-256 verification
 ```
 
 The collectors run one session. They return upstream, validation, persistence or

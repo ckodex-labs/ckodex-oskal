@@ -85,9 +85,9 @@ No raw decision input or verifier error is echoed in HTTP errors.
 live UID/creation-time resolver and filesystem CAS. It verified:
 
 - Successful report and constraint Lists and verifiable persisted payloads.
-- Real API cap → SAFE_HOLD and exactly one batch before `Run` returned the fault.
-- Unconfigured actual CRD → failed source completion, not empty PASS.
-- Actual empty namespace List → distinct empty batch with no invented result.
+- Real API cap -> SAFE_HOLD and exactly one batch before `Run` returned the fault.
+- Unconfigured actual CRD -> failed source completion, not empty PASS.
+- Actual empty namespace List -> distinct empty batch with no invented result.
 - Two successful periodic polls followed by context cancellation.
 
 ```text
