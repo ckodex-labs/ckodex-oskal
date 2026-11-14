@@ -42,3 +42,28 @@ they do not fake an attestation verifier or claim backend publication success.
 End-to-end quote admission, healthy streaming, durable watchdog outcomes and the
 producer loop require the actual TPM/provider/publisher integration gates. No
 physical guest co-residence or hardware-backed TPM proof is claimed here.
+
+## Producer lifecycle
+
+`NewClient(ClientConfig)` requires an explicit TLS identity/trust configuration,
+export signing key, outside enrollment, pinned receipt scope, real attester and
+real sampler. `Run(ctx)` creates a fresh connection and exporter observer without
+reconnect or RPC retry. One bounded quote worker operates independently of one
+bounded sample worker. The sender and receiver each have a fixed-size queue;
+unacknowledged heartbeat capacity is 16 and retained record metadata capacity is
+32. Raw observation batches are not retained in the receipt index. Ports must
+honor their deadlines; a worker that fails to drain fences that client instance.
+
+The producer signs the exact supplied sample time and UNKNOWN counter facts. Slot
+numbers derive from elapsed time since the admitted schedule, so missed ticks do
+not become a fabricated contiguous stream. Receipt validation checks the pinned
+controller, assessment scope, actual client exporter/export key, quote digest,
+source/root/caveats, submitted record digest, sample window and evaluation time.
+Admission starts sampling only after its signed receipt arrives. Receipt expiry
+clears local positive status; disconnect requires a fresh session. Endpoint clocks
+must satisfy the enrolled time bounds; there is no silent clock-skew allowance.
+
+Client tests verify real Ed25519 DSSE heartbeat bytes across a missed slot and
+original UNKNOWN sample facts, allocation bounds, and expiry of local status.
+These component checks do not establish a successful attested producer/backend
+stream; that still requires the actual integration gate described above.

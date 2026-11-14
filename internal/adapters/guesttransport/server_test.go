@@ -92,7 +92,7 @@ func TestActualSignedReceiptPublicationBinding(t *testing.T) {
 	}
 	scope := ReceiptScope{Key: ed25519.PublicKey(key), Authority: authority, Subject: assurance.SubjectRef{Scheme: "file", ID: "declared-binding-test"}, Control: assurance.ControlRef{Namespace: "example", ID: "transport-binding"}}
 	observed := time.Now().UTC().Add(-time.Second)
-	integrity := assurance.TelemetryIntegrity{State: assurance.AssuranceStateUnknown, SessionID: assurance.ComputeStringDigest("test session context"), RootKind: "SOFTWARE_TPM", RootLabel: "software TPM root — not hardware-backed", Caveats: []string{"cryptographic binding fixture; no quote was admitted"}, Reasons: []string{"no attestation"}}
+	integrity := assurance.TelemetryIntegrity{State: assurance.AssuranceStateUnknown, SessionID: assurance.ComputeStringDigest("test session context"), RootKind: "SOFTWARE_TPM", RootLabel: "software TPM root \u2014 not hardware-backed", Caveats: []string{"cryptographic binding fixture; no quote was admitted"}, Reasons: []string{"no attestation"}}
 	publication := guest.Publication{EnrollmentID: "test", SessionGeneration: 1, SessionID: integrity.SessionID, ObservedAt: observed, Integrity: integrity}
 	create := func(at time.Time, telemetry assurance.TelemetryEvidence, subject assurance.SubjectRef) []byte {
 		t.Helper()
