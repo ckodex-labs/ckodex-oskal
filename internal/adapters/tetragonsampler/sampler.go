@@ -72,6 +72,7 @@ type Sampler struct {
 	eventBytes int
 	throttles  uint64
 	previous   map[string]uint64
+	series     map[string]uint64
 }
 
 var _ guest.Sampler = (*Sampler)(nil)
@@ -266,6 +267,15 @@ func (s *Sampler) Sample(parent context.Context) (guest.Sample, error) {
 	if err := ctx.Err(); err != nil {
 		return guest.Sample{}, err
 	}
+	currentSeries, err := metricSeries(metrics)
+	if err == nil {
+		err = compareSeries(s.series, currentSeries)
+	}
+	if err != nil {
+		s.fault = err
+		s.cancel()
+		return guest.Sample{}, err
+	}
 	values, err := counters(metrics, witness, s.throttles)
 	if err != nil {
 		return guest.Sample{}, err
@@ -292,6 +302,7 @@ func (s *Sampler) Sample(parent context.Context) (guest.Sample, error) {
 			s.previous[value.ID] = value.Value
 		}
 	}
+	s.series = currentSeries
 	result := guest.Sample{SourceInstance: s.config.SourceInstance, SampledAt: time.Now().UTC(), Counters: values, Observations: s.events, HealthEvidence: []guest.Observation{{MediaType: HealthPayloadType, Payload: payload}}}
 	s.events = nil
 	s.eventBytes = 0

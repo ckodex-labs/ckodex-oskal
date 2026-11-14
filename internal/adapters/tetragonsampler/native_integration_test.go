@@ -135,6 +135,9 @@ func TestNativeSampler(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	var previous *assurance.TelemetryHeartbeat
+	var policy assurance.TelemetryPolicy
+	var attestation assurance.TelemetryAttestation
 	for sequence := range 2 {
 		sample, err := sampler.Sample(ctx)
 		if err != nil {
@@ -160,6 +163,23 @@ func TestNativeSampler(t *testing.T) {
 				unknown++
 			}
 		}
+		if previous == nil {
+			policy, attestation = windowContext(sample.SampledAt, sample.SourceInstance, RequiredSignals())
+		}
+		rawSample, err := json.Marshal(sample)
+		if err != nil {
+			t.Fatal(err)
+		}
+		beat := assurance.TelemetryHeartbeat{SessionID: attestation.SessionID, SourceInstance: sample.SourceInstance, Sequence: uint64(sequence + 1), Slot: uint64(sequence), SampledAt: sample.SampledAt, ReceivedAt: time.Now().UTC(), Digest: assurance.ComputeDigest(rawSample), Counters: sample.Counters}
+		if previous != nil {
+			beat.PreviousDigest = previous.Digest
+		}
+		window, err := assurance.EvaluateTelemetryWindow(policy, attestation, previous, beat, time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("UNATTESTED normalization-only core window: state=%s loss=%+v reasons=%v", window.State, window.Loss, window.Reasons)
+		previous = &beat
 		data, err := json.MarshalIndent(sample, "", "  ")
 		if err != nil {
 			t.Fatal(err)
@@ -174,6 +194,6 @@ func TestNativeSampler(t *testing.T) {
 		for _, family := range health.Metrics.Families {
 			t.Logf("family=%s kind=%s availability=%s series=%d", family.Name, family.Kind, family.Availability, len(family.Series))
 		}
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(time.Second)
 	}
 }

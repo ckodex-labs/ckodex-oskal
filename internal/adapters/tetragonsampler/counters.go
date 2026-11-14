@@ -51,13 +51,9 @@ func RequiredSignals() []string {
 }
 
 func measured(id string, value uint64) assurance.TelemetryLossCounter {
-	counter := assurance.TelemetryLossCounter{ID: id, Value: value, Status: assurance.TelemetrySignalObserved}
-	if value > 0 {
-		counter.Status = assurance.TelemetrySignalUnknown
-		counter.Reason = "actual cumulative loss or throttle signal is nonzero; no complete visibility claim"
-	}
-	return counter
+	return assurance.TelemetryLossCounter{ID: id, Value: value, Status: assurance.TelemetrySignalObserved}
 }
+
 func unknown(id, reason string) assurance.TelemetryLossCounter {
 	return assurance.TelemetryLossCounter{ID: id, Status: assurance.TelemetrySignalUnknown, Reason: reason}
 }

@@ -63,10 +63,13 @@ func TestNormalizationPreservesUnknownAndNativeCellIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"native.bpf.000.unknown", "native.throttle.active", "native.map.execve_map.capacity", "stream.throttle.events"} {
+	for _, id := range []string{"native.throttle.active", "native.map.execve_map.capacity"} {
 		if find(id).Status != assurance.TelemetrySignalUnknown {
 			t.Fatalf("adverse %s became complete visibility", id)
 		}
+	}
+	if find("native.bpf.000.unknown").Status != assurance.TelemetrySignalObserved || find("native.bpf.000.unknown").Value != 1 || find("stream.throttle.events").Value != 1 {
+		t.Fatal("observed cumulative values were erased instead of compared over a window")
 	}
 	w.Loss = append(w.Loss[:1791], w.Loss[0])
 	if _, err := counters(metric, w, 0); err == nil {
