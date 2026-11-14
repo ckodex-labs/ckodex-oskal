@@ -42,7 +42,7 @@ func pinnedAttestedKey(t *testing.T, m *ReceiptManager) ed25519.PublicKey {
 
 func TestAttestedReceiptFullBodySignatureAndHistoricalExpiry(t *testing.T) {
 	m, receipt, telemetry, now := attestedFixture(t)
-	raw, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry)
+	raw, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry, telemetry.Integrity.ValidUntil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,9 +56,10 @@ func TestAttestedReceiptFullBodySignatureAndHistoricalExpiry(t *testing.T) {
 		t.Fatalf("expiry rewrote history or became a malformed artifact: %+v %v", later, err)
 	}
 	for name, mutate := range map[string]func(*AttestedControlReceipt){
-		"root":        func(b *AttestedControlReceipt) { b.Telemetry.Integrity.RootKind = "HARDWARE_TPM" },
-		"caveat":      func(b *AttestedControlReceipt) { b.Telemetry.Integrity.Caveats[0] = "hardware assurance" },
-		"subject UID": func(b *AttestedControlReceipt) { b.Receipt.Subject.Attributes["uid"] = "other-pod" },
+		"root":              func(b *AttestedControlReceipt) { b.Telemetry.Integrity.RootKind = "HARDWARE_TPM" },
+		"caveat":            func(b *AttestedControlReceipt) { b.Telemetry.Integrity.Caveats[0] = "hardware assurance" },
+		"subject UID":       func(b *AttestedControlReceipt) { b.Receipt.Subject.Attributes["uid"] = "other-pod" },
+		"assessment expiry": func(b *AttestedControlReceipt) { b.ValidUntil = b.Receipt.EvaluatedAt.Add(time.Second) },
 		"loss": func(b *AttestedControlReceipt) {
 			b.Telemetry.Integrity.Loss = []assurance.TelemetryLoss{{Signal: "actual-signal", Delta: 1}}
 		},
@@ -114,7 +115,7 @@ func TestAttestedUnknownPreservesLossAndGapAndRejectsUpgrades(t *testing.T) {
 	telemetry.Integrity.Gaps = []assurance.TelemetryGap{{Kind: "HEARTBEAT", First: 10, Last: 14}}
 	telemetry.Integrity.Reasons = []string{"observed loss and missing heartbeat slots"}
 	telemetry.Integrity.Recovery = assurance.TelemetryFreshSessionRequired
-	raw, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry)
+	raw, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry, telemetry.Integrity.ValidUntil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,11 +127,11 @@ func TestAttestedUnknownPreservesLossAndGapAndRejectsUpgrades(t *testing.T) {
 	telemetry.Attestation = nil
 	telemetry.Integrity.SessionID = ""
 	telemetry.RecordDigest, telemetry.QuoteDigest = "", ""
-	if _, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry); err != nil {
+	if _, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry, telemetry.Integrity.ValidUntil); err != nil {
 		t.Fatal(err)
 	}
 	receipt.State = assurance.AssuranceStateVerified
-	if _, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry); err == nil {
+	if _, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry, telemetry.Integrity.ValidUntil); err == nil {
 		t.Fatal("UNKNOWN integrity acquired positive standing")
 	}
 	receipt.State = assurance.AssuranceStateUnknown
@@ -145,7 +146,7 @@ func TestAttestedUnknownPreservesLossAndGapAndRejectsUpgrades(t *testing.T) {
 	if _, err := VerifyAttestedReceipt(t.Context(), legacyJSON, pinnedAttestedKey(t, m), nil, now); err == nil {
 		t.Fatal("legacy tuple signature was upgraded to v2 semantics")
 	}
-	if _, err := m.SignAttestedReceipt(t.Context(), legacy, telemetry); err == nil {
+	if _, err := m.SignAttestedReceipt(t.Context(), legacy, telemetry, telemetry.Integrity.ValidUntil); err == nil {
 		t.Fatal("legacy signature embedded into a new attested body")
 	}
 }
@@ -163,12 +164,14 @@ func TestValidDSSESignatureCannotBypassReceiptSemantics(t *testing.T) {
 		"loss": func(b *AttestedControlReceipt) {
 			b.Telemetry.Integrity.Loss = []assurance.TelemetryLoss{{Signal: "signal", Delta: 1}}
 		},
-		"future window":         func(b *AttestedControlReceipt) { b.Telemetry.Integrity.WindowEnd = now.Add(time.Second) },
-		"expired at assessment": func(b *AttestedControlReceipt) { b.Telemetry.Integrity.ValidUntil = now },
-		"legacy version":        func(b *AttestedControlReceipt) { b.Version = 1 },
+		"future window":                func(b *AttestedControlReceipt) { b.Telemetry.Integrity.WindowEnd = now.Add(time.Second) },
+		"expired at assessment":        func(b *AttestedControlReceipt) { b.Telemetry.Integrity.ValidUntil = now },
+		"legacy version":               func(b *AttestedControlReceipt) { b.Version = 1 },
+		"zero assessment validity":     func(b *AttestedControlReceipt) { b.ValidUntil = time.Time{} },
+		"extended assessment validity": func(b *AttestedControlReceipt) { b.ValidUntil = b.Telemetry.Integrity.ValidUntil.Add(time.Nanosecond) },
 	} {
 		t.Run(name, func(t *testing.T) {
-			body := AttestedControlReceipt{Version: 2, Receipt: receipt, Telemetry: telemetry}
+			body := AttestedControlReceipt{Version: 2, Receipt: receipt, Telemetry: telemetry, ValidUntil: telemetry.Integrity.ValidUntil}
 			mutate(&body)
 			payload, err := json.Marshal(body)
 			if err != nil {
@@ -187,7 +190,7 @@ func TestValidDSSESignatureCannotBypassReceiptSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry)
+	raw, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry, telemetry.Integrity.ValidUntil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +208,57 @@ func TestValidDSSESignatureCannotBypassReceiptSemantics(t *testing.T) {
 	}
 }
 
+func TestAssessmentExpiryPrecedesHealthyTelemetryDeadline(t *testing.T) {
+	m, receipt, telemetry, now := attestedFixture(t)
+	telemetry.Integrity.ValidUntil = now.Add(500 * time.Millisecond)
+	assessmentUntil := now.Add(20 * time.Millisecond)
+	raw, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry, assessmentUntil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, offset := range []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 100 * time.Millisecond} {
+		result, err := VerifyAttestedReceipt(t.Context(), raw, pinnedAttestedKey(t, m), nil, now.Add(offset))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := assurance.AssuranceStateVerified
+		if offset >= 20*time.Millisecond {
+			want = assurance.AssuranceStateUnknown
+		}
+		if result.SignatureStatus != "VERIFIED" || result.SignedState != assurance.AssuranceStateVerified || result.EffectiveState != want || !result.Body.ValidUntil.Equal(assessmentUntil) || !result.Body.Telemetry.Integrity.ValidUntil.Equal(now.Add(500*time.Millisecond)) {
+			t.Fatalf("assessment expiry was erased or replaced by source liveness at %s: %+v", offset, result)
+		}
+	}
+}
+
+func TestOldPositiveBodyWithoutAssessmentValidityIsRejected(t *testing.T) {
+	m, receipt, telemetry, now := attestedFixture(t)
+	body, err := json.Marshal(AttestedControlReceipt{Version: 2, Receipt: receipt, Telemetry: telemetry, ValidUntil: telemetry.Integrity.ValidUntil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatal(err)
+	}
+	delete(fields, "validUntil")
+	body, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := signedrecords.NewSigner(m.privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := signer.Sign(t.Context(), AttestedReceiptPayloadType, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAttestedReceipt(t.Context(), raw, pinnedAttestedKey(t, m), nil, now); err == nil {
+		t.Fatal("old signed positive body silently inherited telemetry validity")
+	}
+}
+
 func TestInitialHeartbeatSlotZeroRemainsSignedUnknown(t *testing.T) {
 	m, receipt, telemetry, now := attestedFixture(t)
 	receipt.State, receipt.EvidenceRoot = assurance.AssuranceStateUnknown, ""
@@ -217,7 +271,7 @@ func TestInitialHeartbeatSlotZeroRemainsSignedUnknown(t *testing.T) {
 	telemetry.Integrity.Reasons = []string{"initial scheduled heartbeat slot 0 was not received"}
 	telemetry.Integrity.Recovery = assurance.TelemetryFreshSessionRequired
 	telemetry.RecordDigest = ""
-	raw, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry)
+	raw, err := m.SignAttestedReceipt(t.Context(), receipt, telemetry, telemetry.Integrity.ValidUntil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,13 +285,13 @@ func TestInitialHeartbeatSlotZeroRemainsSignedUnknown(t *testing.T) {
 	} {
 		changed := telemetry
 		changed.Integrity.Gaps = []assurance.TelemetryGap{gap}
-		if _, err := m.SignAttestedReceipt(t.Context(), receipt, changed); err == nil {
+		if _, err := m.SignAttestedReceipt(t.Context(), receipt, changed, changed.Integrity.ValidUntil); err == nil {
 			t.Fatalf("invalid inclusive gap admitted: %+v", gap)
 		}
 	}
 	positiveManager, positiveReceipt, positiveTelemetry, _ := attestedFixture(t)
 	positiveTelemetry.Integrity.Gaps = []assurance.TelemetryGap{{Kind: "HEARTBEAT", First: 0, Last: 0}}
-	if _, err := positiveManager.SignAttestedReceipt(t.Context(), positiveReceipt, positiveTelemetry); err == nil {
+	if _, err := positiveManager.SignAttestedReceipt(t.Context(), positiveReceipt, positiveTelemetry, positiveTelemetry.Integrity.ValidUntil); err == nil {
 		t.Fatal("missing initial slot acquired positive standing")
 	}
 }

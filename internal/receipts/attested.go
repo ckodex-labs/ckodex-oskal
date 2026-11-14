@@ -25,6 +25,9 @@ type AttestedControlReceipt struct {
 	Version   int                         `json:"version"`
 	Receipt   assurance.ControlReceipt    `json:"receipt"`
 	Telemetry assurance.TelemetryEvidence `json:"telemetry"`
+	// ValidUntil is the actual assessment/evidence expiry, distinct from source
+	// visibility's deadline. It must never extend positive evidence standing.
+	ValidUntil time.Time `json:"validUntil"`
 }
 
 type AttestedReceiptVerification struct {
@@ -67,6 +70,9 @@ func (b AttestedControlReceipt) Validate() error {
 		}
 	}
 	positive := r.State == assurance.AssuranceStateVerified || r.State == assurance.AssuranceStateAssured
+	if positive && (b.ValidUntil.IsZero() || !b.ValidUntil.After(r.EvaluatedAt) || b.ValidUntil.After(b.Telemetry.Integrity.ValidUntil)) {
+		return fmt.Errorf("positive receipt requires its actual assessment validity: evaluatedAt < validUntil <= telemetry validUntil")
+	}
 	switch r.State {
 	case assurance.AssuranceStateUnknown, assurance.AssuranceStateObserved, assurance.AssuranceStateVerified, assurance.AssuranceStateAssured, assurance.AssuranceStateStale, assurance.AssuranceStateFailed:
 	default:
@@ -82,8 +88,9 @@ func (b AttestedControlReceipt) Validate() error {
 
 // SignAttestedReceipt signs the complete v2 body under this explicitly configured
 // evaluator. It neither verifies submitted telemetry nor changes the legacy
-// ControlReceipt canonical format. The caller must supply an actual evaluation.
-func (m *ReceiptManager) SignAttestedReceipt(ctx context.Context, receipt assurance.ControlReceipt, telemetry assurance.TelemetryEvidence) ([]byte, error) {
+// ControlReceipt canonical format. validUntil is the actual evaluation/evidence
+// expiry, not a substitute heartbeat deadline. The caller owns that measurement.
+func (m *ReceiptManager) SignAttestedReceipt(ctx context.Context, receipt assurance.ControlReceipt, telemetry assurance.TelemetryEvidence, validUntil time.Time) ([]byte, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("receipt signing context is required")
 	}
@@ -97,7 +104,7 @@ func (m *ReceiptManager) SignAttestedReceipt(ctx context.Context, receipt assura
 		return nil, fmt.Errorf("receipt evaluator differs from configured signing authority")
 	}
 	receipt.Evaluator = m.evaluator
-	body := AttestedControlReceipt{Version: 2, Receipt: receipt, Telemetry: telemetry}
+	body := AttestedControlReceipt{Version: 2, Receipt: receipt, Telemetry: telemetry, ValidUntil: validUntil}
 	if err := body.Validate(); err != nil {
 		return nil, err
 	}
@@ -142,9 +149,9 @@ func VerifyAttestedReceipt(ctx context.Context, raw []byte, pinned ed25519.Publi
 	}
 	out = AttestedReceiptVerification{Body: body, SignedState: body.Receipt.State, EffectiveState: body.Receipt.State, SignatureStatus: "VERIFIED", CheckedAt: now, Scope: AttestedReceiptVerificationScope}
 	if body.Receipt.State == assurance.AssuranceStateVerified || body.Receipt.State == assurance.AssuranceStateAssured {
-		if !now.Before(body.Telemetry.Integrity.ValidUntil) {
+		if !now.Before(body.ValidUntil) {
 			out.EffectiveState = assurance.AssuranceStateUnknown
-			out.Reasons = append(out.Reasons, "signed historical assessment has expired; fresh attestation and a complete observation window are required")
+			out.Reasons = append(out.Reasons, "signed historical assessment or evidence has expired; fresh evidence within a complete attested observation window is required")
 		}
 	}
 	return out, nil
