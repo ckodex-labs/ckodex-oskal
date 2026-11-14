@@ -14,6 +14,8 @@ reuse. Both request and response are bounded by a deadline of at most five
 seconds. Only Prometheus text version 0.0.4 is accepted. Deployment must bind that
 network namespace to the enrolled sensor; loopback alone does not authenticate a
 producer. The reader does not expose port 2112 or change sensor configuration.
+`MetricsReader.Validate()` applies the same endpoint, timeout, and size checks
+without I/O; `Read` calls that shared preflight before opening a connection.
 
 `ParseMetrics(reader, limits)` hashes the original bounded body and preserves
 each known family, its actual upstream TYPE, sorted labels, and exact integer
@@ -108,6 +110,10 @@ availability `UNKNOWN`. It has no implementation that verifies the complete
 effective sensor configuration and loaded-program manifest. Missing rate maps,
 zero metrics, or a boolean enrollment flag cannot close that gap. Successful
 loss/map reads remain individual measured facts, not a healthy source verdict.
+
+`Enrollment.Validate()` exposes the existing Linux enrollment/ABI checks without
+I/O. It validates configuration, not the issuer or the observed runtime. On
+non-Linux systems it explicitly returns `ErrUnavailable`.
 
 Non-Linux systems have no kernel backend: `ReadWitness` returns
 `ErrUnavailable`, `UNKNOWN`, and no loss values. It does not run a substitute

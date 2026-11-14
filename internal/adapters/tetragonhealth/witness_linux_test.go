@@ -36,6 +36,15 @@ func TestWitnessNativeTetragon(t *testing.T) {
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		t.Fatal("native input contains trailing data")
 	}
+	if err := input.Enrollment.Validate(); err != nil {
+		t.Fatal("actual enrollment preflight: ", err)
+	}
+	invalid := input.Enrollment
+	invalid.Maps = append([]MapEnrollment(nil), input.Enrollment.Maps...)
+	invalid.Maps[0].KeySize++
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("preflight admitted a corrupted actual map ABI")
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	witness, err := ReadWitness(ctx, input.Enrollment, input.Grant)

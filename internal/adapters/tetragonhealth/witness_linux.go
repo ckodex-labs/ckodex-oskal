@@ -52,7 +52,7 @@ func ReadWitness(ctx context.Context, enrollment Enrollment, grant RoleGrant) (o
 			out.Availability, out.Reason = Unknown, err.Error()
 		}
 	}()
-	if err = validateEnrollment(enrollment); err != nil {
+	if err = enrollment.Validate(); err != nil {
 		return out, err
 	}
 	deadline, ok := ctx.Deadline()
@@ -167,6 +167,9 @@ func ReadWitness(ctx context.Context, enrollment Enrollment, grant RoleGrant) (o
 	out.Availability = Observed
 	return out, nil
 }
+
+// Validate checks the enrolled native contract without accessing the kernel.
+func (e Enrollment) Validate() error { return validateEnrollment(e) }
 
 func validateEnrollment(e Enrollment) error {
 	if !validDigest(e.Digest) || !validUUID(e.BootID) || !validUUID(e.PodUID) || e.SensorPID < 1 || e.ProcessStartTicks == 0 || !filepath.IsAbs(e.MapRoot) || filepath.Clean(e.MapRoot) != e.MapRoot || e.MapRoot == "/" || e.MaxPossibleCPUs < 1 || e.MaxPossibleCPUs > 256 || e.MaxThrottleEntries < 1 || e.MaxThrottleEntries > 1024 {
@@ -424,7 +427,7 @@ func (r nativeRead) throttle(ctx context.Context, options, rates *ebpf.Map, cpus
 
 func (r nativeRead) throttleEntries(ctx context.Context, m *ebpf.Map, cpus int) ([]uint64, []uint64, error) {
 	var keys, active []uint64
-	var previous *uint64
+	var previous any
 	seen := make(map[uint64]bool)
 	for {
 		if err := r.check(ctx); err != nil {
@@ -456,7 +459,7 @@ func (r nativeRead) throttleEntries(ctx context.Context, m *ebpf.Map, cpus int) 
 				break
 			}
 		}
-		previous = &key
+		previous = key
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	return keys, active, nil
