@@ -131,10 +131,10 @@ func TestRealSoftwareTPMBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	facts, err := verifier.VerifyAttestation(t.Context(), report, qualification)
-	if err != nil || facts.RootLabel != "software TPM root — not hardware-backed" {
+	if err != nil || facts.RootLabel != "software TPM root \u2014 not hardware-backed" {
 		t.Fatalf("real broker quote: %+v %v", facts, err)
 	}
-	t.Log("VERIFIED real mTLS -> registered Ed25519 DSSE proof -> pre/post outside ELF inspection -> swtpm quote -> enrolled TPM verifier; software TPM root — not hardware-backed")
+	t.Log("VERIFIED real mTLS -> registered Ed25519 DSSE proof -> pre/post outside ELF inspection -> swtpm quote -> enrolled TPM verifier; software TPM root \u2014 not hardware-backed")
 	t.Run("qualification_binding", func(t *testing.T) {
 		other := qualification
 		other[0] ^= 1

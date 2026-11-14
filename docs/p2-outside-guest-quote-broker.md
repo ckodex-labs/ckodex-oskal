@@ -8,7 +8,7 @@ and PCR enrollment and its exact expected 64-byte qualification.
 
 Every successful broker response carries:
 
-- `software TPM root — not hardware-backed`
+- software TPM root &mdash; not hardware-backed
 - `Outside-owned ELF file measurement only; does not prove runtime memory integrity, key non-extractability, co-residence, or resistance to guest or host root.`
 
 The client checks both fields. Its opaque TPM report retains the software-root
@@ -27,7 +27,7 @@ A Kind demo does not prove resistance to guest root or host root.
 - `ExportPublicKey`: the enrolled Ed25519 export key.
 - `TLS`: server certificate and client CA pool; client certificate verification
   and TLS 1.3 are enforced. Dynamic server TLS configuration is rejected.
-- `ProofTTL`: positive, at most one minute; `Capacity`: 1–1024 outstanding nonces.
+- `ProofTTL`: positive, at most one minute; `Capacity`: 1-1024 outstanding nonces.
 
 `NewServer(config)` followed by `Serve(ctx, listener)` exposes only
 `assurance.attestation.v1.QuoteIssuer/{Challenge,Issue}`. The protocol carries no

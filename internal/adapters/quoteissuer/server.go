@@ -27,7 +27,7 @@ import (
 // SoftwareLimitations accompanies every broker response. The TPM report also
 // preserves its exact software-root label for downstream attestation verification.
 const SoftwareLimitations = "Outside-owned ELF file measurement only; does not prove runtime memory integrity, key non-extractability, co-residence, or resistance to guest or host root."
-const SoftwareRootLabel = "software TPM root — not hardware-backed"
+const SoftwareRootLabel = "software TPM root \u2014 not hardware-backed"
 
 const proofType = "application/vnd.oskal.quote-authorization.v1+json"
 const maxWireBytes = 8192
