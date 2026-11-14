@@ -21,7 +21,7 @@ const (
 	syftImage       = "anchore/syft:v1.52.0"
 	grypeImage      = "anchore/grype:v0.119.0"
 	bufImage        = "bufbuild/buf:1.50.0"
-	cosignImage     = "gcr.io/projectsigstore/cosign:v2.4.1"
+	cosignImage     = "ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d"
 )
 
 // Oskal represents the automated CI/CD assurance pipeline for OSKAL.
@@ -122,9 +122,18 @@ func (m *Oskal) Attest(ctx context.Context, source *dagger.Directory) (*dagger.D
 		WithFile("/usr/local/bin/cosign", cosignBin, dagger.ContainerWithFileOpts{Permissions: 0755}).
 		WithMountedDirectory("/out/bin", binDir).
 		WithWorkdir("/out/attestations").
+		WithMountedTemp("/tmp/cosign").
 		WithEnvVariable("COSIGN_PASSWORD", "").
-		WithExec([]string{"sh", "-c", "mkdir -p /tmp/cosign && cd /tmp/cosign && cosign generate-key-pair && cp /tmp/cosign/cosign.pub /out/attestations/cosign.pub"}).
-		WithExec([]string{"sh", "-c", `
+		WithEnvVariable("TUF_ROOT", "/tmp/cosign/tuf").
+		WithEnvVariable("HTTP_PROXY", "http://127.0.0.1:9").
+		WithEnvVariable("HTTPS_PROXY", "http://127.0.0.1:9").
+		WithEnvVariable("NO_PROXY", "").
+		WithExec([]string{"sh", "-eu", "-c", `
+cosign generate-key-pair --output-key-prefix /tmp/cosign/key
+cp /tmp/cosign/key.pub cosign.pub
+# No default services: no Rekor, Fulcio, OIDC or TSA endpoints, and no TUF fetch.
+cosign signing-config create --out offline-signing-config.json
+
 OSKAL_HASH=$(sha256sum /out/bin/oskal | awk '{print $1}')
 CTRL_HASH=$(sha256sum /out/bin/oskal-controller | awk '{print $1}')
 
@@ -147,15 +156,29 @@ cat <<EOF > /out/attestations/provenance.json
   }
 }
 EOF
-`}).
-		WithExec([]string{"cosign", "sign-blob", "--yes", "--key", "/tmp/cosign/cosign.key", "--output-signature", "oskal.sig", "/out/bin/oskal"}).
-		WithExec([]string{"cosign", "sign-blob", "--yes", "--key", "/tmp/cosign/cosign.key", "--output-signature", "oskal-controller.sig", "/out/bin/oskal-controller"}).
-		WithExec([]string{"cosign", "attest-blob", "--yes", "--key", "/tmp/cosign/cosign.key", "--predicate", "provenance.json", "--type", "slsaprovenance1", "--output-attestation", "in-toto-attestation.json", "/out/bin/oskal"}).
-		WithExec([]string{"cosign", "attest-blob", "--yes", "--key", "/tmp/cosign/cosign.key", "--predicate", "provenance.json", "--type", "slsaprovenance1", "--output-attestation", "in-toto-attestation-controller.json", "/out/bin/oskal-controller"}).
-		WithExec([]string{"sh", "-c", "rm -rf /tmp/cosign /out/attestations/cosign.key"}).
-		WithExec([]string{"cosign", "verify-blob", "--key", "cosign.pub", "--signature", "oskal.sig", "/out/bin/oskal"}).
-		WithExec([]string{"cosign", "verify-blob", "--key", "cosign.pub", "--signature", "oskal-controller.sig", "/out/bin/oskal-controller"})
 
+for artifact in oskal oskal-controller; do
+  cosign --timeout=30s sign-blob --yes --key /tmp/cosign/key.key --oidc-disable-ambient-providers --signing-config offline-signing-config.json --bundle "$artifact.sigstore.json" "/out/bin/$artifact"
+  cosign --timeout=30s attest-blob --yes --key /tmp/cosign/key.key --oidc-disable-ambient-providers --signing-config offline-signing-config.json --predicate provenance.json --type slsaprovenance1 --bundle "$artifact.intoto.sigstore.json" "/out/bin/$artifact"
+  # This profile has no transparency record. Both verifiers still check the
+  # actual local-key signature; attestation verification also checks its subject.
+  cosign --timeout=30s verify-blob --key cosign.pub --insecure-ignore-tlog --bundle "$artifact.sigstore.json" "/out/bin/$artifact"
+  cosign --timeout=30s verify-blob-attestation --key cosign.pub --insecure-ignore-tlog --type slsaprovenance1 --check-claims=true --bundle "$artifact.intoto.sigstore.json" "/out/bin/$artifact"
+
+  cp "/out/bin/$artifact" "/tmp/cosign/$artifact.tampered"
+  printf '\nintentional local tamper check\n' >> "/tmp/cosign/$artifact.tampered"
+  if cosign --timeout=30s verify-blob --key cosign.pub --insecure-ignore-tlog --bundle "$artifact.sigstore.json" "/tmp/cosign/$artifact.tampered"; then
+    echo "ERROR: altered $artifact passed local signature verification" >&2
+    exit 1
+  fi
+  if cosign --timeout=30s verify-blob-attestation --key cosign.pub --insecure-ignore-tlog --type slsaprovenance1 --check-claims=true --bundle "$artifact.intoto.sigstore.json" "/tmp/cosign/$artifact.tampered"; then
+    echo "ERROR: altered $artifact passed attestation subject verification" >&2
+    exit 1
+  fi
+  printf 'VERIFIED: %s local ephemeral-key signature and attestation subject digest; altered binary rejected by both verifiers.\n' "$artifact" >> local-verification.txt
+done
+test ! -e /tmp/cosign/tuf
+`})
 	return attestContainer.Directory("/out/attestations"), nil
 }
 
