@@ -278,6 +278,28 @@ func (p *Publisher) ingest(ctx context.Context, v guest.Publication) error {
 }
 
 func (p *Publisher) archiveWire(ctx context.Context, v guest.Publication, epoch assurance.AssuranceEpoch) error {
+	if v.RejectedQuote != nil {
+		attempt := v.RejectedQuote
+		if len(attempt.ChallengeID) > (guest.MaxRecordBytes+2)/3*4+4096 || len(attempt.AttestationReport) > (guest.MaxRecordBytes+2)/3*4+4096 || len(attempt.SignedExportKeyProof) > (guest.MaxRecordBytes+2)/3*4+4096 {
+			return fmt.Errorf("rejected quote assertion exceeds its transport evidence bound")
+		}
+		raw, err := json.Marshal(struct {
+			Version              uint32           `json:"version"`
+			ChallengeID          string           `json:"challengeID"`
+			VerifierChallenge    *guest.Challenge `json:"verifierChallenge,omitempty"`
+			AttestationReport    []byte           `json:"attestationReport"`
+			SignedExportKeyProof []byte           `json:"signedExportKeyProof"`
+		}{1, attempt.ChallengeID, attempt.Challenge, attempt.AttestationReport, attempt.SignedExportKeyProof})
+		if err != nil {
+			return err
+		}
+		if len(raw) > 4<<20 {
+			return fmt.Errorf("rejected quote history exceeds four MiB; preserve the transport failure and inspect its sender")
+		}
+		if _, err := p.put(ctx, raw, "guest.rejected.quote.attempt", "application/vnd.oskal.rejected-quote-attempt.v1+json", v.ObservedAt, epoch); err != nil {
+			return err
+		}
+	}
 	if v.Challenge != nil {
 		raw, err := json.Marshal(v.Challenge)
 		if err != nil {
