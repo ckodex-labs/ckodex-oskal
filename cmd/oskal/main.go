@@ -539,19 +539,12 @@ and projects defensible results into standard OSCAL artifacts.`,
 				idDisplay = "rcpt-" + rcpt.Control.ID
 			}
 
-			pubKeyHex := strings.TrimSpace(verifyPublicKey)
-			if pubKeyHex == "" {
-				return fmt.Errorf("--public-key is required from trusted custody; a key stored beside the receipt is not an authority anchor")
-			}
-			if len(pubKeyHex) != 64 {
-				raw, err := readBoundedFile(pubKeyHex, 4096)
-				if err != nil {
-					return err
-				}
-				pubKeyHex = strings.TrimSpace(string(raw))
+			publicKey, err := readReceiptPublicKey(verifyPublicKey)
+			if err != nil {
+				return err
 			}
 
-			valid, err := receipts.VerifyIndependentReceipt(rcpt, pubKeyHex)
+			valid, err := receipts.VerifyIndependentReceipt(rcpt, fmt.Sprintf("%x", publicKey))
 			if err != nil || !valid {
 				return fmt.Errorf("[FAIL] Receipt %s cryptographic verification failed: valid=%v, err=%v", idDisplay, valid, err)
 			}
