@@ -47,11 +47,11 @@ func TestAttestedReceiptCompiledCommandStatesAndInputRejection(t *testing.T) {
 	a := assurance.TelemetryAttestation{SessionID: d, SourceInstance: "fixture", MeasurementDigest: d, ExportKeyDigest: d, ChannelDigest: d, RootKind: "SOFTWARE_TPM", RootLabel: "software TPM root \u2014 not hardware-backed", Caveats: []string{"Signed fixture claim; runtime quote and policy are not independently verified."}, StartedAt: now.Add(-time.Minute), VerifiedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)}
 	telemetry := assurance.TelemetryEvidence{Attestation: &a, Integrity: assurance.TelemetryIntegrity{State: assurance.AssuranceStateVerified, RootKind: a.RootKind, RootLabel: a.RootLabel, Caveats: a.Caveats, SessionID: d, WindowStart: now.Add(-2 * time.Second), WindowEnd: now.Add(-time.Second), ValidUntil: a.ExpiresAt}, RecordDigest: d, QuoteDigest: d}
 	r := assurance.ControlReceipt{Subject: assurance.SubjectRef{Scheme: "file", ID: "protocol-fixture"}, Control: assurance.ControlRef{Namespace: "test", ID: "fixture"}, State: assurance.AssuranceStateVerified, Epoch: assurance.AssuranceEpoch{SubjectDigest: d, ImplementationDigest: d, PolicyDigest: d, AuthorityDigest: d, EnvironmentDigest: d}, EvidenceRoot: d, EvaluatedAt: now}
-	write := func(name string, state assurance.AssuranceState, context assurance.TelemetryEvidence) string {
+	write := func(name string, state assurance.AssuranceState, context assurance.TelemetryEvidence, validUntil time.Time) string {
 		t.Helper()
 		input := r
 		input.State = state
-		raw, err := m.SignAttestedReceipt(t.Context(), input, context)
+		raw, err := m.SignAttestedReceipt(t.Context(), input, context, validUntil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -61,16 +61,15 @@ func TestAttestedReceiptCompiledCommandStatesAndInputRejection(t *testing.T) {
 		}
 		return path
 	}
-	positive := write("positive.dsse", assurance.AssuranceStateVerified, telemetry)
+	positive := write("positive.dsse", assurance.AssuranceStateVerified, telemetry, telemetry.Integrity.ValidUntil)
 	unknownContext := telemetry
 	unknownContext.Integrity.State = assurance.AssuranceStateUnknown
 	unknownContext.Integrity.Reasons = []string{"missing scheduled heartbeat"}
 	unknownContext.Integrity.Gaps = []assurance.TelemetryGap{{Kind: "HEARTBEAT", First: 2, Last: 3}}
-	unknown := write("unknown.dsse", assurance.AssuranceStateUnknown, unknownContext)
-	failed := write("failed.dsse", assurance.AssuranceStateFailed, telemetry)
-	expiredContext := telemetry
-	expiredContext.Integrity.ValidUntil = now.Add(100 * time.Millisecond)
-	expired := write("expired.dsse", assurance.AssuranceStateVerified, expiredContext)
+	unknown := write("unknown.dsse", assurance.AssuranceStateUnknown, unknownContext, unknownContext.Integrity.ValidUntil)
+	failed := write("failed.dsse", assurance.AssuranceStateFailed, telemetry, telemetry.Integrity.ValidUntil)
+	// The required evidence has expired while the source window remains live.
+	expired := write("expired.dsse", assurance.AssuranceStateVerified, telemetry, now.Add(100*time.Millisecond))
 	for _, test := range []struct {
 		path  string
 		code  int

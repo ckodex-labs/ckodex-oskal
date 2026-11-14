@@ -2,7 +2,8 @@
 
 The v2 receipt is a separate DSSE protocol with payload type
 `application/vnd.oskal.attested-control-receipt.v2+json`. Its complete JSON body
-contains `version: 2`, an unsigned `receipt` and `telemetry`. A real Ed25519 DSSE
+contains `version: 2`, an unsigned `receipt`, `telemetry`, and `validUntil` for the
+actual assessment/evidence expiry. A real Ed25519 DSSE
 signature covers all payload bytes, including subject attributes, enrolled-root
 labels, caveats, sessions, measurement/key/channel digests, record/quote digests,
 loss counters, inclusive missing ranges, reasons and recovery instructions.
@@ -15,12 +16,15 @@ a digest of newly attached telemetry context.
 
 ## Construction and verification
 
-`ReceiptManager.SignAttestedReceipt(ctx, receipt, telemetry)` requires the actual
+`ReceiptManager.SignAttestedReceipt(ctx, receipt, telemetry, validUntil)` requires the actual
 evaluation time, enforces this manager's explicitly configured evaluator claim,
 validates body coherence, and signs its complete encoding. It does not obtain or
 verify a TPM quote, authenticate a source, resolve an enrollment policy, or verify
 the underlying evidence artifacts. The application must perform those operations
 before constructing positive assessment inputs.
+The mandatory fourth argument must come from the actual evaluator's evidence
+validity. It must not be replaced by the heartbeat or attestation deadline: a
+healthy source does not extend an individual control observation's freshness.
 
 `VerifyAttestedReceipt(ctx, raw, pinnedKey, expectedAuthority, now)` verifies the
 full DSSE signature using only the pinned Ed25519 key and strictly decodes the v2
@@ -36,8 +40,13 @@ visibility. VERIFIED or ASSURED control standing requires VERIFIED integrity,
 an actual nonempty evidence-root digest, all five receipt epoch digests, complete
 attestation fields and record/quote digests, and matching root/session/caveats.
 The window must satisfy
-`windowStart < windowEnd <= evaluatedAt < validUntil <= attestation.expiresAt`;
+`windowStart < windowEnd <= evaluatedAt < telemetry.integrity.validUntil <= attestation.expiresAt`;
 it cannot precede the session start or end before attestation verification.
+Positive receipts additionally require
+`evaluatedAt < body.validUntil <= telemetry.integrity.validUntil`. An older
+positive body without the distinct assessment deadline is rejected; no fallback
+to source liveness is permitted. `ClaimEvaluation.ValidUntil` continues to carry
+the actual evaluation validity in OSCAL inputs.
 Loss, missing ranges, unresolved reasons or recovery obligations prohibit
 VERIFIED integrity. Arrays, strings, attributes and encoded records are bounded.
 
@@ -49,7 +58,8 @@ as adverse diagnostic facts. Loss deltas remain per signal and are never added
 into an invented unique lost-event total.
 
 Historical signatures are immutable. If a previously valid positive receipt has
-expired at `now`, verification preserves its `signedState` and signed body while
+expired at `now` according to `body.validUntil`, verification preserves its
+`signedState` and signed body while
 reporting `effectiveState: UNKNOWN`. Expiry is an incomplete assessment result,
 not an invalid cryptographic signature. A contradictory positive body that was
 already expired at its own evaluation time is rejected as an invalid artifact.
