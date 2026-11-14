@@ -12,7 +12,7 @@ a resolver that derives the verified peer from its authenticated transport. It
 must never substitute the server's identity or accept identity headers. The
 public Go package exposes `NewKubernetesClient` and `NewKubernetesPrincipal`.
 
-The broker requires a positive TTL, 1–128 turns, exact namespace/name/UID,
+The broker requires a positive TTL, 1-128 turns, exact namespace/name/UID,
 matching admitted generation, and an active, non-deleting, non-revoked lease.
 Grants are immutable in the CRD. Changed authority requires a new lease. A failed
 or unavailable authoritative read denies execution. Payloads are limited to 1 MiB.
