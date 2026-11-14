@@ -473,7 +473,15 @@ func (r *serverSession) publication(accepted *guest.AcceptedRecord, reason strin
 	standing, quoteDigest := r.session.Standing()
 	r.material.Lock()
 	defer r.material.Unlock()
-	return guest.Publication{EnrollmentID: r.owner.config.EnrollmentID, SessionGeneration: r.generation, SessionID: integrity.SessionID, ObservedAt: now, ExportPublicKey: bytes.Clone(r.key), Challenge: r.admittedChallenge, AttestationReport: bytes.Clone(r.report), SignedExportKeyProof: bytes.Clone(r.proof), SignedHeartbeat: bytes.Clone(r.heartbeat), RecordDigest: r.recordDigest, Accepted: accepted, Integrity: integrity, Standing: standing, QuoteDigest: quoteDigest, Reason: boundedReason(reason), RejectedQuote: r.rejected}, nil
+	challenge, report, proof, rejected := r.admittedChallenge, r.report, r.proof, r.rejected
+	// AcceptQuote commits standing inside the application before returning. A
+	// watchdog may observe that commit before the handler updates its wire cache.
+	// Select the already captured tuple by the admitted report digest so the two
+	// snapshots cannot mislabel the prior report as the newly admitted quote.
+	if standing != nil && rejected != nil && assurance.ComputeDigest(report) != quoteDigest && assurance.ComputeDigest(rejected.AttestationReport) == quoteDigest {
+		challenge, report, proof, rejected = rejected.Challenge, rejected.AttestationReport, rejected.SignedExportKeyProof, nil
+	}
+	return guest.Publication{EnrollmentID: r.owner.config.EnrollmentID, SessionGeneration: r.generation, SessionID: integrity.SessionID, ObservedAt: now, ExportPublicKey: bytes.Clone(r.key), Challenge: challenge, AttestationReport: bytes.Clone(report), SignedExportKeyProof: bytes.Clone(proof), SignedHeartbeat: bytes.Clone(r.heartbeat), RecordDigest: r.recordDigest, Accepted: accepted, Integrity: integrity, Standing: standing, QuoteDigest: quoteDigest, Reason: boundedReason(reason), RejectedQuote: rejected}, nil
 }
 func (r *serverSession) publish(accepted *guest.AcceptedRecord, reason string) ([]byte, error) {
 	publication, err := r.publication(accepted, reason)
@@ -545,6 +553,7 @@ func (r *serverSession) watch(done <-chan struct{}) {
 		case <-done:
 			return
 		case <-r.operations.Done():
+			r.fail("telemetry operation context ended", r.operations.Err())
 			return
 		case <-ticker.C:
 			integrity, err := r.session.Snapshot(time.Now().UTC())

@@ -67,3 +67,12 @@ Client tests verify real Ed25519 DSSE heartbeat bytes across a missed slot and
 original UNKNOWN sample facts, allocation bounds, and expiry of local status.
 These component checks do not establish a successful attested producer/backend
 stream; that still requires the actual integration gate described above.
+
+The tagged `TestRealGuestStreamArchivesUnknownAndIndependentSilence` integration
+uses the provisioned software TPM fixture, actual mutual TLS/gRPC, actual
+filesystem CAS and a real Kubernetes client directed at a freshly closed loopback
+TCP endpoint. The admitted quote receives signed UNKNOWN with the real connection
+refusal. Sending no heartbeat causes the independent watchdog to publish a second
+signed, fenced UNKNOWN and close the stream. Reopening verifies the original
+quote and both receipts survived with archive integrity. This is a negative
+control dependency and silence proof, not a positive control or collector proof.
