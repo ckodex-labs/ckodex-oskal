@@ -424,7 +424,7 @@ func (r nativeRead) throttle(ctx context.Context, options, rates *ebpf.Map, cpus
 
 func (r nativeRead) throttleEntries(ctx context.Context, m *ebpf.Map, cpus int) ([]uint64, []uint64, error) {
 	var keys, active []uint64
-	var previous *uint64
+	var previous any
 	seen := make(map[uint64]bool)
 	for {
 		if err := r.check(ctx); err != nil {
@@ -456,7 +456,7 @@ func (r nativeRead) throttleEntries(ctx context.Context, m *ebpf.Map, cpus int) 
 				break
 			}
 		}
-		previous = &key
+		previous = key
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	return keys, active, nil

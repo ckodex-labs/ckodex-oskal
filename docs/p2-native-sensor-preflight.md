@@ -1,6 +1,9 @@
 # Native sensor proof: retained preflight blocker
 
-Status: **BLOCKED before Kubernetes and Tetragon startup**. No native BPF zero,
+Historical status: **BLOCKED before Kubernetes and Tetragon startup**. The user
+subsequently authorized the specific temporary limit increase and restoration;
+[the resumed native proof](p2-native-sensor-proof.md) records the new execution.
+This preflight experiment itself established no native BPF zero,
 failed-map-read, minimum-capability, counter-reset, saturation, or signed sensor
 receipt acceptance is claimed by this experiment.
 
