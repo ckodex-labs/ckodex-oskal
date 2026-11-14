@@ -62,5 +62,6 @@ reported expiry, cancellation, mapping, history and timestamp fixes.
 No test in this component substitutes a Kubernetes API or returns a manufactured
 positive result. Real Kubernetes publication, native BPF reads, flooding, minimum
 privileges, recovery, the in-guest launcher and the complete signed demo remain
-unverified. Rejected quote-attempt history is a pending transport integration,
-separate from the retained last admitted quote.
+unverified. Rejected quote-attempt history is archived as an explicitly rejected
+assertion, separate from the retained last admitted quote. This preserves the
+original report, proof and expected challenge without granting them standing.
