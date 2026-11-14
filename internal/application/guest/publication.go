@@ -15,6 +15,7 @@ import (
 // A nil Standing means no attestation was admitted, never a default trust root.
 type Publication struct {
 	EnrollmentID         string
+	SessionGeneration    uint64
 	SessionID            string
 	ObservedAt           time.Time
 	ExportPublicKey      ed25519.PublicKey
@@ -28,6 +29,7 @@ type Publication struct {
 	Standing             *assurance.TelemetryAttestation
 	QuoteDigest          string
 	Reason               string
+	RejectedQuote        *QuoteAttempt
 }
 
 // Publisher durably records the supplied outcome and returns its actual signed
@@ -37,4 +39,29 @@ type Publication struct {
 // projection; transports do not construct domain receipts or standing.
 type Publisher interface {
 	Publish(context.Context, Publication) ([]byte, error)
+}
+
+// Sample is an actual producer-side observation batch. Missing reads must remain
+// explicit UNKNOWN counters in the sampler; transport must not invent zeroes or
+// substitute its current clock for a missing SampledAt.
+type Sample struct {
+	SourceInstance string
+	SampledAt      time.Time
+	Counters       []assurance.TelemetryLossCounter
+	Observations   []Observation
+}
+
+// Sampler owns source I/O and bounded batching. A failed sample fences the client
+// stream; transport never converts a sample error into a fabricated heartbeat.
+type Sampler interface {
+	Sample(context.Context) (Sample, error)
+}
+
+// QuoteAttempt preserves received assertions that did not establish standing.
+// It must never replace the admitted report/proof tuple associated with Standing.
+type QuoteAttempt struct {
+	ChallengeID          string
+	Challenge            *Challenge
+	AttestationReport    []byte
+	SignedExportKeyProof []byte
 }
