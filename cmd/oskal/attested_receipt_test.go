@@ -15,18 +15,12 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/internal/receipts"
 )
 
-// This is the actual compiled command in a subprocess, with root registration
-// performed only by this harness. Production registration remains the root's task.
+// Execute the production-registered command in an isolated compiled subprocess.
 func TestAttestedReceiptCommandProcess(t *testing.T) {
 	if os.Getenv("OSKAL_ATTESTED_RECEIPT_COMMAND_CHILD") != "1" {
 		return
 	}
 	root := NewRootCommand()
-	receipt, _, err := root.Find([]string{"assurance", "receipt"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	receipt.AddCommand(newGuestReceiptVerifyCommand())
 	for i, arg := range os.Args {
 		if arg == "--" {
 			root.SetArgs(os.Args[i+1:])
@@ -62,6 +56,10 @@ func TestAttestedReceiptCompiledCommandStatesAndInputRejection(t *testing.T) {
 		return path
 	}
 	positive := write("positive.dsse", assurance.AssuranceStateVerified, telemetry, telemetry.Integrity.ValidUntil)
+	keyFile := filepath.Join(t.TempDir(), "trusted.pub")
+	if err := os.WriteFile(keyFile, []byte(m.PublicKey()+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	unknownContext := telemetry
 	unknownContext.Integrity.State = assurance.AssuranceStateUnknown
 	unknownContext.Integrity.Reasons = []string{"missing scheduled heartbeat"}
@@ -77,23 +75,60 @@ func TestAttestedReceiptCompiledCommandStatesAndInputRejection(t *testing.T) {
 	}{
 		{positive, 0, assurance.AssuranceStateVerified}, {unknown, 2, assurance.AssuranceStateUnknown}, {failed, 3, assurance.AssuranceStateFailed}, {expired, 2, assurance.AssuranceStateUnknown},
 	} {
-		stdout, stderr, code := attestedSubprocess(t, "--receipt-file", test.path, "--public-key", m.PublicKey(), "--json")
-		if code != test.code || !strings.Contains(stderr, "signature valid") {
-			t.Fatalf("CLI result %d want %d: stdout=%s stderr=%s", code, test.code, stdout, stderr)
+		for _, key := range []string{m.PublicKey(), keyFile} {
+			stdout, stderr, code := attestedSubprocess(t, "--receipt-file", test.path, "--public-key", key, "--json")
+			if code != test.code || !strings.Contains(stderr, "signature valid") || strings.Contains(stderr, "Error:") || strings.Count(stderr, "signature valid") != 1 {
+				t.Fatalf("CLI result %d want %d: stdout=%s stderr=%s", code, test.code, stdout, stderr)
+			}
+			var result receipts.AttestedReceiptVerification
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatalf("stdout mixed result and status: %v %s", err, stdout)
+			}
+			if result.EffectiveState != test.state || !strings.Contains(result.Scope, "not independently reverified") {
+				t.Fatalf("CLI result lost assessment/scope: %+v", result)
+			}
 		}
-		var result receipts.AttestedReceiptVerification
-		if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-			t.Fatalf("stdout mixed result and status: %v %s", err, stdout)
+	}
+	root := NewRootCommand()
+	var reusedOut, reusedErr bytes.Buffer
+	root.SetOut(&reusedOut)
+	root.SetErr(&reusedErr)
+	for _, test := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"--receipt-file", unknown, "--public-key", m.PublicKey()}, 2},
+		{[]string{"--receipt-file", positive, "--public-key", strings.Repeat("z", 64)}, 1},
+		{[]string{"--receipt-file", failed, "--public-key", m.PublicKey()}, 3},
+		{[]string{"--public-keey", m.PublicKey()}, 1},
+	} {
+		reusedOut.Reset()
+		reusedErr.Reset()
+		root.SetArgs(append([]string{"assurance", "receipt", "verify-attested"}, test.args...))
+		err := root.ExecuteContext(t.Context())
+		code := commandExitCode(err)
+		if code != test.code {
+			t.Fatalf("reused command exit %d, want %d: %q", code, test.code, reusedErr.String())
 		}
-		if result.EffectiveState != test.state || !strings.Contains(result.Scope, "not independently reverified") {
-			t.Fatalf("CLI result lost assessment/scope: %+v", result)
+		if code == 2 || code == 3 {
+			if !strings.Contains(reusedErr.String(), "signature valid") || strings.Contains(reusedErr.String(), "Error:") {
+				t.Fatalf("reused command mislabeled assessment: %d %q", code, reusedErr.String())
+			}
+		} else if code != 1 || !strings.Contains(reusedErr.String(), "Error:") || reusedOut.Len() != 0 {
+			t.Fatalf("reused command suppressed genuine error: %d %q %q", code, reusedOut.String(), reusedErr.String())
 		}
+	}
+	stdout, stderr, code := attestedSubprocess(t, "--help")
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "--public-key") || !strings.Contains(stdout, "key file") || strings.Contains(stdout, "--server") || strings.Contains(stdout, "--config") || strings.Contains(stdout, "Global Flags:") {
+		t.Fatalf("standalone help advertises rejected flags or omits key-file input: %d %q %q", code, stdout, stderr)
 	}
 	for _, args := range [][]string{
 		{"--receipt-file", positive, "--public-keey", m.PublicKey()},
-		{"--receipt-file", "/must-not-be-opened", "--public-key", "not-a-key"},
+		{"--receipt-file", "/must-not-be-opened", "--public-key", strings.Repeat("z", 64)},
 		{"--receipt-file", positive, "--public-key", m.PublicKey(), "--expected-authority", "invalid"},
 		{"--config", "/must-not-be-opened", "--receipt-file", positive, "--public-key", m.PublicKey()},
+		{"--receipt-file", "/must-not-be-opened", "--public-key", "/must-not-be-opened.pub", "--expected-authority", "invalid"},
+		{"--server", "invalid", "--receipt-file", positive, "--public-key", keyFile},
 	} {
 		stdout, stderr, code := attestedSubprocess(t, args...)
 		if code != 1 || stdout != "" || strings.Contains(stderr, "no such file") {
@@ -103,11 +138,32 @@ func TestAttestedReceiptCompiledCommandStatesAndInputRejection(t *testing.T) {
 			t.Fatal("unknown flag omitted correction guidance")
 		}
 	}
+	badKeyFile := filepath.Join(t.TempDir(), "bad.pub")
+	for _, raw := range [][]byte{[]byte("not a public key"), bytes.Repeat([]byte("a"), 4097)} {
+		if err := os.WriteFile(badKeyFile, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, code := attestedSubprocess(t, "--receipt-file", "/receipt-must-not-be-opened", "--public-key", badKeyFile)
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "Error:") || strings.Contains(stderr, "receipt-must-not-be-opened") {
+			t.Fatalf("bad key file reached receipt or lost error: %d %q %q", code, stdout, stderr)
+		}
+	}
+	other, err := receipts.NewReceiptManager(assurance.AuthorityRef{Scheme: "local", Subject: "wrong-test-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(badKeyFile, []byte(other.PublicKey()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code = attestedSubprocess(t, "--receipt-file", positive, "--public-key", badKeyFile)
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "Error:") {
+		t.Fatalf("wrong key file was not a run failure: %d %q %q", code, stdout, stderr)
+	}
 	oversized := filepath.Join(t.TempDir(), "oversized.dsse")
 	if err := os.WriteFile(oversized, bytes.Repeat([]byte("x"), (2<<20)+1), 0600); err != nil {
 		t.Fatal(err)
 	}
-	stdout, _, code := attestedSubprocess(t, "--receipt-file", oversized, "--public-key", m.PublicKey())
+	stdout, _, code = attestedSubprocess(t, "--receipt-file", oversized, "--public-key", m.PublicKey())
 	if code != 1 || stdout != "" {
 		t.Fatal("oversized artifact produced a verification result")
 	}

@@ -51,6 +51,14 @@ func TestActualCLIReceiptLookupHonorsBudgetAndConfinement(t *testing.T) {
 	if err := os.WriteFile(standalone, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
+	publicKeyFile := filepath.Join(directory, "trusted.pub")
+	if err := os.WriteFile(publicKeyFile, []byte(signer.PublicKey()+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	keyFileOutput, keyFileErr := exec.CommandContext(t.Context(), binary, "assurance", "receipt", "verify", "--receipt-file", standalone, "--public-key", publicKeyFile).CombinedOutput()
+	if keyFileErr != nil || !bytes.Contains(keyFileOutput, []byte("[VERIFIED]")) {
+		t.Fatalf("legacy key-file verification failed: %v %s", keyFileErr, keyFileOutput)
+	}
 	verify := func(want int, contains string, args ...string) []byte {
 		t.Helper()
 		args = append([]string{"assurance", "receipt", "verify", "--public-key", signer.PublicKey()}, args...)

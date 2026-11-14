@@ -71,8 +71,7 @@ protected telemetry keys, or independent measurement authority.
 
 ## Explicit CLI
 
-The command constructor is `newGuestReceiptVerifyCommand()`. Its production
-registration under `assurance receipt` is intentionally owned by root integration:
+Verify a saved receipt with a public key supplied from trusted custody:
 
 ```text
 oskal assurance receipt verify-attested \
@@ -82,14 +81,19 @@ oskal assurance receipt verify-attested \
 ```
 
 `--expected-authority <exact-URI-claim>` is optional. The public key flag accepts
-hexadecimal key bytes, not a key path or a key discovered beside the receipt.
-Every local flag/trust input is validated before receipt-file I/O. Standalone
+64 hexadecimal characters or an explicit path to a regular file containing that
+hexadecimal key (at most 4 KiB). The file may end with whitespace; its location
+does not establish trust, and no adjacent key is discovered automatically.
+Flag syntax and authority scope are checked before key-file I/O; key bytes are
+validated before receipt-file I/O. Standalone
 verification bypasses ambient application configuration and rejects explicitly
 supplied inherited backend/config flags. Unknown flags include correction
 guidance. Input must be a regular file containing at most 2 MiB; the DSSE profile
 additionally bounds its decoded payload to one MiB.
 
-Results go to stdout; operational assessment status and errors go to stderr.
+Results go to stdout; assessment status and execution errors go to stderr.
+Valid UNKNOWN/FAILED assessments retain their distinct exit codes without an
+`Error:` prefix. Invalid signatures, inputs and unreadable files remain errors.
 JSON separates `signatureStatus`, `signedState` and `effectiveState`, retains the
 full authenticated body and includes the explicit verification scope:
 quote, enrollment policy, source identity, TLS binding, telemetry-record
