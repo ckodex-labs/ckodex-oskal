@@ -169,6 +169,7 @@ func (s *Session) Challenge(now time.Time) (Challenge, error) {
 	if err := s.checkTime(now); err != nil {
 		return Challenge{}, err
 	}
+	now = s.lastTime
 	if s.challenge != nil || s.verifying {
 		return Challenge{}, fmt.Errorf("a challenge is already pending; answer it before requesting another")
 	}
@@ -467,7 +468,16 @@ func (s *Session) checkTime(now time.Time) error {
 	if s.fault != "" {
 		return ErrSessionClosed
 	}
-	if now.IsZero() || now.Before(s.lastTime) || !now.Before(s.opened.Add(24*time.Hour)) {
+	if now.IsZero() {
+		return s.fail("session requires verifier time; establish a fresh session after clock diagnosis")
+	}
+	// All lifecycle times are locally captured. Another callback can reach the
+	// lock first, so preserve its later time rather than creating a false fault.
+	// The heartbeat's separately signed SampledAt is never normalized here.
+	if now.Before(s.lastTime) {
+		now = s.lastTime
+	}
+	if !now.Before(s.opened.Add(24 * time.Hour)) {
 		return s.fail("session clock or lifetime is invalid; establish a fresh session")
 	}
 	s.lastTime = now
