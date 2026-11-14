@@ -63,7 +63,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if len(config.TLS.Certificates) == 0 && config.TLS.GetClientCertificate == nil {
 		return nil, fmt.Errorf("client mutual TLS identity is required")
 	}
-	if err := config.Enrollment.Policy.Validate(); err != nil {
+	if err := config.Enrollment.Validate(); err != nil {
 		return nil, err
 	}
 	if err := config.Receipt.validate(); err != nil {

@@ -53,7 +53,7 @@ func NewServer(config ServerConfig) (*Server, error) {
 	if config.EnrollmentID == "" || len(config.EnrollmentID) > 128 || strings.TrimSpace(config.EnrollmentID) != config.EnrollmentID {
 		return nil, fmt.Errorf("one exact outside enrollment ID is required")
 	}
-	if err := config.Enrollment.Policy.Validate(); err != nil {
+	if err := config.Enrollment.Validate(); err != nil {
 		return nil, err
 	}
 	if err := config.Receipt.validate(); err != nil {
@@ -466,11 +466,10 @@ func (r *serverSession) quote(q *telemetryv1.QuoteResponse) error {
 }
 func (r *serverSession) publication(accepted *guest.AcceptedRecord, reason string) (guest.Publication, error) {
 	now := time.Now().UTC()
-	integrity, err := r.session.Snapshot(now)
+	integrity, standing, quoteDigest, err := r.session.View(now)
 	if err != nil {
 		return guest.Publication{}, err
 	}
-	standing, quoteDigest := r.session.Standing()
 	r.material.Lock()
 	defer r.material.Unlock()
 	challenge, report, proof, rejected := r.admittedChallenge, r.report, r.proof, r.rejected
