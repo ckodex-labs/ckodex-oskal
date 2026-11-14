@@ -52,7 +52,7 @@ func ReadWitness(ctx context.Context, enrollment Enrollment, grant RoleGrant) (o
 			out.Availability, out.Reason = Unknown, err.Error()
 		}
 	}()
-	if err = validateEnrollment(enrollment); err != nil {
+	if err = enrollment.Validate(); err != nil {
 		return out, err
 	}
 	deadline, ok := ctx.Deadline()
@@ -167,6 +167,9 @@ func ReadWitness(ctx context.Context, enrollment Enrollment, grant RoleGrant) (o
 	out.Availability = Observed
 	return out, nil
 }
+
+// Validate checks the enrolled native contract without accessing the kernel.
+func (e Enrollment) Validate() error { return validateEnrollment(e) }
 
 func validateEnrollment(e Enrollment) error {
 	if !validDigest(e.Digest) || !validUUID(e.BootID) || !validUUID(e.PodUID) || e.SensorPID < 1 || e.ProcessStartTicks == 0 || !filepath.IsAbs(e.MapRoot) || filepath.Clean(e.MapRoot) != e.MapRoot || e.MapRoot == "/" || e.MaxPossibleCPUs < 1 || e.MaxPossibleCPUs > 256 || e.MaxThrottleEntries < 1 || e.MaxThrottleEntries > 1024 {
