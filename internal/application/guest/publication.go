@@ -49,6 +49,7 @@ type Sample struct {
 	SampledAt      time.Time
 	Counters       []assurance.TelemetryLossCounter
 	Observations   []Observation
+	HealthEvidence []Observation
 }
 
 // Sampler owns source I/O and bounded batching. A failed sample fences the client

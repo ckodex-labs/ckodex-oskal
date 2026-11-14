@@ -92,6 +92,7 @@ type Record struct {
 	PreviousDigest string                           `json:"previousDigest"`
 	Counters       []assurance.TelemetryLossCounter `json:"counters"`
 	Observations   []Observation                    `json:"observations"`
+	HealthEvidence []Observation                    `json:"healthEvidence,omitempty"`
 }
 
 type AcceptedRecord struct {
@@ -364,12 +365,17 @@ func (s *Session) decodeRecord(ctx context.Context, raw []byte) (Record, error) 
 	if err := signedrecords.DecodeJSON(payload, &record, MaxRecordBytes); err != nil {
 		return Record{}, fmt.Errorf("heartbeat payload invalid: %w", err)
 	}
-	if record.Version != 1 || len(record.Observations) > MaxEventsPerRecord {
+	if record.Version != 1 || len(record.Observations) > MaxEventsPerRecord || len(record.HealthEvidence) > 1 {
 		return Record{}, fmt.Errorf("heartbeat version or observation count is outside its bounds")
 	}
 	for _, observation := range record.Observations {
 		if observation.MediaType != "application/vnd.tetragon.event+json" || len(observation.Payload) == 0 || len(observation.Payload) > 32<<10 {
 			return Record{}, fmt.Errorf("observation requires bounded raw Tetragon JSON; split the batch before retrying in a fresh session")
+		}
+	}
+	for _, evidence := range record.HealthEvidence {
+		if evidence.MediaType != "application/vnd.oskal.tetragon-health.v1+json" || len(evidence.Payload) == 0 || len(evidence.Payload) > 512<<10 {
+			return Record{}, fmt.Errorf("health evidence requires 1..524288 bytes of the declared Tetragon measurement record")
 		}
 	}
 	if err := ctx.Err(); err != nil {

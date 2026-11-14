@@ -37,6 +37,10 @@ func clonePublication(p guest.Publication) guest.Publication {
 		for i := range copy.Record.Observations {
 			copy.Record.Observations[i].Payload = bytes.Clone(copy.Record.Observations[i].Payload)
 		}
+		copy.Record.HealthEvidence = slices.Clone(copy.Record.HealthEvidence)
+		for i := range copy.Record.HealthEvidence {
+			copy.Record.HealthEvidence[i].Payload = bytes.Clone(copy.Record.HealthEvidence[i].Payload)
+		}
 		copy.Integrity.Caveats = slices.Clone(copy.Integrity.Caveats)
 		copy.Integrity.Reasons = slices.Clone(copy.Integrity.Reasons)
 		copy.Integrity.Gaps = slices.Clone(copy.Integrity.Gaps)

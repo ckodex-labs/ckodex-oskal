@@ -477,7 +477,7 @@ func (r *clientSession) heartbeat(ctx context.Context, sample guest.Sample, now 
 		return nil, err
 	}
 	slot := uint64(now.Sub(r.standing.StartedAt) / r.owner.config.Enrollment.Policy.HeartbeatInterval)
-	record := guest.Record{Version: 1, SessionID: r.session, SourceInstance: sample.SourceInstance, Sequence: r.sequence + 1, Slot: slot, SampledAt: sample.SampledAt, PreviousDigest: r.previous, Counters: sample.Counters, Observations: sample.Observations}
+	record := guest.Record{Version: 1, SessionID: r.session, SourceInstance: sample.SourceInstance, Sequence: r.sequence + 1, Slot: slot, SampledAt: sample.SampledAt, PreviousDigest: r.previous, Counters: sample.Counters, Observations: sample.Observations, HealthEvidence: sample.HealthEvidence}
 	payload, err := guest.EncodeRecord(record)
 	if err != nil {
 		return nil, err
@@ -488,6 +488,7 @@ func (r *clientSession) heartbeat(ctx context.Context, sample guest.Sample, now 
 	}
 	digest := assurance.ComputeDigest(raw)
 	record.Observations = nil
+	record.HealthEvidence = nil
 	record.Counters = nil
 	r.records = append(r.records, submittedRecord{digest: digest, sent: now, record: record})
 	if len(r.records) > 32 {
@@ -584,7 +585,7 @@ func (r *clientSession) receipt(ctx context.Context, raw []byte, now time.Time) 
 
 // Check allocations before JSON expands binary observation payloads into base64.
 func sampleBounds(s guest.Sample) error {
-	if len(s.Counters) > assurance.MaxTelemetrySignals || len(s.Observations) > guest.MaxEventsPerRecord {
+	if len(s.Counters) > assurance.MaxTelemetrySignals || len(s.Observations) > guest.MaxEventsPerRecord || len(s.HealthEvidence) > 1 {
 		return fmt.Errorf("sample batch exceeds count limits")
 	}
 	total := 0
@@ -599,6 +600,12 @@ func sampleBounds(s guest.Sample) error {
 			return fmt.Errorf("observation exceeds limit")
 		}
 		total += len(event.MediaType) + ((len(event.Payload)+2)/3)*4 + 256
+	}
+	for _, evidence := range s.HealthEvidence {
+		if evidence.MediaType != "application/vnd.oskal.tetragon-health.v1+json" || len(evidence.Payload) == 0 || len(evidence.Payload) > 512<<10 {
+			return fmt.Errorf("sample health evidence must contain a bounded actual Tetragon measurement record")
+		}
+		total += len(evidence.MediaType) + ((len(evidence.Payload)+2)/3)*4 + 256
 	}
 	if total > guest.MaxRecordBytes-8192 {
 		return fmt.Errorf("sample batch exceeds signed payload capacity")

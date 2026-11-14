@@ -15,6 +15,8 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +76,15 @@ func TestRealGuestStreamArchivesUnknownAndIndependentSilence(t *testing.T) {
 		t.Fatal(err)
 	}
 	directory := t.TempDir()
+	if retained := os.Getenv("OSKAL_TPM_EVIDENCE_DIR"); retained != "" {
+		if err := os.MkdirAll(retained, 0700); err != nil {
+			t.Fatal(err)
+		}
+		directory, err = os.MkdirTemp(retained, "guest-stream-archive-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	archive, err := storage.NewFilesystemEvidenceRepository(directory)
 	if err != nil {
 		t.Fatal(err)
@@ -226,7 +237,36 @@ func TestRealGuestStreamArchivesUnknownAndIndependentSilence(t *testing.T) {
 	if _, err := reopened.VerifyIntegrity(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if os.Getenv("OSKAL_TPM_EVIDENCE_DIR") != "" {
+		for name, raw := range map[string][]byte{"initial-receipt.dsse.json": initialRaw, "terminal-receipt.dsse.json": terminalRaw, "receipt-signing.pub": []byte(manager.PublicKey() + "\n")} {
+			writePublicProof(t, filepath.Join(directory, name), raw)
+		}
+		t.Logf("retained public receipt proof: %s; pinned recorder key: %s", directory, manager.PublicKey())
+	}
 	t.Logf("real TLS1.3/exporter + swtpm quote + closed TCP API -> signed UNKNOWN; independent silence -> fenced UNKNOWN; reopened %d archive objects with exact original report and both receipts", len(items))
+}
+
+func writePublicProof(t *testing.T, path string, raw []byte) {
+	t.Helper()
+	file, err := os.CreateTemp(filepath.Dir(path), ".public-proof-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Remove(file.Name()) }()
+	if _, err := file.Write(raw); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(file.Name(), path); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func streamTLS(t *testing.T) (*tls.Config, *tls.Config) {
