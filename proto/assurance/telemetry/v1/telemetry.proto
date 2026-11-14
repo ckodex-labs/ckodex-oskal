@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package assurance.telemetry.v1;
+
+option go_package = "github.com/ckodex-labs/ckodex-oskal/proto/assurance/telemetry/v1;telemetryv1";
+
+import "google/protobuf/timestamp.proto";
+
+// GuestTelemetryService admits one export key on one actual TLS connection.
+// Successful framing is not admission: the application verifies every quote,
+// signed record, source generation, and fixed heartbeat deadline.
+service GuestTelemetryService {
+  rpc Stream(stream StreamRequest) returns (stream StreamResponse);
+}
+
+message Hello {
+  string enrollment_id = 1;
+  bytes export_public_key = 2;
+}
+
+message QuoteResponse {
+  string challenge_id = 1;
+  bytes attestation_report = 2;
+  bytes signed_export_key_proof = 3;
+}
+
+message StreamRequest {
+  oneof payload {
+    Hello hello = 1;
+    QuoteResponse quote = 2;
+    // Complete DSSE envelope, including signed raw observations and health.
+    bytes signed_heartbeat = 3;
+  }
+}
+
+message Challenge {
+  uint32 version = 1;
+  string session_id = 2;
+  string challenge_id = 3;
+  bytes nonce = 4;
+  string enrollment_digest = 5;
+  google.protobuf.Timestamp issued_at = 6;
+  google.protobuf.Timestamp expires_at = 7;
+}
+
+message Admission {
+  string session_id = 1;
+  google.protobuf.Timestamp heartbeat_start = 2;
+  google.protobuf.Timestamp attestation_expires_at = 3;
+  string root_kind = 4;
+  string root_label = 5;
+  repeated string caveats = 6;
+}
+
+message StreamResponse {
+  oneof payload {
+    Challenge challenge = 1;
+    Admission admission = 2;
+    // Acknowledgment contains the verifier-signed full-body control receipt.
+    // The producer must verify it under an independently enrolled verifier key.
+    bytes signed_receipt = 3;
+  }
+}
