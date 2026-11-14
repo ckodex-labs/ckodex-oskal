@@ -567,6 +567,7 @@ and projects defensible results into standard OSCAL artifacts.`,
 	verifyReceiptCmd.Flags().StringVar(&verifyReceiptFile, "receipt-file", "", "Explicit standalone ControlReceipt JSON file, at most 64 KiB")
 	verifyReceiptCmd.Flags().StringVar(&verifyPublicKey, "public-key", "", "Ed25519 public key hex or path to .pub file")
 	receiptCmd.AddCommand(verifyReceiptCmd)
+	receiptCmd.AddCommand(newGuestReceiptVerifyCommand())
 
 	recordCmd := newRecordCommand()
 	exportCmd := newExportCommand()
