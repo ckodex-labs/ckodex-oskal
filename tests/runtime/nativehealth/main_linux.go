@@ -22,6 +22,7 @@ import (
 	"github.com/ckodex-labs/ckodex-oskal/core/assurance"
 	"github.com/ckodex-labs/ckodex-oskal/internal/adapters/tetragonhealth"
 	"github.com/ckodex-labs/ckodex-oskal/internal/signedrecords"
+	"golang.org/x/sys/unix"
 )
 
 type input struct {
@@ -122,13 +123,21 @@ func inspect(pid int, podUID, root string) (inventory, error) {
 	return out, nil
 }
 
-func read(path string) (tetragonhealth.KernelWitness, error) {
+func readInput(path string) (input, error) {
 	raw, err := boundedFile(path, 64<<10)
 	if err != nil {
-		return tetragonhealth.KernelWitness{Availability: tetragonhealth.Unknown}, err
+		return input{}, err
 	}
 	var in input
 	if err := signedrecords.DecodeJSON(raw, &in, 64<<10); err != nil {
+		return input{}, err
+	}
+	return in, nil
+}
+
+func read(path string) (tetragonhealth.KernelWitness, error) {
+	in, err := readInput(path)
+	if err != nil {
 		return tetragonhealth.KernelWitness{Availability: tetragonhealth.Unknown}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -136,8 +145,50 @@ func read(path string) (tetragonhealth.KernelWitness, error) {
 	return tetragonhealth.ReadWitness(ctx, in.Enrollment, in.Grant)
 }
 
+type credentialTransition struct {
+	Before           tetragonhealth.KernelWitness `json:"before"`
+	CredentialsAfter tetragonhealth.Credentials   `json:"credentialsAfter"`
+	After            tetragonhealth.KernelWitness `json:"after"`
+}
+
+// transition changes only this disposable process. It never rewrites the old
+// grant, so the next real witness must recheck the changed OS credentials.
+func transition(path string) (credentialTransition, error) {
+	var out credentialTransition
+	in, err := readInput(path)
+	if err != nil {
+		return out, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	out.Before, err = tetragonhealth.ReadWitness(ctx, in.Enrollment, in.Grant)
+	cancel()
+	if err != nil {
+		return out, err
+	}
+	if out.Before.Availability != tetragonhealth.Observed {
+		return out, fmt.Errorf("credential transition requires an observed initial witness")
+	}
+	if err := unix.Setgroups([]int{}); err != nil {
+		return out, err
+	}
+	if err := unix.Setresgid(65532, 65532, 65532); err != nil {
+		return out, err
+	}
+	if err := unix.Setresuid(65532, 65532, 65532); err != nil {
+		return out, err
+	}
+	out.CredentialsAfter, err = tetragonhealth.CurrentCredentials()
+	if err != nil {
+		return out, err
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out.After, err = tetragonhealth.ReadWitness(ctx, in.Enrollment, in.Grant)
+	return out, err
+}
+
 func run() (any, error) {
-	mode := flag.String("mode", "", "inventory, credentials, or read; no mutation mode")
+	mode := flag.String("mode", "", "inventory, credentials, read, or process-local credential-transition")
 	pid := flag.Int("sensor-pid", 0, "actual sensor PID in this proc namespace")
 	podUID := flag.String("pod-uid", "", "externally observed sensor Pod UID")
 	root := flag.String("map-root", "", "explicit pinned BPF map root")
@@ -152,6 +203,8 @@ func run() (any, error) {
 		return tetragonhealth.CurrentCredentials()
 	case "read":
 		return read(*path)
+	case "credential-transition":
+		return transition(*path)
 	default:
 		return nil, fmt.Errorf("mode must be inventory, credentials, or read")
 	}

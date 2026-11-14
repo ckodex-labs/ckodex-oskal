@@ -116,11 +116,15 @@ decoder, and invokes the production `ReadWitness` with a five-second deadline.
 The enclosing operator must authenticate and authorize that input before calling
 the helper. No signature or external authority is invented by the local CLI.
 Errors retain the returned UNKNOWN witness in machine-readable output and exit 1.
-The helper creates no maps, programs, grants, mounts, or counters and does not
-change process capabilities or namespaces.
+The inventory/read modes create no maps, programs, grants, mounts, or counters
+and do not change process credentials or namespaces. A separately authorized,
+explicit `credential-transition` mode was subsequently added to lower only its
+disposable process's UID/GID after a successful witness and verify rejection of
+the unchanged old grant.
 
-The actual Linux arm64 build and Linux-target lint passed. Native BPF inventory
-and witness execution remain unperformed because the retained node could not
-start. Compilation is not native sensor proof. The prepared binary is
+At this initial checkpoint, Linux arm64 build and Linux-target lint passed,
+while native inventory and witness execution were unperformed. The linked
+resumed proof records later actual execution and final cleanup. Compilation
+alone was not native sensor proof. The prepared binary is
 `/private/tmp/oskal-p2-native-proof/nativehealth`; it must not be used against an
 unrelated or production node to bypass the pending environment authorization.

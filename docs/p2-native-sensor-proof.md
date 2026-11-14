@@ -7,10 +7,11 @@ The user explicitly authorized temporarily changing Colima's shared
 `fs.inotify.max_user_instances` from 128 to 1024 and restoring 128 after stopping
 the owned test node. The value was checked as 128 before the change at
 `2026-11-14T01:08:19.748008Z`; the write and confirming read succeeded. Restoration
-is still pending while the node remains available for root-agent integration.
-The original failed node and its causal preflight evidence remain retained.
+was completed after the final owned node stopped: the value was rechecked as
+1024, restored to 128 with exit 0 at `2026-11-14T02:26:47.852518Z`, and independently
+read back as 128. The original failed node and all later nodes remain retained.
 
-## Running source identity
+## Profile b source identity (now stopped)
 
 | Field | Observed value |
 | --- | --- |
@@ -88,7 +89,106 @@ Private evidence is under `/private/tmp/oskal-p2-native-proof`: the explicit
 
 The operator supplied these test grants under the explicit task authority. Their
 digests identify inputs; they are not signed production delegations. The current
-source and maps must be rechecked before later use. A signed end-to-end receipt,
-source replacement, restrictive seccomp, and positive loss under bounded flood
-remain separate acceptance gates. The shared Colima kernel is not an isolated
-hardware trust boundary.
+source and maps must be rechecked before later use. A signed end-to-end receipt
+and initial healthy full-window acceptance remain separate gates. The later
+experiments below extend this native evidence. The shared Colima kernel is not
+an isolated hardware trust boundary.
+
+## Process-local enforcement experiments
+
+The Go `nativefilter` helper emits an arm64 classic-BPF filter for the installed
+`setpriv` loader. The read profile permits only `BPF_OBJ_GET`,
+`BPF_MAP_LOOKUP_ELEM`, `BPF_MAP_GET_NEXT_KEY`, and `BPF_OBJ_GET_INFO_BY_FD` among
+BPF commands. Other system calls remain allowed; this is not a complete
+production seccomp profile. The filter checks the architecture.
+
+With UID 0, all capabilities zero, NoNewPrivs 1, and this actual seccomp mode-2
+filter, the witness read all 1,792 loss cells as zero in 3.795 ms. A second
+process with the same grant and credentials but a deny-BPF filter returned
+UNKNOWN and `open read-only tg_stats_map: operation not permitted`, exit 1,
+without loss values. The test did not attempt map writes.
+
+The separate `credential-transition` mode first obtained an actual OBSERVED
+witness using the original root grant, then changed only its disposable process
+to UID/GID 65532. Its next request using the unchanged old grant returned UNKNOWN
+with `operation-time credentials differ from read grant`, exit 1. The actual
+after-transition credentials were UID/FSUID 65532 and effective capabilities zero.
+This proves rechecking after a process-identity change, not prevention of an
+arbitrary credential race inside a kernel syscall.
+
+Evidence: `witness-seccomp-readonly.json`, `witness-seccomp-deny.json`,
+`security-seccomp-readonly.log`, and `witness-credential-transition.json`.
+UID 0 still has access to root-owned files and sockets without capabilities;
+these results do not establish minimal overall authority or a production sandbox.
+
+## Bounded workload results
+
+The Go `nativeflood` workload executes only `/bin/true`, with 64 workers and a
+30-second context deadline. Its owned Pod has a 2 CPU/128 MiB limit, no service
+account token, no capabilities, a read-only root, and no privilege escalation.
+The binary bounds duration and fan-out; the container runtime enforces CPU/RAM.
+It never writes counters, disconnects collectors, or changes sensor buffers.
+
+Profile b used the default queue. It completed 63,750 executions with zero
+workload errors from `01:39:27.138379062Z` through `01:39:57.147612874Z`.
+Kernel, observer-ring, observer-queue, and map-error loss deltas were zero.
+Actual positive loss was **NOT_DEMONSTRATED** within that authorized budget.
+
+The root agent then authorized a distinct, explicitly **loss-sensitive demo**
+profile c. The previous node was stopped and retained. Profile c uses the
+vendor's Kind `/proc` to `/procHost` mapping, with the mount read-only, and
+Tetragon's documented `rb-queue-size=4`; kernel ring settings were unchanged.
+This is not a production default or performance recommendation.
+
+Profile c's source was `oskal-p2-native/tetragon-pdq56`, Pod UID
+`8c52ec7e-ff4d-43cf-91d3-d07a3e1bb662`, PID 3681, start ticks 24604703, on
+`oskal-p2-native-20261113-c-control-plane`. Map IDs were 18163 (kernel stats),
+18157/18159 (exec/map stats), 18158/18160 (joined/map stats), and 18171/18170
+(rate options/rates). These identities stayed unchanged across the workload.
+
+Profile c completed 66,640 executions with zero errors from
+`2026-11-14T02:04:38.875132435Z` through `02:05:08.876923216Z`.
+Its live cgroup showed `cpu.max=200000 100000`, `memory.max=134217728`,
+`memory.current=9883648`, and `pids.current=37` at `02:04:53.979534Z`.
+This memory sample is not a peak-memory measurement.
+
+`tetragon_observer_ringbuf_queue_events_lost_total` increased from 3 to 19,887:
+**19,884 upstream observer-queue record drops**. The upstream implementation
+increments it when its real channel is full and a received record is dropped.
+Kernel-loss cells, perf/ring errors, and map errors remained zero, with no active
+throttle. Families are not summed into a unique-event count; the metric does not
+attribute every dropped record to this workload.
+
+Full-window assurance was already UNKNOWN due to terminal pod metadata failures.
+This does not demonstrate a PASS-to-UNKNOWN transition. Raw before/after metrics,
+witnesses, workload output, runtime limits, and source identities remain under
+`profile-c/`; `native-evidence-manifest.json` records artifact digests.
+
+## Attribution blocker and final verdict
+
+The proper host-proc mapping did not eliminate terminal `pod_info` failures.
+No metric was stripped or relabeled to obtain a passing window. A read-only
+preflight of the official CRI/cgidmap alternative found that the actual Kind CRI
+cgroup path exists under the node's `/sys/fs/cgroup` and is absent under
+`/procHost/1/root/sys/fs/cgroup`. The v1.8 resolver joins the CRI path with that
+latter VM-host root. Failed mapping can leave container identity empty, so reduced
+metadata-failure counts would not establish correct attribution.
+
+The CRI/cgidmap Helm change was **not applied**. No custom remapping, upstream
+fork, counter reset, scope relaxation, or additional flood was attempted. Native
+primitives and actual upstream queue loss are demonstrated; initial healthy
+complete-window acceptance remains **PARTIALLY VERIFIED / NOT MET**.
+
+## Final cleanup
+
+Only the owned profile-c node was stopped. The stop command exited 0; the node
+exited 137 after the 30-second stop deadline at `02:26:47.209597496Z`, with PID 0,
+Running false, and OOMKilled false. This is not a graceful-shutdown claim. Its
+Kubernetes API was unavailable afterward, exit 1. The shared inotify setting was
+then restored and read back as 128. Fourteen non-OSKAL container states matched
+immediately before and after this cleanup.
+
+`inotify-restoration.json` records values, timestamps, command results, node state,
+API check, and the container-state comparison. Nodes, volumes, kubeconfigs, logs,
+and proof files remain retained. The profile-c kubeconfig is
+`/private/tmp/oskal-p2-native-proof/kubeconfig-c` and references the stopped cluster.
