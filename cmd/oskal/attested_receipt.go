@@ -21,7 +21,7 @@ func newGuestReceiptVerifyCommand() *cobra.Command {
 	var outputJSON bool
 	command := &cobra.Command{
 		Use:          "verify-attested",
-		Short:        "Verify the full v2 attested receipt signature under an explicitly pinned key",
+		Short:        "Check a saved security result using a public key you trust",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
