@@ -90,13 +90,14 @@ func nilPort(value any) bool {
 // ServerConfig admits one outside-enrolled source. Its Publisher must have one
 // server owner for its lifetime; restart with a new publisher and no live state.
 type ServerConfig struct {
-	EnrollmentID string
-	Enrollment   guest.Enrollment
-	Verifier     ports.AttestationVerifier
-	Publisher    guest.Publisher
-	Receipt      ReceiptScope
-	TLS          *tls.Config
-	Limits       Limits
+	EnrollmentID      string
+	ExpectedExportKey ed25519.PublicKey
+	Enrollment        guest.Enrollment
+	Verifier          ports.AttestationVerifier
+	Publisher         guest.Publisher
+	Receipt           ReceiptScope
+	TLS               *tls.Config
+	Limits            Limits
 }
 
 func validateTLS(config *tls.Config, server bool) error {

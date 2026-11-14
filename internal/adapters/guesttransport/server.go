@@ -53,6 +53,9 @@ func NewServer(config ServerConfig) (*Server, error) {
 	if config.EnrollmentID == "" || len(config.EnrollmentID) > 128 || strings.TrimSpace(config.EnrollmentID) != config.EnrollmentID {
 		return nil, fmt.Errorf("one exact outside enrollment ID is required")
 	}
+	if len(config.ExpectedExportKey) != 0 && len(config.ExpectedExportKey) != 32 {
+		return nil, fmt.Errorf("outside-registered export key must contain exactly 32 bytes")
+	}
 	if err := config.Enrollment.Validate(); err != nil {
 		return nil, err
 	}
@@ -69,6 +72,7 @@ func NewServer(config ServerConfig) (*Server, error) {
 		return nil, err
 	}
 	config.Enrollment = cloneEnrollment(config.Enrollment)
+	config.ExpectedExportKey = bytes.Clone(config.ExpectedExportKey)
 	config.Receipt = cloneScope(config.Receipt)
 	config.TLS = config.TLS.Clone()
 	server := &Server{config: config, streams: make(chan struct{}, config.Limits.MaxStreams), workers: make(chan struct{}, config.Limits.MaxStreams*2), state: ServerStatus{Mode: "AWAITING_ATTESTATION", Integrity: assurance.AssuranceStateUnknown, Standing: assurance.AssuranceStateUnknown}}
@@ -242,6 +246,9 @@ func (s *Server) Stream(stream telemetryv1.GuestTelemetryService_StreamServer) e
 	hello := first.frame.GetHello()
 	if hello == nil || len(first.frame.ProtoReflect().GetUnknown()) != 0 || len(hello.ProtoReflect().GetUnknown()) != 0 || hello.EnrollmentId != s.config.EnrollmentID || len(hello.ExportPublicKey) != 32 {
 		return status.Error(codes.InvalidArgument, "first frame must identify the exact enrollment and export public key")
+	}
+	if len(s.config.ExpectedExportKey) != 0 && !bytes.Equal(hello.ExportPublicKey, s.config.ExpectedExportKey) {
+		return status.Error(codes.PermissionDenied, "export key differs from outside registration; re-enroll the intended exporter")
 	}
 	s.mu.Lock()
 	if s.state.Mode == "SAFE_HOLD" || s.state.Active {
