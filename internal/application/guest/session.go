@@ -91,20 +91,23 @@ type AcceptedRecord struct {
 // challenge consumption, accepted records, and independent watchdog snapshots.
 // It owns no goroutines, hidden retry, or unbounded queue.
 type Session struct {
-	mu          sync.Mutex
-	enrollment  Enrollment
-	verifier    ports.AttestationVerifier
-	key         ed25519.PublicKey
-	channel     [32]byte
-	id          string
-	opened      time.Time
-	lastTime    time.Time
-	challenge   *Challenge
-	standing    *assurance.TelemetryAttestation
-	quoteDigest string
-	previous    *assurance.TelemetryHeartbeat
-	current     *assurance.TelemetryHeartbeat
-	fault       string
+	mu                   sync.Mutex
+	enrollment           Enrollment
+	verifier             ports.AttestationVerifier
+	key                  ed25519.PublicKey
+	channel              [32]byte
+	id                   string
+	opened               time.Time
+	lastTime             time.Time
+	challenge            *Challenge
+	verifying            bool
+	verificationDeadline time.Time
+	readingRecord        bool
+	standing             *assurance.TelemetryAttestation
+	quoteDigest          string
+	previous             *assurance.TelemetryHeartbeat
+	current              *assurance.TelemetryHeartbeat
+	fault                string
 }
 
 func NewSession(e Enrollment, verifier ports.AttestationVerifier, key ed25519.PublicKey, channel [32]byte, now time.Time) (*Session, error) {
@@ -166,7 +169,7 @@ func (s *Session) Challenge(now time.Time) (Challenge, error) {
 	if err := s.checkTime(now); err != nil {
 		return Challenge{}, err
 	}
-	if s.challenge != nil {
+	if s.challenge != nil || s.verifying {
 		return Challenge{}, fmt.Errorf("a challenge is already pending; answer it before requesting another")
 	}
 	if s.standing != nil && now.Before(s.standing.VerifiedAt.Add(s.enrollment.ReattestInterval)) {
@@ -185,49 +188,63 @@ func (s *Session) AcceptQuote(ctx context.Context, challengeID string, report, p
 	if ctx == nil {
 		return assurance.TelemetryAttestation{}, fmt.Errorf("quote verification requires a bounded operation context")
 	}
+	c, err := func() (Challenge, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.checkTime(received); err != nil {
+			return Challenge{}, err
+		}
+		if s.challenge == nil || s.verifying {
+			return Challenge{}, s.fail("no pending verifier challenge; replay refused")
+		}
+		challenge := *s.challenge
+		s.challenge = nil // consume before verification, including malformed attempts
+		if challengeID != challenge.ID || !received.Before(challenge.ExpiresAt) || received.Before(challenge.IssuedAt) {
+			return Challenge{}, s.fail("challenge mismatch or expiry; obtain a new session")
+		}
+		if len(report) == 0 || len(report) > MaxReportBytes || len(proof) > 16384 {
+			return Challenge{}, s.fail("quote report or export-key proof exceeds its bounded encoding")
+		}
+		if err := ctx.Err(); err != nil {
+			return Challenge{}, s.fail("quote verification canceled: " + err.Error())
+		}
+		s.verifying, s.verificationDeadline = true, challenge.ExpiresAt
+		return challenge, nil
+	}()
+	if err != nil {
+		return assurance.TelemetryAttestation{}, err
+	}
+	report, proof = bytes.Clone(report), bytes.Clone(proof)
+	// No external verifier or payload parser runs under the lifecycle mutex.
+	// The independent watchdog can fence a stalled verification at its deadline.
+	ctx, cancel := context.WithTimeout(ctx, s.enrollment.ChallengeTTL)
+	defer cancel()
+	environment, verificationErr := s.verifyQuote(ctx, c, report, proof)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.verifying, s.verificationDeadline = false, time.Time{}
+	if s.fault != "" {
+		return assurance.TelemetryAttestation{}, ErrSessionClosed
+	}
+	if verificationErr != nil {
+		return assurance.TelemetryAttestation{}, s.fail(verificationErr.Error())
+	}
+	if err := ctx.Err(); err != nil {
+		return assurance.TelemetryAttestation{}, s.fail("quote verification canceled: " + err.Error())
+	}
+	// A watchdog may have advanced verifier time during offline cryptography.
+	// That can shorten acceptance, never extend the issued nonce's expiry.
+	if s.lastTime.After(received) {
+		received = s.lastTime
+	}
 	if err := s.checkTime(received); err != nil {
 		return assurance.TelemetryAttestation{}, err
 	}
-	if s.challenge == nil {
-		return assurance.TelemetryAttestation{}, s.fail("no pending verifier challenge; replay refused")
-	}
-	c := *s.challenge
-	s.challenge = nil // consume before verification, including malformed attempts
-	if challengeID != c.ID || !received.Before(c.ExpiresAt) || received.Before(c.IssuedAt) {
-		return assurance.TelemetryAttestation{}, s.fail("challenge mismatch or expiry; obtain a new session")
-	}
-	if len(report) == 0 || len(report) > MaxReportBytes {
-		return assurance.TelemetryAttestation{}, s.fail("quote report exceeds its bounded encoding")
-	}
-	if err := ctx.Err(); err != nil {
-		return assurance.TelemetryAttestation{}, s.fail("quote verification canceled: " + err.Error())
-	}
-	qualification, err := Qualification(c, s.key, s.channel)
-	if err != nil {
-		return assurance.TelemetryAttestation{}, s.fail(err.Error())
-	}
-	environment, err := s.verifier.VerifyAttestation(ctx, report, qualification)
-	if err != nil {
-		return assurance.TelemetryAttestation{}, s.fail("attestation rejected: " + err.Error())
+	if !received.Before(c.ExpiresAt) {
+		return assurance.TelemetryAttestation{}, s.fail("quote verification exceeded the verifier challenge deadline")
 	}
 	if environment.MeasurementDigest != s.enrollment.MeasurementDigest || environment.RootKind != s.enrollment.RootKind || environment.RootLabel != s.enrollment.RootLabel {
 		return assurance.TelemetryAttestation{}, s.fail("verified environment differs from outside-enrolled measurement or root policy")
-	}
-	decoded, err := signedrecords.Verify(ctx, proof, QuoteProofPayloadType, s.key, 4096)
-	if err != nil {
-		return assurance.TelemetryAttestation{}, s.fail("export-key proof rejected: " + err.Error())
-	}
-	var p QuoteProof
-	if err := signedrecords.DecodeJSON(decoded, &p, 4096); err != nil {
-		return assurance.TelemetryAttestation{}, s.fail("export-key proof invalid: " + err.Error())
-	}
-	if p.Version != 1 || p.SessionID != s.id || p.ChallengeID != c.ID || p.ReportDigest != assurance.ComputeDigest(report) {
-		return assurance.TelemetryAttestation{}, s.fail("export-key proof does not bind this session, challenge, and quote")
-	}
-	if err := ctx.Err(); err != nil {
-		return assurance.TelemetryAttestation{}, s.fail("quote verification canceled: " + err.Error())
 	}
 	started := received
 	if s.standing != nil {
@@ -240,39 +257,76 @@ func (s *Session) AcceptQuote(ctx context.Context, challengeID string, report, p
 	return a, nil
 }
 
+func (s *Session) verifyQuote(ctx context.Context, c Challenge, report, proof []byte) (assurance.AttestedEnvironment, error) {
+	qualification, err := Qualification(c, s.key, s.channel)
+	if err != nil {
+		return assurance.AttestedEnvironment{}, err
+	}
+	environment, err := s.verifier.VerifyAttestation(ctx, report, qualification)
+	if err != nil {
+		return assurance.AttestedEnvironment{}, fmt.Errorf("attestation rejected: %w", err)
+	}
+	decoded, err := signedrecords.Verify(ctx, proof, QuoteProofPayloadType, s.key, 4096)
+	if err != nil {
+		return assurance.AttestedEnvironment{}, fmt.Errorf("export-key proof rejected: %w", err)
+	}
+	var p QuoteProof
+	if err := signedrecords.DecodeJSON(decoded, &p, 4096); err != nil {
+		return assurance.AttestedEnvironment{}, fmt.Errorf("export-key proof invalid: %w", err)
+	}
+	if p.Version != 1 || p.SessionID != s.id || p.ChallengeID != c.ID || p.ReportDigest != assurance.ComputeDigest(report) {
+		return assurance.AttestedEnvironment{}, fmt.Errorf("export-key proof does not bind this session, challenge, and quote")
+	}
+	if err := ctx.Err(); err != nil {
+		return assurance.AttestedEnvironment{}, fmt.Errorf("quote verification canceled: %w", err)
+	}
+	return environment, nil
+}
+
 func (s *Session) AcceptRecord(ctx context.Context, raw []byte, received time.Time) (AcceptedRecord, error) {
 	if ctx == nil {
 		return AcceptedRecord{}, fmt.Errorf("heartbeat verification requires an operation context")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.checkTime(received); err != nil {
+	if err := func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.checkTime(received); err != nil {
+			return err
+		}
+		if s.standing == nil {
+			return s.fail("no verified attestation; submit a valid quote before telemetry")
+		}
+		if s.readingRecord {
+			return s.fail("concurrent heartbeat processing violates the ordered stream; establish a fresh session")
+		}
+		if len(raw) == 0 || len(raw) > signedrecords.MaxEnvelopeBytes {
+			return s.fail("signed heartbeat exceeds its bounded encoding")
+		}
+		s.readingRecord = true
+		return nil
+	}(); err != nil {
 		return AcceptedRecord{}, err
 	}
-	if s.standing == nil {
-		return AcceptedRecord{}, s.fail("no verified attestation; submit a valid quote before telemetry")
+	raw = bytes.Clone(raw)
+	record, verificationErr := s.decodeRecord(ctx, raw)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readingRecord = false
+	if s.fault != "" {
+		return AcceptedRecord{}, ErrSessionClosed
 	}
-	if !received.Before(s.standing.ExpiresAt) {
-		return AcceptedRecord{}, s.fail("attestation expired; re-attest before sending telemetry")
+	if verificationErr != nil {
+		return AcceptedRecord{}, s.fail(verificationErr.Error())
 	}
-	payload, err := signedrecords.Verify(ctx, raw, HeartbeatPayloadType, s.key, MaxRecordBytes)
-	if err != nil {
-		return AcceptedRecord{}, s.fail("heartbeat signature rejected: " + err.Error())
+	commitTime := received
+	if s.lastTime.After(commitTime) {
+		commitTime = s.lastTime
 	}
-	var record Record
-	if err := signedrecords.DecodeJSON(payload, &record, MaxRecordBytes); err != nil {
-		return AcceptedRecord{}, s.fail("heartbeat payload invalid: " + err.Error())
-	}
-	if record.Version != 1 || len(record.Observations) > MaxEventsPerRecord {
-		return AcceptedRecord{}, s.fail("heartbeat version or observation count is outside its bounds")
-	}
-	for _, observation := range record.Observations {
-		if observation.MediaType != "application/vnd.tetragon.event+json" || len(observation.Payload) == 0 || len(observation.Payload) > 32<<10 {
-			return AcceptedRecord{}, s.fail("observation requires bounded raw Tetragon JSON; split the batch before retrying in a fresh session")
-		}
+	if err := s.checkTime(commitTime); err != nil {
+		return AcceptedRecord{}, err
 	}
 	h := assurance.TelemetryHeartbeat{SessionID: record.SessionID, SourceInstance: record.SourceInstance, Sequence: record.Sequence, Slot: record.Slot, SampledAt: record.SampledAt, ReceivedAt: received, Digest: assurance.ComputeDigest(raw), PreviousDigest: record.PreviousDigest, Counters: slices.Clone(record.Counters)}
-	result, err := assurance.EvaluateTelemetryWindow(s.enrollment.Policy, *s.standing, s.current, h, received)
+	result, err := assurance.EvaluateTelemetryWindow(s.enrollment.Policy, *s.standing, s.current, h, commitTime)
 	if err != nil {
 		return AcceptedRecord{}, s.fail("invalid heartbeat facts: " + err.Error())
 	}
@@ -287,7 +341,6 @@ func (s *Session) AcceptRecord(ctx context.Context, raw []byte, received time.Ti
 			return AcceptedRecord{}, s.fail("initial heartbeat must begin sequence 1, slot 0, and an empty chain")
 		}
 	} else if s.current.Sequence == ^uint64(0) || h.Sequence != s.current.Sequence+1 || s.current.Slot == ^uint64(0) || h.Slot != s.current.Slot+1 || h.PreviousDigest != s.current.Digest {
-		// Preserve the observed range for the independently issued UNKNOWN receipt.
 		s.previous, s.current = s.current, &h
 		return AcceptedRecord{}, s.fail("heartbeat sequence, scheduled slot, or signed chain is discontinuous")
 	}
@@ -298,13 +351,42 @@ func (s *Session) AcceptRecord(ctx context.Context, raw []byte, received time.Ti
 	return AcceptedRecord{Record: record, SignedDigest: h.Digest, Integrity: result}, nil
 }
 
+func (s *Session) decodeRecord(ctx context.Context, raw []byte) (Record, error) {
+	payload, err := signedrecords.Verify(ctx, raw, HeartbeatPayloadType, s.key, MaxRecordBytes)
+	if err != nil {
+		return Record{}, fmt.Errorf("heartbeat signature rejected: %w", err)
+	}
+	var record Record
+	if err := signedrecords.DecodeJSON(payload, &record, MaxRecordBytes); err != nil {
+		return Record{}, fmt.Errorf("heartbeat payload invalid: %w", err)
+	}
+	if record.Version != 1 || len(record.Observations) > MaxEventsPerRecord {
+		return Record{}, fmt.Errorf("heartbeat version or observation count is outside its bounds")
+	}
+	for _, observation := range record.Observations {
+		if observation.MediaType != "application/vnd.tetragon.event+json" || len(observation.Payload) == 0 || len(observation.Payload) > 32<<10 {
+			return Record{}, fmt.Errorf("observation requires bounded raw Tetragon JSON; split the batch before retrying in a fresh session")
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return Record{}, fmt.Errorf("heartbeat processing canceled: %w", err)
+	}
+	return record, nil
+}
+
 // Snapshot is the watchdog path. It uses verifier time and does not require a
 // producer response. No heartbeat can extend the agreed fixed schedule.
 func (s *Session) Snapshot(now time.Time) (assurance.TelemetryIntegrity, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if now.IsZero() || now.Before(s.lastTime) {
-		return assurance.TelemetryIntegrity{}, fmt.Errorf("watchdog time moved backwards; inspect the verifier clock before recovery")
+	if now.IsZero() {
+		return assurance.TelemetryIntegrity{State: assurance.AssuranceStateUnknown}, fmt.Errorf("watchdog requires verifier time; inspect its clock before recovery")
+	}
+	// A watchdog can capture time just before another local operation acquires
+	// the mutex. Use that later verified observation rather than treating normal
+	// scheduling as a clock rollback. Producer timestamps never enter this path.
+	if now.Before(s.lastTime) {
+		now = s.lastTime
 	}
 	s.lastTime = now
 	r := assurance.TelemetryIntegrity{State: assurance.AssuranceStateUnknown, SessionID: s.id, RootKind: s.enrollment.RootKind, RootLabel: s.enrollment.RootLabel, Caveats: slices.Clone(s.enrollment.Caveats)}
@@ -317,6 +399,13 @@ func (s *Session) Snapshot(now time.Time) (assurance.TelemetryIntegrity, error) 
 		if r.Recovery == assurance.TelemetryFreshSessionRequired {
 			_ = s.fail("telemetry integrity requires a fresh attested session")
 		}
+		if s.standing.VerifiedAt.After(r.WindowEnd) {
+			r.State = assurance.AssuranceStateUnknown
+			r.Reasons = append(r.Reasons, "fresh attestation requires a new complete heartbeat window")
+		}
+	}
+	if s.verifying && !now.Before(s.verificationDeadline) {
+		_ = s.fail("quote verification exceeded its verifier challenge deadline")
 	}
 	if s.challenge != nil && !now.Before(s.challenge.ExpiresAt) {
 		_ = s.fail("verifier challenge expired; obtain a fresh attested session")
@@ -381,6 +470,9 @@ func (s *Session) checkTime(now time.Time) error {
 		return s.fail("session clock or lifetime is invalid; establish a fresh session")
 	}
 	s.lastTime = now
+	if s.verifying && !now.Before(s.verificationDeadline) {
+		return s.fail("quote verification exceeded its verifier challenge deadline")
+	}
 	if s.challenge != nil && !now.Before(s.challenge.ExpiresAt) {
 		return s.fail("verifier challenge expired; establish a fresh session")
 	}

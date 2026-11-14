@@ -6,6 +6,7 @@ require (
 	github.com/cilium/cilium v1.20.4
 	github.com/cilium/tetragon/api v1.8.0
 	github.com/go-logr/logr v1.4.4
+	github.com/google/go-tpm v0.9.8
 	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
