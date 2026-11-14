@@ -20,18 +20,23 @@ type MetricsReader struct {
 	Limits   Limits
 }
 
-func (r MetricsReader) Read(ctx context.Context) (out MetricsSample, err error) {
-	out = MetricsSample{Contract: ContractVersion, StartedAt: time.Now().UTC()}
-	defer func() { out.CompletedAt = time.Now().UTC() }()
+// Validate checks the endpoint and resource contract without performing I/O.
+func (r MetricsReader) Validate() error {
 	u, err := url.Parse(r.Endpoint)
 	if err != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/metrics" {
-		return out, fmt.Errorf("metrics requires an exact loopback http /metrics endpoint")
+		return fmt.Errorf("metrics requires an exact loopback http /metrics endpoint")
 	}
 	ip, err := netip.ParseAddr(u.Hostname())
 	if err != nil || !ip.IsLoopback() || u.Port() == "" || r.Timeout <= 0 || r.Timeout > 5*time.Second {
-		return out, fmt.Errorf("numeric loopback address, explicit port and timeout within five seconds required")
+		return fmt.Errorf("numeric loopback address, explicit port and timeout within five seconds required")
 	}
-	if err := validateLimits(r.Limits); err != nil {
+	return validateLimits(r.Limits)
+}
+
+func (r MetricsReader) Read(ctx context.Context) (out MetricsSample, err error) {
+	out = MetricsSample{Contract: ContractVersion, StartedAt: time.Now().UTC()}
+	defer func() { out.CompletedAt = time.Now().UTC() }()
+	if err := r.Validate(); err != nil {
 		return out, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
@@ -39,7 +44,7 @@ func (r MetricsReader) Read(ctx context.Context) (out MetricsSample, err error) 
 	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: r.Timeout}).DialContext, DisableKeepAlives: true, DisableCompression: true, MaxResponseHeaderBytes: 16 << 10, ResponseHeaderTimeout: r.Timeout}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: r.Timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.Endpoint, nil)
 	if err != nil {
 		return out, fmt.Errorf("create metrics request: %w", err)
 	}
