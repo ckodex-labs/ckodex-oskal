@@ -45,6 +45,19 @@ type Enrollment struct {
 	ReattestInterval  time.Duration             `json:"reattestInterval"`
 }
 
+func (e Enrollment) Validate() error {
+	if err := e.Policy.Validate(); err != nil {
+		return err
+	}
+	if e.ChallengeTTL < time.Millisecond || e.ChallengeTTL > time.Minute || e.ReattestInterval < e.ChallengeTTL || e.ReattestInterval >= e.Policy.MaxAttestationAge {
+		return fmt.Errorf("challenge TTL must be 1ms..1m; re-attestation must follow its TTL and precede maximum attestation age")
+	}
+	if !digestBytes(e.PolicyDigest) {
+		return fmt.Errorf("outside-enrolled policy digest is required")
+	}
+	return assurance.ValidateTelemetrySource(e.SourceInstance, e.MeasurementDigest, e.RootKind, e.RootLabel, e.Caveats)
+}
+
 type Challenge struct {
 	Version          uint32    `json:"version"`
 	SessionID        string    `json:"sessionID"`
@@ -114,17 +127,7 @@ func NewSession(e Enrollment, verifier ports.AttestationVerifier, key ed25519.Pu
 	if verifier == nil || len(key) != ed25519.PublicKeySize || channel == [32]byte{} || now.IsZero() {
 		return nil, fmt.Errorf("enrolled verifier, Ed25519 export key, actual TLS channel binding, and time are required")
 	}
-	if err := e.Policy.Validate(); err != nil {
-		return nil, err
-	}
-	if e.ChallengeTTL < time.Millisecond || e.ChallengeTTL > time.Minute || e.ReattestInterval < e.ChallengeTTL || e.ReattestInterval >= e.Policy.MaxAttestationAge {
-		return nil, fmt.Errorf("challenge TTL must be 1ms..1m; re-attestation must follow its TTL and precede maximum attestation age")
-	}
-	if !digestBytes(e.PolicyDigest) {
-		return nil, fmt.Errorf("outside-enrolled policy digest is required")
-	}
-	probe := assurance.TelemetryAttestation{SessionID: assurance.ComputeStringDigest("validation"), SourceInstance: e.SourceInstance, MeasurementDigest: e.MeasurementDigest, ExportKeyDigest: assurance.ComputeDigest(key), ChannelDigest: assurance.ComputeDigest(channel[:]), RootKind: e.RootKind, RootLabel: e.RootLabel, Caveats: e.Caveats, StartedAt: now, VerifiedAt: now, ExpiresAt: now.Add(e.Policy.MaxAttestationAge)}
-	if err := probe.Validate(); err != nil {
+	if err := e.Validate(); err != nil {
 		return nil, fmt.Errorf("enrollment: %w", err)
 	}
 	var entropy [32]byte
@@ -380,6 +383,27 @@ func (s *Session) decodeRecord(ctx context.Context, raw []byte) (Record, error) 
 func (s *Session) Snapshot(now time.Time) (assurance.TelemetryIntegrity, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.snapshot(now)
+}
+
+// View snapshots the current decision and its admitted quote atomically. A
+// re-attestation cannot splice a new standing into an older window snapshot.
+func (s *Session) View(now time.Time) (assurance.TelemetryIntegrity, *assurance.TelemetryAttestation, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	integrity, err := s.snapshot(now)
+	if err != nil {
+		return integrity, nil, "", err
+	}
+	if s.standing == nil {
+		return integrity, nil, "", nil
+	}
+	a := *s.standing
+	a.Caveats = slices.Clone(a.Caveats)
+	return integrity, &a, s.quoteDigest, nil
+}
+
+func (s *Session) snapshot(now time.Time) (assurance.TelemetryIntegrity, error) {
 	if now.IsZero() {
 		return assurance.TelemetryIntegrity{State: assurance.AssuranceStateUnknown}, fmt.Errorf("watchdog requires verifier time; inspect its clock before recovery")
 	}
